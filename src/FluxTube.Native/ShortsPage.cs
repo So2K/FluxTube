@@ -615,11 +615,19 @@ public sealed class ShortsPage : IPage
 
         if (_loading) UI.Spinner(panelR.Right - 28, panelR.Y + 20, 7, Th.Sub);
 
-        // Page-level wheel steps shorts unless consumed by volume slider or open comments drawer
-        if (!wheelConsumedByVol && UI.Wheel != 0 && UI.Hover(r) && !(_showComments && UI.Hover(panelR)))
+        // Wheel over the video (even while loading) adjusts volume; wheel outside video (and not in comments/volume) steps Shorts!
+        if (!wheelConsumedByVol && UI.Wheel != 0)
         {
-            Step(UI.Wheel > 0 ? -1 : 1);
-            UI.Wheel = 0;
+            if (UI.Hover(video))
+            {
+                AdjustVolume(UI.Wheel > 0 ? 5 : -5);
+                UI.Wheel = 0;
+            }
+            else if (UI.Hover(r) && !(_showComments && UI.Hover(panelR)))
+            {
+                Step(UI.Wheel > 0 ? -1 : 1);
+                UI.Wheel = 0;
+            }
         }
     }
 

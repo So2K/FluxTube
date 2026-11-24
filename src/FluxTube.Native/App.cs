@@ -533,27 +533,10 @@ internal static unsafe class VideoHost
             case W.WM_MOUSEWHEEL:
             {
                 var delta = (short)((w >> 16) & 0xFFFF) / 120f;
-                // in Shorts: wheel over the bottom OSC bar (or with Shift) adjusts global volume; elsewhere steps to next/prev Short
+                // Wheel over ANY video (normal video or Shorts) ALWAYS adjusts volume!
                 if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp)
                 {
-                    W.RECT rc;
-                    W.GetClientRect(h, &rc);
-                    var pt = new W.POINT { X = W.LoWord(l), Y = W.HiWord(l) };
-                    W.ScreenToClient(h, &pt);
-                    var s = W.GetDpiForWindow(h) / 96f;
-                    if (W.KeyDown(0x10 /*VK_SHIFT*/) || pt.Y > rc.B - (int)(68 * s))
-                    {
-                        sp.AdjustVolume(delta > 0 ? 5 : -5);
-                        return 0;
-                    }
-                    sp.Step(delta > 0 ? -1 : 1);
-                    return 0;
-                }
-                // in whole-page scroll mode, wheel over the video scrolls the watch page so you can read comments
-                if (!Pip.Active && !Shell.IsFullscreen && AppSettings.Current.ScrollWholeWatchPage && Shell.Current is FluxTube.Pages.WatchPage wp)
-                {
-                    UI.ScrollBy(wp.MainScroll, -delta * 110);
-                    App.Invalidate();
+                    sp.AdjustVolume(delta > 0 ? 5 : -5);
                     return 0;
                 }
                 Cmd("keypress", delta > 0 ? "WHEEL_UP" : "WHEEL_DOWN"); // volume
