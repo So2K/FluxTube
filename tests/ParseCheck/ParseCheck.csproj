@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\src\FluxTube\Services\Json.cs" />
+    <Compile Include="..\..\src\FluxTube\Services\InnerTube.cs" />
+    <Compile Include="..\..\src\FluxTube\Services\Paths.cs" />
+    <Compile Include="..\..\src\FluxTube\Services\AppSettings.cs" />
+    <Compile Include="..\..\src\FluxTube\Services\CookieStore.cs" />
+    <Compile Include="..\..\src\FluxTube\Models\VideoItem.cs" />
+  </ItemGroup>
+</Project>

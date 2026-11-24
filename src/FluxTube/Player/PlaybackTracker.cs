@@ -1,0 +1,330 @@
+using FluxTube.Models;
+using FluxTube.Services;
+
+namespace FluxTube.Player;
+
+/// <summary>Starts playback, remembers position per video, skips SponsorBlock segments.</summary>
+public sealed class PlaybackTracker
+{
+    public static PlaybackTracker Instance { get; } = new();
+
+    private readonly MpvPlayer _p = MpvPlayer.Instance;
+    private long _sessionId;
+    private double _lastSavedAt;
+    private double _lastPos;
+    private DateTime _lastSaveTime;
+    private List<Extras.Segment> _segments = [];
+    private readonly HashSet<int> _skipped = [];
+    // every Play gets a number: whatever an older Play left running (link lookups, segment requests) sees a newer
+    // number and drops its result, also when the same video was started again
+    private int _gen;
+    // the player's clock belongs to this session only after its file has loaded and reported a time of its own;
+    // before that it still shows the previous video, and saving it would move this video's resume point
+    private bool _fileLoaded, _timeValid;
+    private double _startPos;
+
+    public VideoItem? Current { get; private set; }
+    public string? CurrentSource { get; private set; }
+    public bool IsLocal { get; private set; }
+    public event Action? CurrentChanged;
+
+    private long _clickAt, _clickAt2;
+    private bool _frameLogged = true;
+    private double Elapsed() => System.Diagnostics.Stopwatch.GetElapsedTime(_clickAt != 0 ? _clickAt : _clickAt2).TotalMilliseconds;
+
+    private PlaybackTracker()
+    {
+        _p.TimeChanged += OnTime;
+        _p.EndOfFile += _ => Save(force: true);
+        _p.FileLoaded += () =>
+        {
+            if (_clickAt != 0) Paths.Log($"ttff {Current?.VideoId}: first frame data {Elapsed():0} ms after click");
+            Retrying = false;
+            _fileLoaded = true;
+            if (_clickAt != 0) _frameLogged = false;
+            _clickAt2 = _clickAt != 0 ? _clickAt : _clickAt2; _clickAt = 0;
+        };
+        _p.LoadFailed += OnLoadFailed;
+        _p.PlaybackStarted += () =>
+        {
+            if (_frameLogged || _clickAt2 == 0) return;
+            _frameLogged = true;
+            Paths.Log($"frame {Current?.VideoId}: picture on screen {System.Diagnostics.Stopwatch.GetElapsedTime(_clickAt2).TotalMilliseconds:0} ms after click");
+        };
+    }
+
+    /// <summary>The last failure is being retried, so the shell leaves the message to us.</summary>
+    public bool Retrying { get; private set; }
+    private string? _retried;
+    private long _retriedAt;
+
+    /// <summary>
+    /// The player could not make sense of what we fed it (a half-written cache file, a link that died mid-stream).
+    /// Forget everything known about this video and start it again from fresh links; if that fails too, say so.
+    /// </summary>
+    private void OnLoadFailed(string msg)
+    {
+        var v = Current;
+        if (v == null || IsLocal) return;
+        var id = v.VideoId;
+        Paths.Log($"load failed {id}: {msg}");
+        // one retry per failure; a second failure right after it is reported, a failure some other day is retried again
+        if (_retried == id && Environment.TickCount64 - _retriedAt < 60_000) { Retrying = false; return; }
+        _retried = id;
+        _retriedAt = Environment.TickCount64;
+        Retrying = true;
+        var src = CurrentSource ?? "home";
+        var gen = _gen;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try { MediaCache.Drop(id); } catch (Exception e) { Paths.Log("drop cache: " + e.Message); }
+            QuickStream.Forget(id);
+            Resolver.Instance.Forget(id);
+            StreamProxy.Instance.Forget(id);
+            UiThread.Post(() =>
+            {
+                if (gen != _gen) return;
+                Paths.Log($"retrying {id} with fresh links");
+                Play(v, src);
+            });
+        });
+    }
+
+    public void Play(VideoItem v, string source)
+    {
+        Flush();
+        var gen = ++_gen;
+        _fileLoaded = _timeValid = false;
+        Current = v;
+        CurrentSource = source;
+        _segments = [];
+        _skipped.Clear();
+        var start = v.IsShort ? 0 : Db.ResumePosition(v.VideoId) ?? 0; // a short always plays from its first frame
+        _startPos = _lastPos = _lastSavedAt = start;
+        _sessionId = Db.StartWatch(v, source);
+        // the new history row carries the resume point from the start: a session that never gets to play keeps it
+        if (start > 0) Db.UpdateWatch(_sessionId, null, null, start, 0, 0);
+        _lastSaveTime = DateTime.UtcNow;
+
+        if (Downloader.Instance.IsDownloaded(v.VideoId, out var local))
+        {
+            IsLocal = true;
+            IsPreview = false;
+            MediaCache.Pinned = null;
+            _p.Load(local!.File!, v.VideoId, start);
+        }
+        else
+        {
+            IsLocal = false;
+            _clickAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            var id = v.VideoId;
+            var quality = AppSettings.Current.PlayerQuality;
+            MediaCache.Pinned = id;
+            IsPreview = false;
+            var ready = Resolver.Instance.TryGet(id);
+            var cached = ready == null ? MediaCache.Find(id, quality) : null;
+            if (ready != null)
+            {
+                // 1. the link was resolved ahead of the click (hover, visible card, related list)
+                LoadFull(ready, v.Title, start, false);
+                Paths.Log($"play {id}: prefetched");
+            }
+            else if (cached != null)
+            {
+                // 2. played before: start from disk right now; a fresh link is only needed for parts not on disk
+                var proxy = StreamProxy.Instance;
+                var s = new StreamInfo(id, proxy.RegisterCached(cached.Video), cached.Audio != null ? proxy.RegisterCached(cached.Audio) : null,
+                    new Dictionary<string, string>(), v.Title, 0, DateTime.UtcNow) { Vitag = cached.Video.Itag, Aitag = cached.Audio?.Itag ?? 0 };
+                LoadFull(s, v.Title, start, false);
+                Paths.Log($"play {id}: from disk cache{(cached.Complete ? " (complete, offline)" : "")}");
+                if (!cached.Complete)
+                    _ = Task.Run(async () =>
+                    {
+                        // a link for the same formats fills the gaps: one direct request, well under a second
+                        StreamInfo? link = null;
+                        try { link = await QuickStream.GetExactAsync(id, s.Vitag, s.Aitag); } catch { }
+                        if (link != null) { Paths.Log($"play {id}: link for the uncached parts ready after {Elapsed():0} ms"); return; }
+                        // those exact formats are not offered any more: take what is (direct request first, yt-dlp last)
+                        // and carry on from the same position
+                        StreamInfo? fresh = null;
+                        try { fresh = await QuickStream.GetAsync(id); } catch { }
+                        if (fresh == null) try { fresh = await Resolver.Instance.GetAsync(id); } catch { }
+                        Paths.Log($"play {id}: cached formats are gone, {(fresh != null ? "switching to current ones" : "no link available")} after {Elapsed():0} ms");
+                        if (fresh == null)
+                        {
+                            UiThread.Post(() => { if (gen == _gen) _p.ShowText("Нет связи с YouTube: доступна только сохранённая часть видео", 5000); });
+                            return;
+                        }
+                        UiThread.Post(() =>
+                        {
+                            if (gen != _gen) return;
+                            LoadFull(fresh, v.Title, _p.TimePos, _p.Paused);
+                        });
+                    });
+            }
+            else
+            {
+                // 3. never opened: one direct player request gives working links (see QuickStream); yt-dlp only if that fails
+                _p.Command("stop");
+                _ = Task.Run(async () =>
+                {
+                    StreamInfo? q = null;
+                    if (AppSettings.Current.QuickStart)
+                        try { q = await QuickStream.GetAsync(id); } catch { }
+                    if (q != null)
+                    {
+                        UiThread.Post(() =>
+                        {
+                            if (gen != _gen) return;
+                            IsPreview = q.Preview;
+                            LoadFull(q, v.Title, start, false);
+                            Paths.Log($"play {id}: started after {Elapsed():0} ms ({(q.Preview ? "beginning only, proper link follows" : "direct link")})");
+                        });
+                        if (!q.Preview) return;
+                        // only the beginning is served by that link: get the proper one for the same formats, the proxy carries on with it
+                        StreamInfo? s = null;
+                        try { s = await Resolver.Instance.GetExactAsync(id, q.Vitag, q.Aitag); } catch { }
+                        var same = s != null;
+                        if (!same) try { s = await Resolver.Instance.GetAsync(id); } catch { }
+                        UiThread.Post(() =>
+                        {
+                            if (gen != _gen) return;
+                            IsPreview = false;
+                            if (same) Paths.Log($"play {id}: proper link after {Elapsed():0} ms, same formats, nothing to switch");
+                            else if (s != null)
+                            {
+                                LoadFull(s, v.Title, _p.TimePos, _p.Paused);
+                                Paths.Log($"play {id}: switched formats after {Elapsed():0} ms");
+                            }
+                            else _p.ShowText("Полная ссылка не получена: видео может остановиться. Обновите страницу (F5).", 6000);
+                            CurrentChanged?.Invoke();
+                        });
+                    }
+                    else
+                    {
+                        StreamInfo? s = null;
+                        try { s = await Resolver.Instance.GetAsync(id); } catch { }
+                        UiThread.Post(() =>
+                        {
+                            if (gen != _gen) return;
+                            if (s != null) LoadFull(s, v.Title, start, false);
+                            else _p.Load(v.Url, id, start); // fallback: mpv's own ytdl hook
+                            Paths.Log($"play {id}: yt-dlp link after {Elapsed():0} ms (no quick start)");
+                        });
+                    }
+                });
+            }
+            Resolver.Instance.MarkWatched(v.VideoId);
+        }
+        if (start > 0) _p.ShowText($"Продолжение с {Fmt.Time(start)}", 2000);
+        CurrentChanged?.Invoke();
+
+        if (AppSettings.Current.SponsorBlock)
+        {
+            var id = v.VideoId;
+            _ = Task.Run(async () =>
+            {
+                var segs = await Extras.SponsorSegmentsAsync(id);
+                UiThread.Post(() => { if (gen == _gen) { _segments = segs; CurrentChanged?.Invoke(); } });
+            });
+        }
+    }
+
+    /// <summary>True while the quick 360p stand-in is on screen and full quality is still on its way.</summary>
+    public bool IsPreview { get; private set; }
+    public IReadOnlyList<Extras.Segment> Segments => _segments;
+    private string? _countedPlay;
+
+    private void LoadFull(StreamInfo s, string? title, double start, bool keepPause)
+    {
+        _p.LoadStream(s, title, start, keepPause);
+        if (_countedPlay != s.VideoId)
+        {
+            _countedPlay = s.VideoId;
+            var q = AppSettings.Current.PlayerQuality;
+            ThreadPool.QueueUserWorkItem(_ => MediaCache.NotePlay(s.VideoId, q, s.Vitag, s.Aitag));
+        }
+    }
+
+    public void PlayFile(DownloadItem d)
+    {
+        var v = new VideoItem { VideoId = d.VideoId ?? d.File ?? d.Url, Title = d.Title, Channel = d.Channel };
+        Flush();
+        ++_gen;
+        _fileLoaded = _timeValid = false;
+        Current = v;
+        CurrentSource = "downloads";
+        IsLocal = true;
+        IsPreview = false;
+        MediaCache.Pinned = null;
+        _segments = [];
+        _skipped.Clear();
+        var start = d.VideoId != null ? Db.ResumePosition(d.VideoId) ?? 0 : 0;
+        _startPos = _lastPos = _lastSavedAt = start;
+        _sessionId = d.VideoId != null ? Db.StartWatch(v, "downloads") : 0;
+        if (_sessionId != 0 && start > 0) Db.UpdateWatch(_sessionId, null, null, start, 0, 0);
+        _lastSaveTime = DateTime.UtcNow;
+        _p.Load(d.File!, d.VideoId, start);
+        CurrentChanged?.Invoke();
+    }
+
+    public void UpdateMeta(string? title, string? channel)
+    {
+        if (_sessionId == 0) return;
+        Db.UpdateWatch(_sessionId, title, channel, _timeValid ? _p.TimePos : _startPos, _timeValid ? _p.Duration : 0, 0);
+    }
+
+    private void OnTime(double t)
+    {
+        if (!_fileLoaded) return; // still the previous video's clock
+        _timeValid = true;
+        if (_segments.Count > 0)
+        {
+            for (int i = 0; i < _segments.Count; i++)
+            {
+                var s = _segments[i];
+                if (t >= s.Start && t < s.End - 0.5 && !_skipped.Contains(i))
+                {
+                    _skipped.Add(i);
+                    Save(force: true);  // what was watched up to the segment counts, the jump over it does not
+                    _lastPos = s.End;
+                    _p.SeekAbsolute(s.End);
+                    _p.ShowText("Пропущено: " + Extras.CategoryName(s.Category), 2200);
+                    break;
+                }
+            }
+        }
+        if (Math.Abs(t - _lastSavedAt) >= 5) Save(force: false);
+    }
+
+    private void Save(bool force)
+    {
+        if (_sessionId == 0 || !_timeValid) return;
+        var pos = _p.TimePos;
+        var now = DateTime.UtcNow;
+        var delta = Math.Max(0, Math.Min(pos - _lastPos, (now - _lastSaveTime).TotalSeconds * 4 + 1));
+        if (!force && Math.Abs(pos - _lastSavedAt) < 5) return;
+        Db.UpdateWatch(_sessionId, null, null, pos, _p.Duration, delta);
+        _lastSavedAt = pos;
+        _lastPos = pos;
+        _lastSaveTime = now;
+    }
+
+    public void Flush()
+    {
+        Save(force: true);
+        _sessionId = 0;
+    }
+
+    public void Stop()
+    {
+        Flush();
+        ++_gen;
+        _fileLoaded = _timeValid = false;
+        _p.Stop();
+        MediaCache.Pinned = null;
+        _countedPlay = null;
+        Current = null;
+        CurrentChanged?.Invoke();
+    }
+}

@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The fast shell: one Win32 window, Direct2D on a flip swap chain, no UI framework. Compiled ahead of time. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>FluxTube</RootNamespace>
+    <AssemblyName>FluxTube</AssemblyName>
+    <Platforms>x64</Platforms>
+    <Platform>x64</Platform>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <PublishAot>true</PublishAot>
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <NoWarn>$(NoWarn);CA1416;IL2026;IL3050</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="6" />
+    <RuntimeHostConfigurationOption Include="System.GC.RetainVM" Value="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.20" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- services, models and the mpv layer are shared with the WinUI helper -->
+    <Compile Include="..\FluxTube\Services\Json.cs;..\FluxTube\Services\Paths.cs;..\FluxTube\Services\AppSettings.cs;..\FluxTube\Services\CookieStore.cs;..\FluxTube\Services\InnerTube.cs;..\FluxTube\Services\YtDlp.cs;..\FluxTube\Services\Db.cs;..\FluxTube\Services\Downloader.cs;..\FluxTube\Services\Extras.cs;..\FluxTube\Services\Resolver.cs;..\FluxTube\Services\UiThread.cs;..\FluxTube\Services\MediaCache.cs;..\FluxTube\Services\QuickStream.cs" LinkBase="Shared\Services" />
+    <Compile Include="..\FluxTube\Models\*.cs" LinkBase="Shared\Models" />
+    <Compile Include="..\FluxTube\Player\MpvNative.cs;..\FluxTube\Player\MpvPlayer.cs;..\FluxTube\Player\PlaybackTracker.cs;..\FluxTube\Player\StreamProxy.cs;..\FluxTube\Player\Win32.cs" LinkBase="Shared\Player" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\third_party\mpv\libmpv-2.dll" Link="libmpv-2.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\third_party\dl\yt-dlp.exe" Link="tools\yt-dlp.exe" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\FluxTube\Assets\ytsrv.py" Link="Assets\ytsrv.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\FluxTube\Assets\mpv\**" LinkBase="Assets\mpv" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

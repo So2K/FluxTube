@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="FluxTube.Pages.SettingsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <UserControl.Resources>
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="#14FFFFFF" />
+            <Setter Property="CornerRadius" Value="12" />
+            <Setter Property="Padding" Value="18,14" />
+        </Style>
+        <Style x:Key="Section" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,14,0,2" />
+        </Style>
+    </UserControl.Resources>
+    <ScrollViewer Padding="24,8,24,40">
+        <StackPanel Spacing="8" MaxWidth="900" HorizontalAlignment="Left">
+            <TextBlock Text="Настройки" FontSize="26" FontWeight="SemiBold" />
+
+            <TextBlock Text="Аккаунт" Style="{StaticResource Section}" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="10">
+                    <TextBlock x:Name="AccountState" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="LoginBtn" Content="Войти в YouTube" Style="{StaticResource AccentButtonStyle}" Click="Login_Click" />
+                        <Button Content="Импорт cookies.txt" Click="ImportCookies_Click" />
+                        <Button Content="Взять вход из Firefox" Click="Firefox_Click" />
+                        <Button x:Name="LogoutBtn" Content="Выйти" Click="Logout_Click" />
+                    </StackPanel>
+                    <TextBlock Foreground="{StaticResource SubtleTextBrush}" TextWrapping="Wrap" FontSize="12.5"
+                               Text="Пароль вводится только на странице Google внутри окна входа. FluxTube хранит лишь cookies сессии локально (%LOCALAPPDATA%\FluxTube) и использует их так же, как браузер." />
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="Плеер" Style="{StaticResource Section}" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="10">
+                    <ComboBox x:Name="PlayQuality" Header="Качество по умолчанию" Width="260" SelectionChanged="Any_Changed" />
+                    <ToggleSwitch x:Name="SponsorBlock" Header="SponsorBlock: пропускать рекламные вставки авторов" Toggled="Any_Changed" />
+                    <StackPanel Orientation="Horizontal" Spacing="16">
+                        <CheckBox x:Name="SbSponsor" Content="Спонсоры" Click="Any_Changed" />
+                        <CheckBox x:Name="SbSelfpromo" Content="Самореклама" Click="Any_Changed" />
+                        <CheckBox x:Name="SbInteraction" Content="«Подпишись»" Click="Any_Changed" />
+                        <CheckBox x:Name="SbIntro" Content="Заставки" Click="Any_Changed" />
+                        <CheckBox x:Name="SbOutro" Content="Концовки" Click="Any_Changed" />
+                    </StackPanel>
+                    <ToggleSwitch x:Name="Dislikes" Header="Показывать дизлайки (Return YouTube Dislike)" Toggled="Any_Changed" />
+                    <ToggleSwitch x:Name="HideShorts" Header="Скрывать Shorts в лентах" Toggled="Any_Changed" />
+                    <ToggleSwitch x:Name="MarkWatched" Header="Отмечать просмотренное в истории YouTube (рекомендации учитывают просмотры)" Toggled="Any_Changed" />
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="Загрузки" Style="{StaticResource Section}" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="10">
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="DownloadDir" Header="Папка" LostFocus="Any_Changed" />
+                        <Button Grid.Column="1" Content="Выбрать…" VerticalAlignment="Bottom" Click="PickDir_Click" />
+                    </Grid>
+                    <ComboBox x:Name="DownloadQuality" Header="Качество по умолчанию" Width="260" SelectionChanged="Any_Changed" />
+                    <ToggleSwitch x:Name="SbOnDownload" Header="Вырезать спонсорские вставки из скачанных файлов" Toggled="Any_Changed" />
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="Сеть и маскировка" Style="{StaticResource Section}" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel Spacing="10">
+                    <ToggleSwitch x:Name="Impersonate" Header="TLS и HTTP/2-отпечаток настоящего Chrome для потоков (curl_cffi)" Toggled="Any_Changed" />
+                    <TextBox x:Name="Proxy" Header="Прокси (пусто = системный). Пример: socks5://127.0.0.1:1080" LostFocus="Any_Changed" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBox x:Name="Hl" Header="Язык интерфейса YouTube" Width="160" LostFocus="Any_Changed" />
+                        <TextBox x:Name="Gl" Header="Регион (пусто = по IP)" Width="160" LostFocus="Any_Changed" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="10">
+                        <Button x:Name="UpdateBtn" Content="Обновить yt-dlp сейчас" Click="Update_Click" />
+                        <TextBlock x:Name="YtDlpVersion" VerticalAlignment="Center" Foreground="{StaticResource SubtleTextBrush}" />
+                    </StackPanel>
+                    <TextBlock Foreground="{StaticResource SubtleTextBrush}" TextWrapping="Wrap" FontSize="12.5"
+                               Text="Запросы к YouTube идут как из Chrome: те же заголовки, тот же клиент сайта, тот же visitor id и подпись SAPISIDHASH. Потоки берёт yt-dlp, он обновляется сам раз в сутки, поэтому изменения YouTube обычно чинятся без новой версии FluxTube." />
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="Данные" Style="{StaticResource Section}" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Content="Открыть папку данных" Click="OpenData_Click" />
+                    <Button Content="Открыть лог" Click="OpenLog_Click" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

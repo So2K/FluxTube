@@ -1,0 +1,414 @@
+using System.Numerics;
+using Vortice.DCommon;
+using Vortice.Direct2D1;
+using Vortice.Direct3D;
+using Vortice.Direct3D11;
+using Vortice.DirectWrite;
+using Vortice.DXGI;
+using Vortice.Mathematics;
+using D2DAlpha = Vortice.DCommon.AlphaMode;
+using Win = FluxTube.W;
+
+namespace FluxTube;
+
+public readonly record struct R(float X, float Y, float W, float H)
+{
+    public float Right => X + W;
+    public float Bottom => Y + H;
+    public bool Contains(float px, float py) => px >= X && px < Right && py >= Y && py < Bottom;
+    public R Inset(float dx, float dy) => new(X + dx, Y + dy, W - 2 * dx, H - 2 * dy);
+    public R Inset(float d) => Inset(d, d);
+    public R Intersect(R o)
+    {
+        float x = MathF.Max(X, o.X), y = MathF.Max(Y, o.Y);
+        float r = MathF.Min(Right, o.Right), b = MathF.Min(Bottom, o.Bottom);
+        return new(x, y, MathF.Max(0, r - x), MathF.Max(0, b - y));
+    }
+}
+
+/// <summary>Shaped, measured text ready to draw. Cached, so a steady frame shapes nothing.</summary>
+public sealed class TextRun
+{
+    public IDWriteTextLayout? Layout;   // null: shaping deferred to a later frame, W/H are estimates
+    public float W, H;
+    public int Lines;
+    public bool Color;                  // has emoji: only then pay for colour-glyph analysis when drawing
+}
+
+/// <summary>
+/// Direct2D on a flip swap chain. Everything is drawn in one pass, only when something changed.
+/// Coordinates are DIPs; the device context carries the monitor DPI.
+/// </summary>
+public static unsafe class Gfx
+{
+    private static ID3D11Device _dev = null!;
+    private static IDXGISwapChain1 _swap = null!;
+    private static ID2D1Factory1 _d2dFactory = null!;
+    private static ID2D1Device _d2dDev = null!;
+    private static ID2D1Bitmap1? _target;
+    private static IDWriteFactory _dw = null!;
+    private static nint _hwnd;
+
+    public static ID2D1DeviceContext DC { get; private set; } = null!;
+    public static float Scale { get; private set; } = 1;
+    public static int PxW { get; private set; }
+    public static int PxH { get; private set; }
+    public static float W => PxW / Scale;
+    public static float H => PxH / Scale;
+    public static long Frame { get; private set; }
+    /// <summary>CPU time Direct2D needed to turn the last frame's draw calls into GPU commands.</summary>
+    public static double FlushMs { get; private set; }
+    public static int TextCreated, TextDraws;
+    public static double TextDrawMs;
+    /// <summary>Bumped when the GPU device was recreated: every device bitmap made before is dead.</summary>
+    public static int DeviceGeneration { get; private set; }
+
+    public const string Font = "Segoe UI";
+    public static string IconFont = "Segoe Fluent Icons";
+
+    public static void Init(nint hwnd)
+    {
+        _hwnd = hwnd;
+        _dw = DWrite.DWriteCreateFactory<IDWriteFactory>(Vortice.DirectWrite.FactoryType.Shared);
+        _d2dFactory = D2D1.D2D1CreateFactory<ID2D1Factory1>(Vortice.Direct2D1.FactoryType.SingleThreaded);
+        using (var fonts = _dw.GetSystemFontCollection(false))
+            if (!fonts.FindFamilyName(IconFont, out _)) IconFont = "Segoe MDL2 Assets";
+        CreateDevice();
+    }
+
+    private static void CreateDevice()
+    {
+        var hr = D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, [Vortice.Direct3D.FeatureLevel.Level_11_0, Vortice.Direct3D.FeatureLevel.Level_10_0], out var dev);
+        if (hr.Failure || dev == null)
+            D3D11.D3D11CreateDevice(null, DriverType.Warp, DeviceCreationFlags.BgraSupport, [Vortice.Direct3D.FeatureLevel.Level_11_0], out dev).CheckError();
+        _dev = dev!;
+        using var dxgiDev = _dev.QueryInterface<IDXGIDevice>();
+        using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory2>();
+        Win.RECT rc;
+        Win.GetClientRect(_hwnd, &rc);
+        PxW = Math.Max(1, rc.R - rc.L);
+        PxH = Math.Max(1, rc.B - rc.T);
+        var desc = new SwapChainDescription1
+        {
+            Width = (uint)PxW, Height = (uint)PxH, Format = Format.B8G8R8A8_UNorm,
+            SampleDescription = new SampleDescription(1, 0), BufferUsage = Usage.RenderTargetOutput, BufferCount = 2,
+            Scaling = Scaling.None, SwapEffect = SwapEffect.FlipDiscard, AlphaMode = Vortice.DXGI.AlphaMode.Ignore,
+        };
+        _swap = factory.CreateSwapChainForHwnd(_dev, _hwnd, desc);
+        factory.MakeWindowAssociation(_hwnd, WindowAssociationFlags.IgnoreAll);
+        _d2dDev = _d2dFactory.CreateDevice(dxgiDev);
+        DC = _d2dDev.CreateDeviceContext(DeviceContextOptions.None);
+        DC.TextAntialiasMode = Vortice.Direct2D1.TextAntialiasMode.Grayscale;
+        CreateTarget();
+        DeviceGeneration++;
+    }
+
+    private static float TargetScale() => (Win.GetDpiForWindow(_hwnd) / 96f) * Math.Clamp(Services.AppSettings.Current.UiScale, 0.7f, 1.5f);
+
+    private static void CreateTarget()
+    {
+        Scale = TargetScale();
+        using var surface = _swap.GetBuffer<IDXGISurface>(0);
+        var props = new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Ignore), 96 * Scale, 96 * Scale,
+            BitmapOptions.Target | BitmapOptions.CannotDraw);
+        _target = DC.CreateBitmapFromDxgiSurface(surface, props);
+        DC.Target = _target;
+        DC.SetDpi(96 * Scale, 96 * Scale);
+    }
+
+    public static void ApplyScale()
+    {
+        if (DC == null || _hwnd == 0) return;
+        var next = TargetScale();
+        if (MathF.Abs(next - Scale) < 0.001f) return;
+        DC.Target = null;
+        _target?.Dispose();
+        _target = null;
+        ClearTextCache();
+        CreateTarget();
+        App.Invalidate();
+    }
+
+    public static void Resize()
+    {
+        Win.RECT rc;
+        Win.GetClientRect(_hwnd, &rc);
+        int w = Math.Max(1, rc.R - rc.L), h = Math.Max(1, rc.B - rc.T);
+        var scale = TargetScale();
+        if (w == PxW && h == PxH && MathF.Abs(scale - Scale) < 0.001f) return;
+        PxW = w; PxH = h;
+        DC.Target = null;
+        _target?.Dispose();
+        _target = null;
+        _swap.ResizeBuffers(0, (uint)w, (uint)h, Format.Unknown, SwapChainFlags.None).CheckError();
+        if (MathF.Abs(scale - Scale) >= 0.001f) ClearTextCache();
+        CreateTarget();
+    }
+
+    public static void Begin(uint clear)
+    {
+        Frame++;
+        DC.BeginDraw();
+        DC.Clear(ToColor(clear));
+        _clipDepth = 0;
+        _shapeMs = 0;
+        while (_prewarmed.TryDequeue(out var p))
+        {
+            if (_cur.ContainsKey(p.Key) || _prev.ContainsKey(p.Key)) p.Run.Layout?.Dispose();
+            else _cur[p.Key] = p.Run;
+        }
+    }
+
+    /// <summary>False when the device was lost and recreated; the caller redraws.</summary>
+    public static bool End()
+    {
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        var hr = DC.EndDraw();
+        FlushMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+        if (hr.Success) hr = _swap.Present(1, PresentFlags.None);
+        if (hr.Failure && (hr.Code == unchecked((int)0x887A0005) || hr.Code == unchecked((int)0x887A0007) || hr.Code == unchecked((int)0x8899000C)))
+        {
+            Services.Paths.Log($"gpu device lost 0x{hr.Code:X}, recreating");
+            foreach (var b in _brushes.Values) b.Dispose();
+            _brushes.Clear();
+            DC.Target = null; _target?.Dispose(); DC.Dispose(); _d2dDev.Dispose(); _swap.Dispose(); _dev.Dispose();
+            CreateDevice();
+            return false;
+        }
+        TrimTextCache();
+        return true;
+    }
+
+    // ---------------- colours and shapes ----------------
+
+    private static readonly Dictionary<uint, ID2D1SolidColorBrush> _brushes = new();
+
+    private static Color4 ToColor(uint argb)
+        => new(((argb >> 16) & 255) / 255f, ((argb >> 8) & 255) / 255f, (argb & 255) / 255f, (argb >> 24) / 255f);
+
+    public static ID2D1SolidColorBrush Brush(uint argb)
+    {
+        if (_brushes.TryGetValue(argb, out var b)) return b;
+        // fades and theme changes produce thousands of one-off colours: start over instead of keeping them all
+        // (a brush already handed to a draw call stays alive until that call is flushed)
+        if (_brushes.Count > 3000)
+        {
+            foreach (var old in _brushes.Values) old.Dispose();
+            _brushes.Clear();
+        }
+        return _brushes[argb] = DC.CreateSolidColorBrush(ToColor(argb));
+    }
+
+    /// <summary>Same colour with alpha scaled by a (0..1).</summary>
+    public static uint Fade(uint argb, float a)
+        => (argb & 0x00FFFFFF) | ((uint)Math.Clamp((argb >> 24) * a, 0, 255) << 24);
+
+    public static float Snap(float v) => MathF.Round(v * Scale) / Scale;
+
+    private static Vortice.RawRectF Raw(R r) => new(r.X, r.Y, r.Right, r.Bottom);
+
+    public static void Fill(R r, uint color) => DC.FillRectangle(Raw(r), Brush(color));
+
+    public static void Fill(R r, uint color, float radius)
+    {
+        if (radius <= 0) { Fill(r, color); return; }
+        var rr = new RoundedRectangle { Rect = Raw(r), RadiusX = radius, RadiusY = radius };
+        DC.FillRoundedRectangle(rr, Brush(color));
+    }
+
+    public static void Stroke(R r, uint color, float radius, float width = 1)
+    {
+        var rr = new RoundedRectangle { Rect = Raw(r.Inset(width / 2)), RadiusX = radius, RadiusY = radius };
+        DC.DrawRoundedRectangle(rr, Brush(color), width);
+    }
+
+    public static void Circle(float cx, float cy, float radius, uint color)
+        => DC.FillEllipse(new Ellipse(new Vector2(cx, cy), radius, radius), Brush(color));
+
+    public static void Image(ID2D1Bitmap bmp, R dest, float opacity = 1)
+        => DC.DrawBitmap(bmp, Raw(dest), opacity, BitmapInterpolationMode.Linear, null);
+
+    /// <summary>GPU bitmap straight from memory: raw premultiplied BGRA, or BC1 blocks (an eighth of the video memory).</summary>
+    public static ID2D1Bitmap1 CreateBitmap(byte* data, int w, int h, bool bc1)
+        => DC.CreateBitmap(new SizeI(w, h), (nint)data, (uint)(bc1 ? w / 4 * 8 : w * 4),
+            new BitmapProperties1(new PixelFormat(bc1 ? Format.BC1_UNorm : Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.None));
+
+    /// <summary>Linear blend of two colours, t = 0 gives a.</summary>
+    public static uint Mix(uint a, uint b, float t)
+    {
+        t = Math.Clamp(t, 0, 1);
+        uint C(int s) => (uint)(((a >> s) & 255) + (((b >> s) & 255) - (float)((a >> s) & 255)) * t + 0.5f) & 255;
+        return C(24) << 24 | C(16) << 16 | C(8) << 8 | C(0);
+    }
+
+    /// <summary>
+    /// Rounds the corners of something already drawn as a plain rectangle (a block-compressed thumbnail has no alpha):
+    /// a band in the colour of what is behind it, hugging the outside of the rounded outline.
+    /// </summary>
+    public static void RoundOff(R r, float radius, uint behind)
+    {
+        if (radius <= 0) return;
+        float s = radius * 0.5f + 0.75f;
+        var rr = new RoundedRectangle { Rect = Raw(r.Inset(-s / 2)), RadiusX = radius + s / 2, RadiusY = radius + s / 2 };
+        DC.DrawRoundedRectangle(rr, Brush(behind), s);
+    }
+
+    // ---------------- clipping (drawing and hit-testing share it) ----------------
+
+    private static readonly R[] _clips = new R[16];
+    private static int _clipDepth;
+
+    public static R Clip => _clipDepth > 0 ? _clips[_clipDepth - 1] : new R(0, 0, W, H);
+
+    public static void PushClip(R r)
+    {
+        var c = Clip.Intersect(r);
+        _clips[_clipDepth++] = c;
+        DC.PushAxisAlignedClip(Raw(c), AntialiasMode.Aliased);
+    }
+
+    public static void PopClip()
+    {
+        _clipDepth--;
+        DC.PopAxisAlignedClip();
+    }
+
+    // ---------------- text ----------------
+
+    private readonly record struct FKey(int Size10, int Weight, bool Icon);
+    private readonly record struct TKey(string Text, int Size10, int Weight, int MaxW, int Lines, bool Icon);
+
+    private static readonly Dictionary<FKey, (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH)> _formats = new();
+    private static Dictionary<TKey, TextRun> _cur = new(), _prev = new();
+
+    private static (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH) FormatFor(FKey k)
+    {
+        lock (_formats) return FormatLocked(k);
+    }
+
+    private static (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH) FormatLocked(FKey k)
+    {
+        if (_formats.TryGetValue(k, out var f)) return f;
+        var fmt = _dw.CreateTextFormat(k.Icon ? IconFont : Font, null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, "ru-ru");
+        using var probe = _dw.CreateTextLayout("Ag", fmt, 1000, 1000);
+        return _formats[k] = (fmt, _dw.CreateEllipsisTrimmingSign(fmt), probe.Metrics.Height);
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentQueue<(TKey Key, TextRun Run)> _prewarmed = new();
+    private static double _shapeMs;
+    private const double ShapeBudgetMs = 2.0;
+
+    // width quantised to 8 DIPs: a window resize re-shapes text only every few pixels
+    private static TKey Key(string text, float size, int weight, float maxW, int lines, bool icon)
+        => new(text, (int)(size * 10), weight, maxW <= 0 ? 0 : Math.Max(8, (int)maxW / 8 * 8), lines, icon);
+
+    private static TextRun Shape(TKey key)
+    {
+        var (fmt, ellipsis, lineH) = FormatFor(new FKey(key.Size10, key.Weight, key.Icon));
+        var width = key.MaxW == 0 ? 100000f : key.MaxW;
+        var layout = _dw.CreateTextLayout(key.Text, fmt, width, key.Lines > 0 ? lineH * key.Lines + 1 : 100000f);
+        layout.WordWrapping = key.Lines == 1 ? WordWrapping.NoWrap : WordWrapping.Wrap;
+        if (key.Lines > 0 && key.MaxW > 0)
+            layout.SetTrimming(new Trimming { Granularity = TrimmingGranularity.Character }, ellipsis);
+        var m = layout.Metrics;
+        return new TextRun
+        {
+            Layout = layout, W = MathF.Min(m.Width, width), H = key.Lines > 0 ? MathF.Min(m.Height, lineH * key.Lines) : m.Height,
+            Lines = (int)m.LineCount, Color = !key.Icon && HasEmoji(key.Text),
+        };
+    }
+
+    private static bool HasEmoji(string s)
+    {
+        foreach (var ch in s)
+            if (char.IsSurrogate(ch) || ch is >= (char)0x2190 and <= (char)0x2BFF || ch is (char)0x00A9 or (char)0x00AE or (char)0x203C or (char)0x2049 or (char)0x2122 or (char)0x2139 or (char)0x3030 or (char)0x303D or (char)0xFE0F)
+                return true;
+        return false;
+    }
+
+    /// <summary>Shapes text on a worker before it scrolls into view (DirectWrite shaping costs up to a millisecond per string).</summary>
+    public static void Prewarm(List<(string Text, float Size, int Weight, float MaxW, int Lines)> items)
+    {
+        if (items.Count == 0) return;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            foreach (var it in items)
+            {
+                if (string.IsNullOrEmpty(it.Text)) continue;
+                try { var k = Key(it.Text, it.Size, it.Weight, it.MaxW, it.Lines, false); _prewarmed.Enqueue((k, Shape(k))); }
+                catch { }
+            }
+            App.WakeUi();
+        });
+    }
+
+    /// <param name="lines">1 = one line with ellipsis; n = wrap to n lines with ellipsis; 0 = wrap without limit.</param>
+    public static TextRun Text(string text, float size, int weight = 400, float maxW = 0, int lines = 1, bool icon = false)
+    {
+        var key = Key(text, size, weight, maxW, lines, icon);
+        if (_cur.TryGetValue(key, out var run)) return run;
+        if (_prev.Remove(key, out run)) { _cur[key] = run; return run; }
+
+        if (_shapeMs > ShapeBudgetMs && !icon && text.Length > 3)
+        {
+            // over this frame's budget: reserve the space now, shape on the next frame
+            var lineH = FormatFor(new FKey(key.Size10, weight, false)).LineH;
+            var estW = text.Length * size * 0.52f;
+            var n = lines == 1 || key.MaxW == 0 ? 1 : Math.Max(1, (int)MathF.Ceiling(estW / key.MaxW));
+            if (lines > 1) n = Math.Min(n, lines);
+            UI.Animate();
+            return new TextRun { W = key.MaxW == 0 ? estW : MathF.Min(estW, key.MaxW), H = lineH * n, Lines = n };
+        }
+        var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        TextCreated++;
+        run = Shape(key);
+        _shapeMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+        return _cur[key] = run;
+    }
+    public static void Draw(TextRun run, float x, float y, uint color)
+    {
+        if (run.Layout == null) return;
+        var t0 = App.Bench ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        DC.DrawTextLayout(new Vector2(x, y), run.Layout, Brush(color), run.Color ? DrawTextOptions.EnableColorFont : DrawTextOptions.None);
+        if (App.Bench) { TextDrawMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds; TextDraws++; }
+    }
+
+    public static TextRun Draw(string text, float x, float y, float size, uint color, int weight = 400, float maxW = 0, int lines = 1)
+    {
+        var run = Text(text, size, weight, maxW, lines);
+        if (text.Length > 0) Draw(run, x, y, color);
+        return run;
+    }
+
+    /// <summary>Icon glyph centred in the box.</summary>
+    public static void Icon(string glyph, R box, float size, uint color)
+    {
+        var run = Text(glyph, size, 400, 0, 1, icon: true);
+        Draw(run, Snap(box.X + (box.W - run.W) / 2), Snap(box.Y + (box.H - run.H) / 2), color);
+    }
+
+    public static float LineHeight(float size, int weight = 400) => FormatFor(new FKey((int)(size * 10), weight, false)).LineH;
+
+    private static void TrimTextCache()
+    {
+        if (_cur.Count < 900) return;
+        foreach (var r in _prev.Values) r.Layout?.Dispose();
+        _prev = _cur;
+        _cur = new Dictionary<TKey, TextRun>(256);
+    }
+
+    /// <summary>Nothing is moving: layouts not drawn since the last trim are let go (they are rebuilt on demand).</summary>
+    public static void DropIdleText()
+    {
+        if (_prev.Count == 0) return;
+        foreach (var r in _prev.Values) r.Layout?.Dispose();
+        _prev = new Dictionary<TKey, TextRun>();
+    }
+
+    private static void ClearTextCache()
+    {
+        foreach (var r in _prev.Values) r.Layout?.Dispose();
+        foreach (var r in _cur.Values) r.Layout?.Dispose();
+        _prev.Clear(); _cur.Clear();
+    }
+}
