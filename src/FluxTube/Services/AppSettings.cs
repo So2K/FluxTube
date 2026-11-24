@@ -46,6 +46,8 @@ public sealed class AppSettings
     public bool ScrollWholeWatchPage { get; set; } = false;
     /// <summary>UI zoom multiplier (0.75 to 1.50, default 1.0 = 100%).</summary>
     public float UiScale { get; set; } = 1.0f;
+    /// <summary>Hides the right-side info/comments panel on the Shorts page for distraction-free viewing.</summary>
+    public bool ShortsPanelHidden { get; set; } = false;
 
     public string PlayerFormat => FormatFor(PlayerQuality);
     public string DownloadFormat => FormatFor(DownloadQuality);

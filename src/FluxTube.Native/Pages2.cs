@@ -356,6 +356,22 @@ public sealed class SettingsPage : IPage
         bx -= lw;
         if (UI.Pill(UI.Id("set:login"), bx, acc.Y + 12, 34, logged ? null : Th.Globe, loginLabel, out _, accent: !logged))
             App.Post(logged ? Shell.Logout : Shell.Login);
+        if (AccountMenu.Saved.Count > 0)
+        {
+            var swLabel = $"Аккаунты ({AccountMenu.Saved.Count})";
+            var swW = UI.PillWidth(Th.Account, swLabel); bx -= swW + 8;
+            if (UI.Pill(UI.Id("set:accs"), bx, acc.Y + 12, 34, Th.Account, swLabel, out _))
+            {
+                var list = AccountMenu.Saved.Select(a => new MenuItem(
+                    (a.Name.Length > 0 ? a.Name : a.Handle) + (a.Handle.Length > 0 && a.Name.Length > 0 ? $" ({a.Handle})" : ""),
+                    () => AccountMenu.SwitchTo(a.Id),
+                    check: logged && a.Id == AccountMenu.ActiveId,
+                    icon: Th.Account)).ToList();
+                list.Add(MenuItem.Sep);
+                list.Add(new("Добавить аккаунт (окно входа)", Shell.LoginWebView, icon: Th.Add));
+                Menus.Popup(list);
+            }
+        }
         var imp = Row("Вход из другого браузера", "Выберите установленный браузер или импортируйте cookies.txt.", 58);
         bx = imp.Right - 14;
         var w1 = UI.PillWidth(Th.Globe, "Браузер…"); bx -= w1;

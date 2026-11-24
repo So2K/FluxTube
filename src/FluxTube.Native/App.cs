@@ -339,8 +339,12 @@ public static unsafe class App
                     Invalidate();
                     return 0;
                 case W.WM_XBUTTONUP:
-                    if (((int)w >> 16) == 1) Shell.Back();
+                {
+                    var xb = (int)w >> 16;
+                    if (xb == 1) Shell.Back();
+                    else if (xb == 2) Shell.Forward();
                     return 1;
+                }
                 case W.WM_MOUSEWHEEL:
                 {
                     var p = new W.POINT { X = W.LoWord(l), Y = W.HiWord(l) };
@@ -528,8 +532,12 @@ internal static unsafe class VideoHost
                 Cmd("keypress", "MBTN_MID");
                 return 0;
             case W.WM_XBUTTONUP:
-                if (((int)w >> 16) == 1) Shell.Back();
+            {
+                var xb = (int)w >> 16;
+                if (xb == 1) Shell.Back();
+                else if (xb == 2) Shell.Forward();
                 return 1;
+            }
             case W.WM_MOUSEWHEEL:
             {
                 var delta = (short)((w >> 16) & 0xFFFF) / 120f;

@@ -83,8 +83,21 @@ public sealed class ShortsPage : IPage
 
     public void ToggleComments()
     {
-        _showComments = !_showComments;
+        if (AppSettings.Current.ShortsPanelHidden)
+        {
+            AppSettings.Current.ShortsPanelHidden = false;
+            AppSettings.Current.Save();
+            _showComments = true;
+        }
+        else _showComments = !_showComments;
         if (_showComments && Cur is { } v && _commentsFor != v.VideoId) StartComments(v.VideoId);
+        App.Invalidate();
+    }
+
+    public void TogglePanel()
+    {
+        AppSettings.Current.ShortsPanelHidden = !AppSettings.Current.ShortsPanelHidden;
+        AppSettings.Current.Save();
         App.Invalidate();
     }
 
@@ -303,6 +316,7 @@ public sealed class ShortsPage : IPage
             new(p.Paused ? "Продолжить" : "Пауза", p.TogglePause, icon: p.Paused ? Th.Play : Th.Pause, shortcut: "Space"),
             new(_muted ? "Включить звук" : "Выключить звук", ToggleMute, icon: _muted ? Th.Volume : Th.Mute, shortcut: "M"),
             new("Повтор Shorts", ToggleLoop, check: _loop, icon: Th.Repeat),
+            new(AppSettings.Current.ShortsPanelHidden ? "Показать боковую панель" : "Скрыть боковую панель", TogglePanel, icon: Th.Theater),
             MenuItem.Sep,
             new("Открыть как обычное видео", () => Shell.OpenVideo(new VideoItem { VideoId = v.VideoId, Title = v.Title, Channel = v.Channel, ChannelId = v.ChannelId }, "shorts"), icon: Th.Expand),
             new("Открыть в новой вкладке", () => Shell.OpenVideoInNewTab(v), icon: Th.Add),
@@ -348,12 +362,16 @@ public sealed class ShortsPage : IPage
             return;
         }
 
-        float side = MathF.Min(430, MathF.Max(340, r.W * 0.34f));
-        var vh = MathF.Floor(MathF.Min(r.H - 28, (r.W - side - 90) * 16 / 9));
+        bool hidden = AppSettings.Current.ShortsPanelHidden;
+        float panelT = UI.Smooth(UI.Id("shorts:panelT"), hidden ? 0 : 1, 16);
+        float fullSide = MathF.Min(430, MathF.Max(340, r.W * 0.34f));
+        float side = fullSide * panelT;
+        float gap = 22 * panelT;
+        var vh = MathF.Floor(MathF.Min(r.H - 28, (r.W - side - (hidden ? 110 : 90)) * 16 / 9));
         var vw = MathF.Floor(vh * 9 / 16);
-        var vx = Gfx.Snap(r.X + MathF.Max(20, (r.W - vw - side - 24) / 2));
+        var vx = Gfx.Snap(r.X + MathF.Max(20, (r.W - vw - side - gap) / 2));
         var video = new R(vx, Gfx.Snap(r.Y + (r.H - vh) / 2), vw, vh);
-        var panelR = new R(video.Right + 22, video.Y, MathF.Min(side, r.Right - video.Right - 36), video.H);
+        var panelR = new R(video.Right + gap, video.Y, MathF.Min(fullSide, r.Right - video.Right - 36), video.H);
 
         // Subtle elevated frame around the 9:16 player
         Gfx.Fill(video.Inset(-2), 0xFF000000, 14);
@@ -375,6 +393,30 @@ public sealed class ShortsPage : IPage
         }
         if (UI.RightClick(video)) ContextMenuFor(v);
 
+        // When panel is hidden: compact floating toggle + quick nav rail beside the centered Short
+        if (panelT < 0.05f)
+        {
+            float rx = video.Right + 14;
+            if (rx + 46 < r.Right)
+            {
+                var rail = new R(rx, video.Y + 6, 44, 194);
+                Gfx.Fill(rail, Th.Panel, 22);
+                Gfx.Stroke(rail, Th.Line, 22, 1f);
+                if (UI.IconButton(UI.Id("shorts:showpanel"), new R(rx + 4, rail.Y + 6, 36, 36), "\uE76B", 13, Th.Text)) TogglePanel();
+                var mine0 = _rating.GetValueOrDefault(v.VideoId, "");
+                if (UI.IconButton(UI.Id("shorts:qlike"), new R(rx + 4, rail.Y + 46, 36, 36), Th.Like, 15, mine0 == "LIKE" ? Th.Brand : Th.Icon)) Rate(v, true);
+                if (UI.IconButton(UI.Id("shorts:qcomm"), new R(rx + 4, rail.Y + 86, 36, 36), Th.Comment, 15, Th.Icon)) ToggleComments();
+                if (UI.IconButton(UI.Id("shorts:qup"), new R(rx + 4, rail.Y + 126, 36, 30), Th.ChevronUp, 12, Th.Text, _i > 0)) Step(-1);
+                if (UI.IconButton(UI.Id("shorts:qdn"), new R(rx + 4, rail.Y + 158, 36, 30), Th.ChevronDown, 12, Th.Brand, _i < _items.Count - 1 || _next != null)) Step(1);
+            }
+            if (UI.Wheel != 0)
+            {
+                if (UI.Hover(video)) { AdjustVolume(UI.Wheel > 0 ? 5 : -5); UI.Wheel = 0; }
+                else if (UI.Hover(r)) { Step(UI.Wheel > 0 ? -1 : 1); UI.Wheel = 0; }
+            }
+            return;
+        }
+
         if (panelR.W < 200)
         {
             if (UI.Wheel != 0 && UI.Hover(r)) { Step(UI.Wheel > 0 ? -1 : 1); UI.Wheel = 0; }
@@ -382,6 +424,7 @@ public sealed class ShortsPage : IPage
         }
 
         // ---- Structured Right-Side Card ----
+        Gfx.PushClip(new R(panelR.X - 2, panelR.Y - 2, side + 4, panelR.H + 4));
         Gfx.Fill(panelR, Th.Panel, 16);
         Gfx.Stroke(panelR, Th.Line, 16, 1f);
         if (UI.RightClick(panelR)) ContextMenuFor(v);
@@ -389,19 +432,22 @@ public sealed class ShortsPage : IPage
         float pad = 18;
         float x = panelR.X + pad, w = panelR.W - pad * 2, y = panelR.Y + 16;
 
-        // 1. HEADER ZONE: Channel + Shorts Index Pill + Title
+        // 1. HEADER ZONE: Channel + Shorts Index Pill + Hide Panel button + Title
         var name = v.Channel.Length > 0 ? v.Channel : "…";
         var avR = new R(x, y, 42, 42);
         Cards.Avatar(avR.X, avR.Y, 42, v.AvatarUrl, name.TrimStart('@'));
         if (v.ChannelId != null && UI.Hover(avR)) Gfx.Stroke(avR.Inset(-1), Gfx.Fade(Th.Brand, 0.8f), 22, 1.5f);
 
+        var hideBtn = new R(panelR.Right - pad - 28, y + 7, 28, 28);
+        if (UI.IconButton(UI.Id("shorts:hidepanel"), hideBtn, Th.ChevronRight, 11, Th.Sub)) TogglePanel();
+
         var badge = _feed ? $"Shorts #{_i + 1}" : $"{_i + 1} / {_items.Count}";
         var br = Gfx.Text(badge, 11.5f, 600);
-        var badgeR = new R(panelR.Right - pad - br.W - 16, y + 9, br.W + 16, 24);
+        var badgeR = new R(hideBtn.X - 6 - br.W - 14, y + 9, br.W + 14, 24);
         Gfx.Fill(badgeR, Th.A(0.08f), 12);
-        Gfx.Draw(br, badgeR.X + 8, badgeR.Y + 4, Th.Sub);
+        Gfx.Draw(br, badgeR.X + 7, badgeR.Y + 4, Th.Sub);
 
-        var nr = Gfx.Text(name, 15, 600, w - 54 - badgeR.W - 10);
+        var nr = Gfx.Text(name, 15, 600, w - 54 - badgeR.W - 42);
         var nameR = new R(x + 52, y + 4, nr.W, nr.H);
         Gfx.Draw(nr, nameR.X, nameR.Y, UI.Hover(nameR) && v.ChannelId != null ? Th.Brand : Th.Text);
         Gfx.Draw(v.ChannelId != null ? "Перейти на канал" : "YouTube Shorts", x + 52, y + 24, 11.5f, Th.Dim);
@@ -558,7 +604,9 @@ public sealed class ShortsPage : IPage
         {
             Gfx.Fill(new R(x, y, w, 1), Th.Line);
             y += 8;
-            var chTitle = _commentCount is { Length: > 0 } ? $"Комментарии · {_commentCount}" : "Комментарии";
+            var chTitle = _commentCount is { Length: > 0 }
+                ? (_commentCount.Any(char.IsLetter) ? _commentCount : $"Комментарии · {_commentCount}")
+                : "Комментарии";
             Gfx.Draw(chTitle, x, y + 3, 13.5f, Th.Text, 600);
             if (UI.IconButton(UI.Id("shorts:commclose"), new R(x + w - 24, y, 24, 24), Th.Close, 10, Th.Sub)) _showComments = false;
             y += 28;
@@ -614,6 +662,7 @@ public sealed class ShortsPage : IPage
         if (canNext && UI.Click(UI.Id("shorts:down"), nextBtn)) Step(1);
 
         if (_loading) UI.Spinner(panelR.Right - 28, panelR.Y + 20, 7, Th.Sub);
+        Gfx.PopClip();
 
         // Wheel over the video (even while loading) adjusts volume; wheel outside video (and not in comments/volume) steps Shorts!
         if (!wheelConsumedByVol && UI.Wheel != 0)

@@ -24,6 +24,7 @@ public static class Shell
     private static readonly PlaybackTracker T = PlaybackTracker.Instance;
 
     private static readonly List<IPage> _back = [];
+    private static readonly List<IPage> _forward = [];
     private static readonly Dictionary<string, IPage> _roots = new();
     private static IPage? _cur;
     private static Edit _search = null!;
@@ -217,6 +218,7 @@ public static class Shell
         }
         _tab = i;
         _back.Clear(); // the pages of the tab we just left go with it
+        _forward.Clear();
         SharePanel.Close();
         Navigate(PageFor(target), push: false);
     }
@@ -604,7 +606,8 @@ public static class Shell
             {
                 _back.Remove(_cur);
                 _back.Add(_cur);
-                if (_back.Count > 12) _back.RemoveAt(0);
+                if (_back.Count > 16) _back.RemoveAt(0);
+                _forward.Clear();
             }
         }
         _cur = page;
@@ -619,8 +622,29 @@ public static class Shell
         if (_back.Count == 0) return;
         var prev = _back[^1];
         _back.RemoveAt(_back.Count - 1);
+        if (_cur != null)
+        {
+            _forward.Remove(_cur);
+            _forward.Add(_cur);
+            if (_forward.Count > 16) _forward.RemoveAt(0);
+        }
         Navigate(prev, push: false);
         SyncTab(prev);
+    }
+
+    public static void Forward()
+    {
+        if (_fullscreen || _forward.Count == 0) return;
+        var next = _forward[^1];
+        _forward.RemoveAt(_forward.Count - 1);
+        if (_cur != null)
+        {
+            _back.Remove(_cur);
+            _back.Add(_cur);
+            if (_back.Count > 16) _back.RemoveAt(0);
+        }
+        Navigate(next, push: false);
+        SyncTab(next);
     }
 
     /// <summary>The active tab follows the page on screen, also when the user steps back.</summary>
@@ -933,17 +957,20 @@ public static class Shell
         var menuR = new R(10, 8, 36, 36);
         _topHits.Add(menuR);
         if (UI.IconButton(UI.Id("sidebar:toggle"), menuR, Th.Hamburger, 15, AppSettings.Current.SidebarCollapsed ? Th.Sub : Th.Text)) App.Post(ToggleSidebar);
-        var backR = new R(48, 8, 36, 36);
+        var backR = new R(48, 8, 34, 36);
         _topHits.Add(backR);
-        if (UI.IconButton(UI.Id("back"), backR, Th.Back, 15, Th.Text, _back.Count > 0)) App.Post(Back);
+        if (UI.IconButton(UI.Id("back"), backR, Th.Back, 14, Th.Text, _back.Count > 0)) App.Post(Back);
+        var fwdR = new R(84, 8, 34, 36);
+        _topHits.Add(fwdR);
+        if (UI.IconButton(UI.Id("fwd"), fwdR, "\uE72A", 14, Th.Text, _forward.Count > 0)) App.Post(Forward);
         // the logo is the way home
-        var logo = new R(88, 8, 122, 36);
+        var logo = new R(122, 8, 122, 36);
         _topHits.Add(logo);
         var logoId = UI.Id("logo");
         UI.Glow(logoId, logo, 8, UI.Hover(logo));
-        Gfx.Fill(new R(96, 17, 27, 18), Th.Brand, 5);
-        Gfx.Icon("\uF5B0", new R(96, 17, 27, 18), 9, Th.OnBrand);
-        Gfx.Draw("FluxTube", 131, 15, 15.5f, Th.Text, 600);
+        Gfx.Fill(new R(130, 17, 27, 18), Th.Brand, 5);
+        Gfx.Icon("\uF5B0", new R(130, 17, 27, 18), 9, Th.OnBrand);
+        Gfx.Draw("FluxTube", 165, 15, 15.5f, Th.Text, 600);
         if (UI.Click(logoId, logo)) App.Post(() => OpenRoot("home"));
 
         // window buttons
@@ -1217,7 +1244,11 @@ public static class Shell
     {
         if (Menus.Open && Menus.Key(vk)) return true;
         if (alt && vk == W.VK_LEFT) { Back(); return true; }
+        if (alt && vk == W.VK_RIGHT) { Forward(); return true; }
         if (alt) return false;
+        // Ctrl+Z = Back, Ctrl+Y / Ctrl+Shift+Z = Forward
+        if (ctrl && vk == 'Z') { if (W.KeyDown(0x10)) Forward(); else Back(); return true; }
+        if (ctrl && vk == 'Y') { Forward(); return true; }
         if (ctrl && vk == 'F' || vk == 0xBF && !ctrl) { _search.Focus(); return true; }
         if (ctrl && vk == 'B') { ToggleSidebar(); return true; }
         // Chrome-like UI Zoom: Ctrl + / - / 0
