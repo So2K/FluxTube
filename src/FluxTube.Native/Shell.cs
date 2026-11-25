@@ -1243,6 +1243,72 @@ public static class Shell
         }
     }
 
+    // ---------------- hold Space for 2x speed (YouTube-style) ----------------
+    private static bool _spaceHeld, _space2x;
+    private static long _spaceDownAt;
+    private static double _spaceSavedSpeed = 1.0;
+
+    public static bool SpaceDown(bool repeat)
+    {
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open) return false;
+        if (T.Current == null || !P.HasMedia) return false;
+        if (!repeat)
+        {
+            _spaceHeld = true;
+            _space2x = false;
+            _spaceDownAt = Environment.TickCount64;
+            App.After(240, CheckSpaceHold);
+        }
+        else if (_spaceHeld && !_space2x && Environment.TickCount64 - _spaceDownAt >= 240)
+        {
+            ActivateSpace2x();
+        }
+        return true;
+    }
+
+    private static void CheckSpaceHold()
+    {
+        if (_spaceHeld && !_space2x && Environment.TickCount64 - _spaceDownAt >= 230)
+            ActivateSpace2x();
+    }
+
+    private static void ActivateSpace2x()
+    {
+        if (_space2x || P.Paused || !P.HasMedia) return;
+        _space2x = true;
+        var cur = P.GetDouble("speed");
+        _spaceSavedSpeed = cur > 0.1 ? cur : 1.0;
+        var boost = _spaceSavedSpeed < 2.0 ? 2.0 : Math.Min(4.0, _spaceSavedSpeed * 2.0);
+        P.SetSpeed(boost);
+        P.Command("script-message-to", "fluxosc", "flux-2x", boost.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "×");
+    }
+
+    public static bool SpaceUp()
+    {
+        if (!_spaceHeld) return false;
+        _spaceHeld = false;
+        if (_space2x)
+        {
+            _space2x = false;
+            P.SetSpeed(_spaceSavedSpeed);
+            P.Command("script-message-to", "fluxosc", "flux-2x", "off");
+        }
+        else if (T.Current != null && P.HasMedia)
+        {
+            P.Command("keypress", "SPACE");
+        }
+        return true;
+    }
+
+    public static void CancelSpace2x()
+    {
+        _spaceHeld = false;
+        if (!_space2x) return;
+        _space2x = false;
+        P.SetSpeed(_spaceSavedSpeed);
+        P.Command("script-message-to", "fluxosc", "flux-2x", "off");
+    }
+
     // ---------------- keys ----------------
 
     public static bool Key(int vk, bool ctrl, bool alt)

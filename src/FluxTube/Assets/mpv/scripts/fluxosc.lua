@@ -12,6 +12,7 @@ local S = {
     paused = false, time = 0, dur = 0, cache = 0, vol = 100, mute = false, fs = false, buffering = false, seeking = false,
     has_next = false, quality = "", speed = "1×", title = "", channel = "", likes = "", short_overlay = false, segments = {}, rclick = "pause",
     bezel = nil, vol_until = 0, fade = 0, last_seek = 0, drag_pct = 0, ready = false,
+    hold_at = nil, hold_2x = false, ext_2x = nil, saved_speed = 1,
     thumb_file = nil, thumb_w = 0, thumb_h = 0, thumb_want = -99, thumb_on = false,
 }
 local W, H, sc = 1280, 720, 1
@@ -346,6 +347,13 @@ local function render()
         rect(W / 2 - bw / 2, 58 * sc, W / 2 + bw / 2, 60 * sc, "FFFFFF", 0.25 * op)
         rect(W / 2 - bw / 2, 58 * sc, W / 2 - bw / 2 + bw * clamp((S.mute and 0 or S.vol) / 100, 0, 1), 60 * sc, opts.brand, op)
     end
+    if S.hold_2x or S.ext_2x then
+        local sp_lbl = (S.ext_2x or (S.saved_speed < 2 and "2×" or (string.format("%.2g×", math.min(4, S.saved_speed * 2))))) .. "  ▸▸"
+        local tw = text_w(sp_lbl, 14.5 * sc) + 30 * sc
+        rect(W / 2 - tw / 2, 22 * sc, W / 2 + tw / 2, 54 * sc, "101010", 0.80, 16 * sc)
+        rect(W / 2 - tw / 2 + 12 * sc, 51 * sc, W / 2 + tw / 2 - 12 * sc, 53 * sc, opts.brand, 0.95, 1 * sc)
+        text(W / 2, 38 * sc, 5, 14.5 * sc, sp_lbl, 1, nil, true)
+    end
     if (S.buffering or S.seeking) and not S.drag and S.ready then
         for i = 0, 7 do
             local a = i * math.pi / 4
@@ -361,7 +369,7 @@ local function render()
 end
 
 local function active()
-    return S.fade > 0.01 or want_visible() or S.bezel or now() < S.vol_until or ((S.buffering or S.seeking) and S.ready)
+    return S.fade > 0.01 or want_visible() or S.bezel or S.hold_at ~= nil or S.hold_2x or S.ext_2x ~= nil or now() < S.vol_until or ((S.buffering or S.seeking) and S.ready)
 end
 
 local last_tick = 0
@@ -369,12 +377,20 @@ local function tick()
     local t = now()
     local dt = clamp(t - last_tick, 0, 0.1)
     last_tick = t
+    -- YouTube-style hold LMB on video for 2x speed
+    if S.down == "video" and S.hold_at and not S.hold_2x and not S.paused and (t - S.hold_at) >= 0.24 then
+        S.hold_2x = true
+        S.saved_speed = mp.get_property_number("speed", 1) or 1
+        local boost = S.saved_speed < 2 and 2 or math.min(4, S.saved_speed * 2)
+        mp.set_property_number("speed", boost)
+        S.dirty = true
+    end
     local target = want_visible() and 1 or 0
     if S.fade ~= target then
         local step = dt / (target == 1 and 0.10 or 0.22)
         S.fade = target == 1 and math.min(1, S.fade + step) or math.max(0, S.fade - step)
     end
-    local animating = S.fade ~= target or S.bezel or t < S.vol_until + 0.05 or ((S.buffering or S.seeking) and S.ready)
+    local animating = S.fade ~= target or S.bezel or S.hold_at ~= nil or S.hold_2x or S.ext_2x ~= nil or t < S.vol_until + 0.05 or ((S.buffering or S.seeking) and S.ready)
     if active() then
         if S.dirty or animating then S.dirty = false; render() end
     else
@@ -434,8 +450,18 @@ mp.add_forced_key_binding("MBTN_LEFT", "flux-left", function(e)
         local h = hit()
         S.down = h
         if h == "seek" then S.drag = "seek"; seek_to_mouse(false)
-        elseif h == "vol" then S.drag = "vol"; set_volume_from_mouse() end
+        elseif h == "vol" then S.drag = "vol"; set_volume_from_mouse()
+        elseif h == "video" and not S.paused then S.hold_at = now(); S.hold_2x = false end
     elseif e.event == "up" then
+        if S.hold_2x then
+            mp.set_property_number("speed", S.saved_speed or 1)
+            S.hold_2x = false
+            S.hold_at = nil
+            S.drag, S.down = nil, nil
+            wake()
+            return
+        end
+        S.hold_at = nil
         if S.drag == "seek" then seek_to_mouse(true)
         elseif not S.drag and S.down and S.down == hit() then activate(S.down) end
         S.drag, S.down = nil, nil
@@ -540,3 +566,4 @@ end)
 mp.register_script_message("flux-leave", function() S.mx, S.my = -1, -1; S.drag = nil; wake() end)
 mp.register_script_message("flux-show", function(v) S.force = v == "yes"; wake() end) -- for screenshots and tests
 mp.register_script_message("flux-bezel", function(kind) S.bezel = { g = G[kind] or G.play, t = now() }; wake() end)
+mp.register_script_message("flux-2x", function(v) S.ext_2x = (v and v ~= "off") and v or nil; wake() end)

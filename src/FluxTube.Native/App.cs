@@ -364,7 +364,15 @@ public static unsafe class App
                 case W.WM_KEYDOWN:
                 case W.WM_SYSKEYDOWN:
                     UI.LastInput = Environment.TickCount64;
+                    if ((int)w == W.VK_SPACE && !W.KeyDown(W.VK_CONTROL) && !W.KeyDown(W.VK_MENU))
+                    {
+                        bool repeat = (l.ToInt64() & (1L << 30)) != 0;
+                        if (Shell.SpaceDown(repeat)) return 0;
+                    }
                     if (Shell.Key((int)w, W.KeyDown(W.VK_CONTROL), W.KeyDown(W.VK_MENU))) return 0;
+                    break;
+                case W.WM_KEYUP:
+                    if ((int)w == W.VK_SPACE && Shell.SpaceUp()) return 0;
                     break;
                 case W.WM_COMMAND:
                     if (((int)w >> 16) == 0x0300) Edit.OnCommand(l);
@@ -411,7 +419,7 @@ public static unsafe class App
                     }
                     return 0;
                 case W.WM_ACTIVATE:
-                    if (((int)w & 0xFFFF) == 0) Suggest.Hide();
+                    if (((int)w & 0xFFFF) == 0) { Suggest.Hide(); Shell.CancelSpace2x(); }
                     break;
                 case W.WM_MOVE:
                     Suggest.Hide();

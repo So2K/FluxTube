@@ -25,6 +25,7 @@ public sealed class ShortsPage : IPage
 
     private int _slideFrom;
     private long _slideAt;
+    private string? _prevVideoId;
     private bool _loop = true;
     private bool _muted;
     private bool _dragVol, _dragSeek;
@@ -301,6 +302,7 @@ public sealed class ShortsPage : IPage
         var to = _i + d;
         if (to < 0 || to >= _items.Count) { if (to >= _items.Count && _feed && _next != null) LoadMore(); return; }
         _lastStep = UI.Now;
+        _prevVideoId = Cur?.VideoId;
         _i = to;
         _slideFrom = d;
         _slideAt = UI.Now;
@@ -384,10 +386,11 @@ public sealed class ShortsPage : IPage
         float fullSide = MathF.Min(430, MathF.Max(340, r.W * 0.34f));
         float side = fullSide * panelT;
         float gap = 22 * panelT;
-        var vh = MathF.Floor(MathF.Min(r.H - 28, (r.W - side - (hidden ? 110 : 90)) * 16 / 9));
+        // Leave a sleek 46px peek space at bottom (and 14px top) so the next Short card peeks just like YouTube Shorts!
+        var vh = MathF.Floor(MathF.Min(r.H - 64, (r.W - side - (hidden ? 110 : 90)) * 16 / 9));
         var vw = MathF.Floor(vh * 9 / 16);
         var vx = Gfx.Snap(r.X + MathF.Max(20, (r.W - vw - side - gap) / 2));
-        var vy = Gfx.Snap(r.Y + (r.H - vh) / 2);
+        var vy = Gfx.Snap(r.Y + 14);
         var video = new R(vx, vy, vw, vh);
         var panelR = new R(video.Right + gap, video.Y, MathF.Min(fullSide, r.Right - video.Right - 36), video.H);
 
@@ -396,23 +399,70 @@ public sealed class ShortsPage : IPage
         Ambient.Draw(video, v.VideoId, isShort: true);
         Gfx.PopClip();
 
-        // Whisper-thin hairline around the 9:16 player (no heavy dark border)
-        Gfx.Stroke(video.Inset(-1), Th.A(0.08f), 12, 1f);
+        // Smooth cubic-out vertical card-stack swipe animation (like YouTube Shorts!)
+        float slideT = _slideAt > 0 ? Math.Clamp((UI.Now - _slideAt) / 260f, 0, 1) : 1f;
+        bool sliding = slideT < 1f;
+        if (sliding) UI.Animate();
+        float ease = 1f - MathF.Pow(1f - slideT, 3f);
+        float stride = vh + 16;
+        float curY = sliding ? Gfx.Snap(video.Y + (1f - ease) * stride * _slideFrom) : video.Y;
 
-        Shell.WantVideo(video, v.VideoId);
-        if (!Shell.VideoShown(v.VideoId))
+        void DrawShortPoster(string vid, R rect, float opacity)
         {
-            var t = Math.Clamp((UI.Now - _slideAt) / 180f, 0, 1);
-            if (t < 1) UI.Animate();
-            var ease = 1 - (1 - t) * (1 - t) * (1 - t);
-            var off = (1 - ease) * 44 * _slideFrom;
-            Gfx.PushClip(video);
-            Gfx.Fill(video, 0xFF09090C, 12);
-            var img = Images.Get($"https://i.ytimg.com/vi/{v.VideoId}/oar2.jpg", vw, vh) ?? Images.Get(v.ThumbHq, vw, vh);
-            if (img != null) Gfx.Image(img.Bmp!, new R(video.X, video.Y + off, video.W, video.H), 0.78f * Images.Alpha(img));
-            UI.Spinner(video.X + vw / 2, video.Y + vh / 2, 14, 0xFFFFFFFF);
-            Gfx.PopClip();
+            if (rect.Bottom <= r.Y || rect.Y >= r.Bottom) return;
+            Gfx.Fill(rect, 0xFF0A0A0E, 14);
+            var img = Images.Get($"https://i.ytimg.com/vi/{vid}/oar2.jpg", rect.W, rect.H)
+                   ?? Images.Get($"https://i.ytimg.com/vi/{vid}/hqdefault.jpg", rect.W, rect.H);
+            if (img != null)
+            {
+                Gfx.Image(img.Bmp!, rect, opacity * Images.Alpha(img));
+                Gfx.RoundOff(rect, 14, Th.Bg);
+            }
+            Gfx.Stroke(rect, Th.A(0.10f), 14, 1f);
         }
+
+        // Clipped vertical stack column (shows peeking next/prev cards + sliding transition)
+        Gfx.PushClip(new R(video.X - 4, r.Y, video.W + 8, r.H));
+        if (sliding && _prevVideoId != null)
+        {
+            var outR = new R(video.X, curY - stride * _slideFrom, video.W, video.H);
+            DrawShortPoster(_prevVideoId, outR, 0.92f - 0.15f * ease);
+        }
+        // Peeking next Short card below the active one (clickable!)
+        if (NextItem is { } peekNext)
+        {
+            var peekR = new R(video.X, curY + stride, video.W, video.H);
+            if (peekR.Y < r.Bottom)
+            {
+                DrawShortPoster(peekNext.VideoId, peekR, 0.55f);
+                if (!sliding && UI.Click(UI.Id("shorts:peeknext"), peekR.Intersect(r))) Step(1);
+            }
+        }
+        // Peeking previous Short card above during swipe
+        if (_i > 0 && sliding)
+        {
+            var prevPeek = new R(video.X, curY - stride, video.W, video.H);
+            if (prevPeek.Bottom > r.Y && _items[_i - 1].VideoId != _prevVideoId)
+                DrawShortPoster(_items[_i - 1].VideoId, prevPeek, 0.55f);
+        }
+
+        if (sliding)
+        {
+            var inR = new R(video.X, curY, video.W, video.H);
+            DrawShortPoster(v.VideoId, inR, 0.95f);
+        }
+        else
+        {
+            // Settled: show the live mpv surface seamlessly inside the card
+            Gfx.Stroke(video.Inset(-1), Th.A(0.08f), 12, 1f);
+            Shell.WantVideo(video, v.VideoId);
+            if (!Shell.VideoShown(v.VideoId))
+            {
+                DrawShortPoster(v.VideoId, video, 0.82f);
+                UI.Spinner(video.X + vw / 2, video.Y + vh / 2, 14, 0xFFFFFFFF);
+            }
+        }
+        Gfx.PopClip();
         if (UI.RightClick(video)) ContextMenuFor(v);
 
         // When panel is hidden: compact floating rail + optional clean side text block (or video hover overlay via fluxosc.lua)
