@@ -1,9 +1,27 @@
 using System.Diagnostics;
+using System.Net;
 
 namespace FluxTube.Services;
 
 public static class YtDlp
 {
+    private static readonly Uri YouTube = new("https://www.youtube.com/");
+
+    /// <summary>Explicit app proxy wins; otherwise use the current Windows proxy for YouTube.</summary>
+    public static string? EffectiveProxy
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy)) return AppSettings.Current.Proxy.Trim();
+            try
+            {
+                var proxy = WebRequest.GetSystemWebProxy().GetProxy(YouTube);
+                return proxy != null && proxy != YouTube ? proxy.AbsoluteUri : null;
+            }
+            catch { return null; }
+        }
+    }
+
     /// <summary>Options shared by the player (mpv ytdl_hook) and the downloader, as key=value pairs.</summary>
     public static IEnumerable<string> CommonRawOptions(bool forPlayer)
     {
@@ -11,7 +29,7 @@ public static class YtDlp
         if (File.Exists(Paths.Cookies) && CookieStore.IsLoggedIn) yield return "cookies=" + Paths.Cookies;
         // Chrome TLS impersonation costs ~3 s per YouTube extraction and YouTube does not need it; other sites (TikTok) do benefit
         if (s.Impersonate && !forPlayer) yield return "impersonate=chrome";
-        if (!string.IsNullOrWhiteSpace(s.Proxy)) yield return "proxy=" + s.Proxy;
+        if (EffectiveProxy is { } proxy) yield return "proxy=" + proxy;
         if (forPlayer && s.MarkWatched && CookieStore.IsLoggedIn) yield return "mark-watched=";
         if (Paths.Ffmpeg != null) yield return "ffmpeg-location=" + Paths.Ffmpeg;
         // yt-dlp's automatic Deno discovery can fail on blocked Windows mount points in PATH.

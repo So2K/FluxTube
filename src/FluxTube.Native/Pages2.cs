@@ -279,7 +279,7 @@ public sealed class SettingsPage : IPage
         var s = AppSettings.Current;
         if (_proxy == null)
         {
-            _proxy = new Edit("пусто = напрямую; пример: socks5://127.0.0.1:1080");
+            _proxy = new Edit("пусто = системный прокси; пример: socks5://127.0.0.1:1080");
             _hl = new Edit("ru");
             _gl = new Edit("по IP");
             _proxy.Changed = () => { s.Proxy = _proxy.Text.Trim(); Saved(); };
@@ -723,7 +723,11 @@ public sealed class SettingsPage : IPage
 
         Section("Сеть");
         ToggleRow("imp", "Отпечаток Chrome при загрузке с других сайтов", s.Impersonate, v => s.Impersonate = v, "TLS и HTTP/2 как у настоящего браузера (curl_cffi)");
-        EditInRow(_proxy, Row("Прокси", null, 50, 410), 380);
+        EditInRow(_proxy, Row("Прокси", "Пусто — использовать прокси Windows, если он включён", 58, 410), 380);
+        var route = string.IsNullOrWhiteSpace(s.Proxy)
+            ? YtDlp.EffectiveProxy is null ? "Напрямую" : "Системный прокси Windows"
+            : "Прокси FluxTube";
+        Row("Маршрут YouTube", route, 50, 410);
         EditInRow(_hl, Row("Язык YouTube", null, 50, 160), 120);
         EditInRow(_gl, Row("Регион", null, 50, 160), 120);
         var ur = Row("Движок загрузки", _version, 58, 210);

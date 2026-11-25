@@ -312,7 +312,7 @@ public sealed class Resolver
             ["url"] = "https://www.youtube.com/watch?v=" + id,
             ["format"] = format ?? Format,
             ["cookies"] = CookieStore.IsLoggedIn ? Paths.Cookies : null,
-            ["proxy"] = string.IsNullOrWhiteSpace(AppSettings.Current.Proxy) ? null : AppSettings.Current.Proxy,
+            ["proxy"] = YtDlp.EffectiveProxy,
         };
         try
         {
