@@ -52,6 +52,8 @@ public sealed class AppSettings
     public bool AmbientMode { get; set; } = true;
     /// <summary>Preferred audio dubbing language code (e.g. "ru", "en", or "" for original). Never enables subtitles.</summary>
     public string AudioLanguage { get; set; } = "";
+    /// <summary>When Shorts side panel is hidden: true = show channel/title as hover overlay on the video; false = show clean text block beside the video.</summary>
+    public bool ShortsInfoOverlay { get; set; } = false;
 
     public string PlayerFormat => FormatFor(PlayerQuality);
     public string DownloadFormat => FormatFor(DownloadQuality);

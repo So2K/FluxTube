@@ -775,16 +775,21 @@ public static class Shell
     {
         if (!P.IsReady) return;
         var w = _cur as WatchPage;
+        var sp = _cur as ShortsPage;
         var q = AppSettings.Current.PlayerQuality == "best" ? "Макс" : Cards.QualityName(AppSettings.Current.PlayerQuality);
         var segs = new System.Text.Json.Nodes.JsonArray();
         foreach (var s in T.Segments)
             segs.Add(new System.Text.Json.Nodes.JsonArray(System.Text.Json.Nodes.JsonValue.Create(s.Start), System.Text.Json.Nodes.JsonValue.Create(s.End)));
+        var shortOv = sp != null && AppSettings.Current.ShortsPanelHidden && AppSettings.Current.ShortsInfoOverlay;
         var o = new System.Text.Json.Nodes.JsonObject
         {
             ["next"] = w?.NextUp() != null,
             ["quality"] = T.IsLocal ? "" : q,
             ["speed"] = w?.Speed ?? "1×",
-            ["title"] = T.Current?.Title ?? "",
+            ["title"] = sp != null ? sp.CurrentTitle : (T.Current?.Title ?? ""),
+            ["channel"] = sp != null ? sp.CurrentChannel : "",
+            ["likes"] = sp != null ? sp.CurrentLikes : "",
+            ["short_overlay"] = shortOv,
             ["segments"] = segs,
             ["rclick"] = AppSettings.Current.RightClickPause ? "pause" : "menu",
             ["accent"] = Themes.Hex(Themes.AccentOverride ?? Themes.Current.Brand),

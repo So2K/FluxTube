@@ -386,6 +386,9 @@ public sealed class SettingsPage : IPage
         var w2 = UI.PillWidth(Th.Folder, "cookies.txt"); bx -= w2 + 8;
         if (UI.Pill(UI.Id("set:ck"), bx, imp.Y + 12, 34, Th.Folder, "cookies.txt", out _))
             App.Post(() => { if (Dialogs.PickFile("cookies.txt\0*.txt\0\0") is { } f) BrowserLogin.ImportFromFile(f); });
+        var w3 = UI.PillWidth(Th.Download, "Все аккаунты"); bx -= w3 + 8;
+        if (UI.Pill(UI.Id("set:allacc"), bx, imp.Y + 12, 34, Th.Download, "Все аккаунты", out _))
+            App.Post(BrowserLogin.ImportAllAccounts);
 
         Section("Оформление");
         _y += ThemePicker.Draw(_x, _y, _w);
@@ -438,6 +441,7 @@ public sealed class SettingsPage : IPage
             }, check: a.Code == s.AudioLanguage, icon: Th.Volume)).ToList());
         }
         ToggleRow("wscroll", "Прокручивать всю страницу с видео", s.ScrollWholeWatchPage, v => s.ScrollWholeWatchPage = v, "Включено: при прокрутке вниз видео скрывается, удобно читать комментарии. Выключено: комментарии листаются отдельно.");
+        ToggleRow("shov", "Подпись Shorts поверх видео при наведении", s.ShortsInfoOverlay, v => { s.ShortsInfoOverlay = v; Shell.PushPlayerState(); }, "Включено: когда панель Shorts скрыта, канал и название появляются поверх видео при наведении. Выключено: аккуратный блок текста сбоку.");
         ToggleRow("sb", "SponsorBlock", s.SponsorBlock, v => s.SponsorBlock = v, "Пропускать рекламные вставки авторов");
         var cr = Row("Что пропускать");
         float cx = cr.Right - 14;

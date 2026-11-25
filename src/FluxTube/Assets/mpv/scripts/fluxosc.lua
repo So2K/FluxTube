@@ -10,7 +10,7 @@ local ov = mp.create_osd_overlay("ass-events")
 local S = {
     mx = -1, my = -1, last_move = 0, drag = nil, down = nil, force = false,
     paused = false, time = 0, dur = 0, cache = 0, vol = 100, mute = false, fs = false, buffering = false, seeking = false,
-    has_next = false, quality = "", speed = "1×", title = "", segments = {}, rclick = "pause",
+    has_next = false, quality = "", speed = "1×", title = "", channel = "", likes = "", short_overlay = false, segments = {}, rclick = "pause",
     bezel = nil, vol_until = 0, fade = 0, last_seek = 0, drag_pct = 0, ready = false,
     thumb_file = nil, thumb_w = 0, thumb_h = 0, thumb_want = -99, thumb_on = false,
 }
@@ -183,9 +183,23 @@ local function render()
         -- gradient under the controls
         -- strips on whole pixels: overlapping or fractional edges show up as lines
         local n = 28
-        local gh = math.floor(140 * sc / n) * n
+        local gh = math.floor((S.short_overlay and 210 or 140) * sc / n) * n
         for i = 1, n do
-            rect(0, H - gh + gh * (i - 1) / n, W, H - gh + gh * i / n, "000000", 0.78 * (i / n) ^ 1.8)
+            rect(0, H - gh + gh * (i - 1) / n, W, H - gh + gh * i / n, "000000", (S.short_overlay and 0.86 or 0.78) * (i / n) ^ 1.8)
+        end
+        if S.short_overlay and (S.channel ~= "" or S.title ~= "") then
+            local info_y = L.py - 18 * sc
+            if S.title ~= "" then
+                local maxc = math.max(18, math.floor((W - 28 * sc) / (8.5 * sc)))
+                local tstr = utf8_len(S.title) > maxc and (utf8_sub(S.title, maxc - 1) .. "…") or S.title
+                text(14 * sc, info_y, 1, 15 * sc, esc(tstr), 0.96, nil, true, true)
+                info_y = info_y - 24 * sc
+            end
+            if S.channel ~= "" then
+                local ch = S.channel
+                if S.likes ~= "" then ch = ch .. "  ·  " .. S.likes end
+                text(14 * sc, info_y, 1, 13.5 * sc, esc(ch), 0.88, nil, true, true)
+            end
         end
         if S.fs and S.title ~= "" then
             local th = math.floor(96 * sc / 16) * 16
@@ -511,6 +525,9 @@ mp.register_script_message("flux-state", function(json)
     if t.quality then S.quality = t.quality end
     if t.speed then S.speed = t.speed end
     if t.title then S.title = t.title end
+    if t.channel ~= nil then S.channel = t.channel end
+    if t.likes ~= nil then S.likes = t.likes end
+    if t.short_overlay ~= nil then S.short_overlay = t.short_overlay end
     if t.rclick then S.rclick = t.rclick end
     if t.pip ~= nil then S.pip = t.pip end
     -- the app's theme accent, "#RRGGBB" -> ASS colour order BBGGRR

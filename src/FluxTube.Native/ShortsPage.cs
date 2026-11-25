@@ -52,6 +52,9 @@ public sealed class ShortsPage : IPage
     }
 
     public string? CurrentId => Cur?.VideoId;
+    public string CurrentTitle => Cur?.Title ?? "";
+    public string CurrentChannel => Cur?.Channel ?? "";
+    public string CurrentLikes => Cur?.Meta ?? "";
     private VideoItem? Cur => _i >= 0 && _i < _items.Count ? _items[_i] : null;
     private VideoItem? NextItem => _i + 1 >= 0 && _i + 1 < _items.Count ? _items[_i + 1] : null;
 
@@ -98,6 +101,15 @@ public sealed class ShortsPage : IPage
     {
         AppSettings.Current.ShortsPanelHidden = !AppSettings.Current.ShortsPanelHidden;
         AppSettings.Current.Save();
+        Shell.PushPlayerState();
+        App.Invalidate();
+    }
+
+    public void ToggleInfoOverlay()
+    {
+        AppSettings.Current.ShortsInfoOverlay = !AppSettings.Current.ShortsInfoOverlay;
+        AppSettings.Current.Save();
+        Shell.PushPlayerState();
         App.Invalidate();
     }
 
@@ -270,7 +282,11 @@ public sealed class ShortsPage : IPage
                     var at = _items.FindIndex(x => x.VideoId == id);
                     if (at < 0) return;
                     _items[at] = full;
-                    if (PlaybackTracker.Instance.Current?.VideoId == id) PlaybackTracker.Instance.UpdateMeta(full.Title, full.Channel);
+                    if (PlaybackTracker.Instance.Current?.VideoId == id)
+                    {
+                        PlaybackTracker.Instance.UpdateMeta(full.Title, full.Channel);
+                        Shell.PushPlayerState();
+                    }
                     App.Invalidate();
                 });
             }
@@ -317,6 +333,7 @@ public sealed class ShortsPage : IPage
             new(_muted ? "Включить звук" : "Выключить звук", ToggleMute, icon: _muted ? Th.Volume : Th.Mute, shortcut: "M"),
             new("Повтор Shorts", ToggleLoop, check: _loop, icon: Th.Repeat),
             new(AppSettings.Current.ShortsPanelHidden ? "Показать боковую панель" : "Скрыть боковую панель", TogglePanel, icon: Th.Theater),
+            new("Подпись поверх видео (при наведении)", ToggleInfoOverlay, check: AppSettings.Current.ShortsInfoOverlay, icon: Th.Info),
             MenuItem.Sep,
             new("Открыть как обычное видео", () => Shell.OpenVideo(new VideoItem { VideoId = v.VideoId, Title = v.Title, Channel = v.Channel, ChannelId = v.ChannelId }, "shorts"), icon: Th.Expand),
             new("Открыть в новой вкладке", () => Shell.OpenVideoInNewTab(v), icon: Th.Add),
@@ -367,12 +384,10 @@ public sealed class ShortsPage : IPage
         float fullSide = MathF.Min(430, MathF.Max(340, r.W * 0.34f));
         float side = fullSide * panelT;
         float gap = 22 * panelT;
-        // When side panel is hidden, reserve a sleek 74px YouTube-style channel+title bar right below the centered Short
-        float belowH = 74 * (1 - panelT);
-        var vh = MathF.Floor(MathF.Min(r.H - 28 - belowH, (r.W - side - (hidden ? 110 : 90)) * 16 / 9));
+        var vh = MathF.Floor(MathF.Min(r.H - 28, (r.W - side - (hidden ? 110 : 90)) * 16 / 9));
         var vw = MathF.Floor(vh * 9 / 16);
         var vx = Gfx.Snap(r.X + MathF.Max(20, (r.W - vw - side - gap) / 2));
-        var vy = Gfx.Snap(r.Y + (r.H - vh - belowH) / 2);
+        var vy = Gfx.Snap(r.Y + (r.H - vh) / 2);
         var video = new R(vx, vy, vw, vh);
         var panelR = new R(video.Right + gap, video.Y, MathF.Min(fullSide, r.Right - video.Right - 36), video.H);
 
@@ -400,34 +415,9 @@ public sealed class ShortsPage : IPage
         }
         if (UI.RightClick(video)) ContextMenuFor(v);
 
-        // When panel is hidden: YouTube-style channel + title bar under the centered Short + compact floating rail
+        // When panel is hidden: compact floating rail + optional clean side text block (or video hover overlay via fluxosc.lua)
         if (panelT < 0.05f)
         {
-            // YouTube-style channel & title bar right underneath the centered video
-            float by = video.Bottom + 10;
-            var cname = v.Channel.Length > 0 ? v.Channel : "…";
-            var av0 = new R(video.X + 2, by, 32, 32);
-            Cards.Avatar(av0.X, av0.Y, 32, v.AvatarUrl, cname.TrimStart('@'));
-            var cnr = Gfx.Text(cname, 14, 600, MathF.Max(80, video.W - 140));
-            var cnrRect = new R(av0.Right + 10, by + (32 - cnr.H) / 2, cnr.W, cnr.H);
-            Gfx.Draw(cnr, cnrRect.X, cnrRect.Y, UI.Hover(cnrRect) && v.ChannelId != null ? Th.Brand : Th.Text);
-            if (v.ChannelId != null && (UI.Click(UI.Id("shorts:cch"), cnrRect) || UI.Click(UI.Id("shorts:cav"), av0)))
-            {
-                var cid = v.ChannelId; var cn = cname;
-                App.Post(() => Shell.OpenChannel(cid, cn));
-            }
-            if (v.Meta.Length > 0)
-            {
-                var lr0 = Gfx.Text(v.Meta, 12, 600);
-                Gfx.Draw(lr0, video.Right - lr0.W - 4, by + (32 - lr0.H) / 2, Th.Sub);
-            }
-            if (v.Title.Length > 0)
-            {
-                var tr0 = Sel.Text(UI.Id("shorts:ctitle"), v.Title, video.X + 2, by + 37, 14.5f, Th.Text, 600, video.W - 4, 2, links: true,
-                    onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
-                Cards.CopyMenu(new R(video.X + 2, by + 37, tr0.W, tr0.H), v.Title, "Копировать название");
-            }
-
             float rx = video.Right + 14;
             if (rx + 46 < r.Right)
             {
@@ -440,6 +430,35 @@ public sealed class ShortsPage : IPage
                 if (UI.IconButton(UI.Id("shorts:qcomm"), new R(rx + 4, rail.Y + 86, 36, 36), Th.Comment, 15, Th.Icon)) ToggleComments();
                 if (UI.IconButton(UI.Id("shorts:qup"), new R(rx + 4, rail.Y + 126, 36, 30), Th.ChevronUp, 12, Th.Text, _i > 0)) Step(-1);
                 if (UI.IconButton(UI.Id("shorts:qdn"), new R(rx + 4, rail.Y + 158, 36, 30), Th.ChevronDown, 12, Th.Brand, _i < _items.Count - 1 || _next != null)) Step(1);
+
+                // Side text mode (right next to the rail, where the green arrow pointed!)
+                if (!AppSettings.Current.ShortsInfoOverlay)
+                {
+                    float tx = rail.Right + 18;
+                    float tw = MathF.Min(280, r.Right - tx - 18);
+                    if (tw > 120)
+                    {
+                        float ty = rail.Y + 6;
+                        var cname = v.Channel.Length > 0 ? v.Channel : "…";
+                        var av0 = new R(tx, ty, 36, 36);
+                        Cards.Avatar(av0.X, av0.Y, 36, v.AvatarUrl, cname.TrimStart('@'));
+                        var cnr = Gfx.Text(cname, 14.5f, 600, tw - 46);
+                        var cnrRect = new R(av0.Right + 10, ty + 2, cnr.W, cnr.H);
+                        Gfx.Draw(cnr, cnrRect.X, cnrRect.Y, UI.Hover(cnrRect) && v.ChannelId != null ? Th.Brand : Th.Text);
+                        if (v.Meta.Length > 0) Gfx.Draw(v.Meta + " лайков", av0.Right + 10, ty + 21, 12, Th.Sub, 400, tw - 46);
+                        if (v.ChannelId != null && (UI.Click(UI.Id("shorts:cch"), cnrRect) || UI.Click(UI.Id("shorts:cav"), av0)))
+                        {
+                            var cid = v.ChannelId; var cn = cname;
+                            App.Post(() => Shell.OpenChannel(cid, cn));
+                        }
+                        if (v.Title.Length > 0)
+                        {
+                            var tr0 = Sel.Text(UI.Id("shorts:ctitle"), v.Title, tx, ty + 48, 14.5f, Th.Text, 600, tw, 5, links: true,
+                                onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
+                            Cards.CopyMenu(new R(tx, ty + 48, tr0.W, tr0.H), v.Title, "Копировать название");
+                        }
+                    }
+                }
             }
             if (UI.Wheel != 0)
             {

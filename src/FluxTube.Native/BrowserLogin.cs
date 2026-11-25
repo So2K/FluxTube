@@ -198,6 +198,134 @@ public static class BrowserLogin
         }
     }
 
+    /// <summary>
+    /// Scans all installed browser profiles (Chrome, Edge, Brave, Vivaldi, Opera, Firefox)
+    /// and imports every signed-in YouTube account into FluxTube's multi-account vault.
+    /// </summary>
+    public static void ImportAllAccounts()
+    {
+        if (_busy) { Shell.Toast("Импорт уже выполняется…", Th.Sub, 2000); return; }
+        _busy = true;
+        Shell.Toast("Ищу все аккаунты YouTube в профилях браузеров…", Th.Sub, 4000);
+        _ = Task.Run(async () =>
+        {
+            int imported = 0, locked = 0;
+            var sources = new List<(string Spec, string Label)>();
+            var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+
+            void AddChromium(string id, string name, string userData)
+            {
+                if (!Directory.Exists(userData)) return;
+                foreach (var dir in Directory.GetDirectories(userData))
+                {
+                    var bn = Path.GetFileName(dir);
+                    if (bn == "Default" || bn.StartsWith("Profile ", StringComparison.OrdinalIgnoreCase))
+                        sources.Add(($"{id}:{bn}", $"{name} ({bn})"));
+                }
+            }
+
+            AddChromium("chrome", "Chrome", Path.Combine(local, "Google", "Chrome", "User Data"));
+            AddChromium("edge", "Edge", Path.Combine(local, "Microsoft", "Edge", "User Data"));
+            AddChromium("brave", "Brave", Path.Combine(local, "BraveSoftware", "Brave-Browser", "User Data"));
+            AddChromium("vivaldi", "Vivaldi", Path.Combine(local, "Vivaldi", "User Data"));
+            if (Directory.Exists(Path.Combine(roaming, "Opera Software", "Opera Stable")))
+                sources.Add(("opera", "Opera"));
+
+            var ffProfiles = Path.Combine(roaming, "Mozilla", "Firefox", "Profiles");
+            if (Directory.Exists(ffProfiles))
+            {
+                foreach (var dir in Directory.GetDirectories(ffProfiles))
+                {
+                    if (File.Exists(Path.Combine(dir, "cookies.sqlite")))
+                        sources.Add(($"firefox:{dir}", $"Firefox ({Path.GetFileName(dir)})"));
+                }
+            }
+
+            var seenSapisid = new HashSet<string>();
+            string? firstId = null;
+
+            foreach (var (spec, label) in sources)
+            {
+                var (lines, err) = await ExtractBrowserCookiesAsync(spec);
+                if (lines == null)
+                {
+                    if (err.Contains("Could not copy", StringComparison.OrdinalIgnoreCase)
+                        || err.Contains("DPAPI", StringComparison.OrdinalIgnoreCase)
+                        || err.Contains("decrypt", StringComparison.OrdinalIgnoreCase))
+                        locked++;
+                    continue;
+                }
+                var sapisid = lines.FirstOrDefault(l => l.Contains("\tSAPISID\t") || l.Contains("\t__Secure-3PAPISID\t"))?.Split('\t').LastOrDefault() ?? "";
+                if (sapisid.Length > 0 && !seenSapisid.Add(sapisid)) continue;
+
+                var id = "imp_" + Math.Abs(sapisid.GetHashCode());
+                firstId ??= id;
+                var lbl = label;
+                var copy = lines.ToArray();
+                App.Post(() => AccountMenu.AddToVault(id, lbl, "YouTube", null, null, copy));
+                imported++;
+            }
+
+            App.Post(() =>
+            {
+                _busy = false;
+                if (imported > 0)
+                {
+                    if (!CookieStore.IsLoggedIn && firstId != null) AccountMenu.SwitchTo(firstId);
+                    var msg = $"Импортировано аккаунтов: {imported}" + (locked > 0 ? $" (заблокировано открытыми браузерами: {locked})" : "");
+                    Shell.Toast(msg, Th.Good, 5500);
+                }
+                else if (locked > 0)
+                {
+                    Shell.Toast("Открытые браузеры блокируют cookies. Закройте Chrome/Edge и повторите, либо добавьте через окно входа.", Th.Warn, 7500);
+                }
+                else
+                {
+                    Shell.Toast("Активные аккаунты YouTube в браузерах не найдены.", Th.Warn, 5000);
+                }
+            });
+        });
+    }
+
+    private static async Task<(List<string>? Lines, string Error)> ExtractBrowserCookiesAsync(string browserSpec)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), $"fluxtube-all-{Guid.NewGuid():N}.txt");
+        try
+        {
+            var psi = new ProcessStartInfo(Paths.YtDlp)
+            {
+                CreateNoWindow = true, UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true,
+            };
+            foreach (var a in new[] { "--cookies-from-browser", browserSpec, "--cookies", tmp, "--skip-download", "--no-warnings", "--flat-playlist", "--playlist-items", "1", "https://www.youtube.com/feed/history" })
+                psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi)!;
+            var errTask = p.StandardError.ReadToEndAsync();
+            var outTask = p.StandardOutput.ReadToEndAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            try { await p.WaitForExitAsync(cts.Token); }
+            catch (OperationCanceledException) { try { p.Kill(true); } catch { } return (null, "timeout"); }
+            var err = (await errTask).Trim();
+            _ = await outTask;
+            if (!File.Exists(tmp)) return (null, err);
+            var keep = File.ReadAllLines(tmp).Where(l =>
+            {
+                var d = l.StartsWith("#HttpOnly_") ? l[10..] : l;
+                if (d.StartsWith('#') || d.Length == 0) return false;
+                var dom = d.Split('\t')[0].TrimStart('.');
+                return dom.EndsWith("youtube.com") || dom.EndsWith("google.com");
+            }).ToList();
+            try { File.Delete(tmp); } catch { }
+            var hasAuth = keep.Any(l => l.Contains("\tSAPISID\t") || l.Contains("\t__Secure-3PAPISID\t") || l.Contains("\tSID\t"));
+            return hasAuth ? (keep, "") : (null, "no auth");
+        }
+        catch (Exception e)
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            return (null, e.Message);
+        }
+    }
+
     public static void ImportFromFile(string path)
     {
         var keep = File.ReadAllLines(path).Where(l =>

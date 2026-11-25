@@ -175,6 +175,25 @@ public static class AccountMenu
         }
     }
 
+    /// <summary>Adds or updates an imported account in the vault without forcing a switch.</summary>
+    public static void AddToVault(string id, string name, string handle, string? photo, string? channelId, string[] cookieLines)
+    {
+        try
+        {
+            Directory.CreateDirectory(AccountsDir);
+            File.WriteAllLines(CookiePath(id), new[] { "# Netscape HTTP Cookie File" }.Concat(cookieLines));
+            var existing = _saved.FirstOrDefault(x => x.Id == id);
+            if (existing == null) { existing = new SavedAccount { Id = id }; _saved.Add(existing); }
+            existing.Name = name;
+            existing.Handle = handle;
+            existing.Photo = photo;
+            existing.ChannelId = channelId;
+            WriteIndex();
+            App.Invalidate();
+        }
+        catch (Exception e) { Paths.Log("add vault: " + e.Message); }
+    }
+
     public static void RemoveSaved(string id)
     {
         var idx = _saved.FindIndex(x => x.Id == id);
@@ -249,7 +268,7 @@ public static class AccountMenu
         const float w = 310;
         var h = _page switch
         {
-            "accounts" => 54 + _saved.Count * 54 + (_saved.Count > 0 ? 10 : 30) + 126,
+            "accounts" => 54 + _saved.Count * 54 + (_saved.Count > 0 ? 10 : 30) + 166,
             "theme" => 52 + (Themes.All.Length + 1) * 38 + 10,
             "lang" => 52 + Langs.Length * 38 + 10,
             _ => _mainH,
@@ -392,6 +411,7 @@ public static class AccountMenu
             Sep(r, ref y);
         }
 
+        if (Item(r, x, ref y, Th.Download, "Импортировать все аккаунты", null, false)) { Close(); App.Post(BrowserLogin.ImportAllAccounts); }
         if (Item(r, x, ref y, Th.Add, "Добавить аккаунт (браузер)…", null, false))
         {
             Close();
