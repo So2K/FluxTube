@@ -93,7 +93,8 @@ public sealed class MpvPlayer : IDisposable
             Opt(ctx, "osd-font", "Segoe UI");
             Opt(ctx, "osd-font-size", "28");
             Opt(ctx, "demuxer-max-bytes", "32MiB");
-            Opt(ctx, "demuxer-max-back-bytes", "8MiB");
+            Opt(ctx, "demuxer-max-back-bytes", "16MiB");
+            Opt(ctx, "hr-seek-framedrop", "no");
             Opt(ctx, "cache", "yes");
             Opt(ctx, "demuxer-seekable-cache", "no");
             Opt(ctx, "volume-max", "150");
@@ -191,7 +192,8 @@ public sealed class MpvPlayer : IDisposable
 
     /// <summary>
     /// Suspends or restores hardware/software video decoding (vid=no vs vid=auto) while audio keeps playing seamlessly.
-    /// Drops GPU/CPU usage to near-zero when the window is minimized, video is off-screen, or Audio-Only Music Mode is on.
+    /// When re-enabling video during active playback, forces an immediate exact keyframe refresh so the picture returns
+    /// on the very first frame (never waiting 10+ seconds for the next AV1/VP9 keyframe or staying black when paused).
     /// </summary>
     public void SetVideoEnabled(bool enabled)
     {
@@ -199,6 +201,20 @@ public sealed class MpvPlayer : IDisposable
         VideoEnabled = enabled;
         if (!IsReady) return;
         Set("vid", enabled ? "auto" : "no");
+        if (enabled && HasMedia)
+            Command("seek", "0", "relative+exact");
+    }
+
+    /// <summary>Ensures mpv's live vid property matches VideoEnabled (guards against any race during loadfile).</summary>
+    public void EnsureVideoTrackSynced()
+    {
+        if (!IsReady || !VideoEnabled) return;
+        var cur = GetString("vid");
+        if (string.Equals(cur, "no", StringComparison.OrdinalIgnoreCase))
+        {
+            Set("vid", "auto");
+            if (HasMedia) Command("seek", "0", "relative+exact");
+        }
     }
 
     /// <summary>Smoothly ramps mpv volume to target (0..150) over ~100ms instead of a harsh step jump.</summary>
@@ -250,8 +266,9 @@ public sealed class MpvPlayer : IDisposable
         CurrentVideoId = videoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         if (startPaused) { Paused = true; Set("pause", "yes"); }
+        // Keep vid strictly as a global property (never a sticky per-file loadfile option, which races with SetVideoEnabled(true)!)
+        Set("vid", VideoEnabled ? "auto" : "no");
         var opts = new List<string> { startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", CultureInfo.InvariantCulture)}" : "start=0" };
-        if (!VideoEnabled) opts.Add("vid=no");
         Command("loadfile", url, "replace", "-1", string.Join(',', opts));
         if (!startPaused) Set("pause", "no");
     }
@@ -265,8 +282,9 @@ public sealed class MpvPlayer : IDisposable
         CurrentVideoId = s.VideoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         if (keepPause) { Paused = true; Set("pause", "yes"); }
+        // Keep vid strictly as a global property so loadfile never overrides SetVideoEnabled(true) into a black screen
+        Set("vid", VideoEnabled ? "auto" : "no");
         var opts = new List<string> { "start=" + (startSeconds > 0.3 ? startSeconds.ToString("0.00", CultureInfo.InvariantCulture) : "0") };
-        if (!VideoEnabled) opts.Add("vid=no");
         if (s.Audio != null) opts.Add("audio-file=" + Escaped(s.Audio));
         var t = string.IsNullOrEmpty(title) ? s.Title : title;
         if (!string.IsNullOrEmpty(t)) opts.Add("force-media-title=" + Escaped(t));
@@ -290,6 +308,47 @@ public sealed class MpvPlayer : IDisposable
     public void SeekAbsolute(double s) => Command("seek", s.ToString(CultureInfo.InvariantCulture), "absolute");
     public void ShowText(string text, int ms = 1800) => Command("show-text", text, ms.ToString());
     public void SetSpeed(double v) { Speed = v; Set("speed", v.ToString(CultureInfo.InvariantCulture)); }
+
+    private int _frameStepGen;
+
+    /// <summary>
+    /// Precision frame-by-frame jog (Shift + mouse wheel): steps exact decoded video frames
+    /// forward or backward and renders a crisp pro-NLE OSD readout with frame number, exact milliseconds, and FPS.
+    /// </summary>
+    public void StepFrame(int deltaFrames)
+    {
+        if (!IsReady || !HasMedia || deltaFrames == 0) return;
+        bool forward = deltaFrames > 0;
+        int steps = Math.Clamp(Math.Abs(deltaFrames), 1, 5);
+        for (int i = 0; i < steps; i++)
+            Command(forward ? "frame-step" : "frame-back-step");
+        Paused = true;
+
+        var gen = Interlocked.Increment(ref _frameStepGen);
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(42);
+            if (gen != Volatile.Read(ref _frameStepGen) || !IsReady || !HasMedia) return;
+            double pos = GetDouble("time-pos");
+            double fps = GetDouble("estimated-vf-fps");
+            if (fps <= 0.5) fps = GetDouble("container-fps");
+            double frameNum = GetDouble("estimated-frame-number");
+            if (frameNum <= 0 && fps > 0.5 && pos >= 0) frameNum = Math.Round(pos * fps);
+
+            var ts = TimeSpan.FromSeconds(Math.Max(0, pos));
+            string tc = ts.TotalHours >= 1
+                ? $"{(int)ts.TotalHours}:{ts.Minutes:00}:{ts.Seconds:00}.{ts.Milliseconds:000}"
+                : $"{ts.Minutes}:{ts.Seconds:00}.{ts.Milliseconds:000}";
+            string arrow = forward ? "▸" : "◂";
+            string sign = forward ? $"+{steps}" : $"-{steps}";
+            string fpsPart = fps > 1 ? $" · {fps:0.##} fps" : "";
+            string lbl = L.T("Кадр", "Frame");
+            string text = frameNum > 0
+                ? $"{arrow} {lbl} #{(long)Math.Round(frameNum)}  ·  {tc}{fpsPart}  ({sign})"
+                : $"{arrow} {lbl}  ·  {tc}{fpsPart}  ({sign})";
+            ShowText(text, 1300);
+        });
+    }
 
     public double GetDouble(string name)
     {
@@ -396,6 +455,7 @@ public sealed class MpvPlayer : IDisposable
                 case EventId.FileLoaded:
                 {
                     var gen = Volatile.Read(ref _loadGen);
+                    if (VideoEnabled) EnsureVideoTrackSynced();
                     Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) FileLoaded?.Invoke(); });
                     break;
                 }

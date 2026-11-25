@@ -16,8 +16,8 @@ public static unsafe class App
 
     private static readonly ConcurrentQueue<Action> _posts = new();
     private static readonly List<(long Due, Action Act)> _timers = new();
-    private static bool _inFrame, _tracking, _wakePending, _occludedTimer;
-    private static long _lastFrameTick;
+    private static bool _inFrame, _tracking, _wakePending, _occludedTimer, _animating;
+    private static long _lastFrameTs;
     private static nint _arrow, _hand, _ibeam;
     private const uint WM_POST = W.WM_APP + 1, WM_WAKE = W.WM_APP + 2;
 
@@ -138,8 +138,37 @@ public static unsafe class App
         try
         {
             W.MSG msg;
-            while (W.GetMessageW(&msg, 0, 0, 0) > 0)
+            while (true)
             {
+                if (_animating && !Gfx.Occluded && !W.IsIconic(Hwnd))
+                {
+                    // Drain all queued high-polling-rate mouse/wheel messages first so scrolling never starves rendering
+                    bool quit = false;
+                    while (W.PeekMessageW(&msg, 0, 0, 0, 1 /*PM_REMOVE*/))
+                    {
+                        if (msg.message == 0x0012 /*WM_QUIT*/) { quit = true; break; }
+                        W.TranslateMessage(&msg);
+                        W.DispatchMessageW(&msg);
+                    }
+                    if (quit) break;
+                    if (_animating && !Gfx.Occluded && !W.IsIconic(Hwnd))
+                    {
+                        _animating = false;
+                        Frame();
+                        W.ValidateRect(Hwnd, null);
+                        if (UI.TakeAnimate())
+                        {
+                            if (Gfx.Occluded)
+                            {
+                                if (!_occludedTimer) { _occludedTimer = true; W.SetTimer(Hwnd, 3, 250, 0); }
+                            }
+                            else _animating = true;
+                        }
+                    }
+                    continue;
+                }
+                int r = W.GetMessageW(&msg, 0, 0, 0);
+                if (r <= 0) break;
                 W.TranslateMessage(&msg);
                 W.DispatchMessageW(&msg);
             }
@@ -170,9 +199,9 @@ public static unsafe class App
         {
             var t0 = Stopwatch.GetTimestamp();
             var now = Environment.TickCount64;
-            UI.Dt = Math.Clamp((now - _lastFrameTick) / 1000.0, 0.001, 0.05);
+            UI.Dt = _lastFrameTs == 0 ? 1.0 / 120.0 : Math.Clamp(Stopwatch.GetElapsedTime(_lastFrameTs, t0).TotalSeconds, 0.0005, 0.05);
             UI.Now = now;
-            _lastFrameTick = now;
+            _lastFrameTs = t0;
 
             int up0 = Images.Uploaded, tx0 = Gfx.TextCreated;
             Images.Upload();
@@ -232,6 +261,7 @@ public static unsafe class App
             switch (m)
             {
                 case W.WM_PAINT:
+                    _animating = false;
                     Frame();
                     W.ValidateRect(h, null);
                     if (UI.TakeAnimate())
@@ -241,7 +271,7 @@ public static unsafe class App
                             // Window is occluded (covered/locked): Present(1,0) does not wait for VSync, so pause spin!
                             if (!_occludedTimer) { _occludedTimer = true; W.SetTimer(h, 3, 250, 0); }
                         }
-                        else W.InvalidateRect(h, null, 0);
+                        else _animating = true;
                     }
                     return 0;
                 case W.WM_ERASEBKGND:
@@ -328,8 +358,9 @@ public static unsafe class App
                     UpdateMouse(l);
                     if (UI.AutoScrollActive) { UI.StopAutoScroll(); Invalidate(); return 0; }
                     W.SetCapture(h);
-                    if (W.GetFocus() != h) W.SetFocus(h);
-                    Suggest.Hide();
+                    bool inFocusedEdit = Edit.IsPointInFocusedSingleLine(UI.MX, UI.MY);
+                    if (!inFocusedEdit && W.GetFocus() != h) W.SetFocus(h);
+                    if (!inFocusedEdit) Suggest.Hide();
                     UI.Down = UI.Pressed = true;
                     Invalidate();
                     return 0;
@@ -402,7 +433,12 @@ public static unsafe class App
                         else Shell.AdjustZoom(delta > 0 ? 0.05f : -0.05f);
                         return 0;
                     }
-                    if (Shell.OverVideo(UI.MX, UI.MY)) Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
+                    if (W.KeyDown(W.VK_SHIFT) && AppSettings.Current.ShiftWheelFrameStep && Shell.OverVideo(UI.MX, UI.MY))
+                    {
+                        Shell.StepVideoFrame(delta);
+                        return 0;
+                    }
+                    if (Shell.OverVideo(UI.MX, UI.MY) && AppSettings.Current.WheelVolumeOnVideo) Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
                     else { UI.Wheel += delta; Invalidate(); }
                     return 0;
                 }
@@ -660,13 +696,28 @@ internal static unsafe class VideoHost
                     Loupe.AdjustZoom(delta > 0 ? 0.4f : -0.4f);
                     return 0;
                 }
-                // Wheel over ANY video (normal video, mini-player, PiP, or Shorts) smoothly adjusts volume!
-                if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp)
+                // Shift + wheel over ANY video (Watch, Fullscreen, PiP, Shorts) -> precision frame-by-frame scrub!
+                if (W.AsyncKeyDown(W.VK_SHIFT) && AppSettings.Current.ShiftWheelFrameStep)
                 {
-                    sp.AdjustVolume(delta > 0 ? 5 : -5);
+                    Shell.StepVideoFrame(delta);
                     return 0;
                 }
-                Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
+                // Optional wheel-volume over video: when disabled, wheel switches Shorts or scrolls the Watch page naturally!
+                if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp)
+                {
+                    if (AppSettings.Current.WheelVolumeOnVideo) sp.AdjustVolume(delta > 0 ? 5 : -5);
+                    else sp.Step(delta > 0 ? -1 : 1);
+                    return 0;
+                }
+                if (AppSettings.Current.WheelVolumeOnVideo)
+                {
+                    Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
+                }
+                else if (!Pip.Active && !Shell.IsFullscreen)
+                {
+                    UI.Wheel += delta;
+                    App.Invalidate();
+                }
                 return 0;
             }
             case W.WM_ERASEBKGND:

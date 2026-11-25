@@ -124,11 +124,23 @@ public sealed class AppSettings
     /// <summary>Audio-only music stage on WatchPage: suspends mpv video decoding (0% GPU) and shows live audio waves.</summary>
     public bool AudioOnlyMode { get; set; } = false;
     /// <summary>Automatically suspends mpv video decoding (vid=no) whenever FluxTube is minimized or viewing another tab.</summary>
-    public bool AutoSuspendVideoWhenHidden { get; set; } = true;
+    public bool AutoSuspendVideoWhenHidden { get; set; } = false;
     /// <summary>Live audio visualizer style ("bars_wave", "ribbon", "bars", "off").</summary>
     public string VisualizerStyle { get; set; } = "bars_wave";
     /// <summary>Tactile frosted/matte textured glass backdrop ("off", "soft", "matte").</summary>
     public string FrostedGlass { get; set; } = "matte";
+    /// <summary>Application UI language ("ru" or "en"). Separate from YouTube content language (Hl).</summary>
+    public string UiLanguage { get; set; } = "ru";
+    /// <summary>Hardware-accelerated GPU DirectionalBlur motion blur on UI scrolling, transitions, and Shorts swipes.</summary>
+    public bool UiMotionBlur { get; set; } = true;
+    /// <summary>UI motion blur shutter strength ("soft", "medium", "cinema").</summary>
+    public string UiMotionBlurStrength { get; set; } = "medium";
+    /// <summary>YouTube Shorts ad &amp; sponsored video auto-blocker ("off", "standard", "max").</summary>
+    public string ShortsAdBlock { get; set; } = "max";
+    /// <summary>True: mouse wheel over video adjusts volume. False: wheel scrolls the page (or switches Shorts).</summary>
+    public bool WheelVolumeOnVideo { get; set; } = true;
+    /// <summary>True: Shift + mouse wheel over video steps frame-by-frame with exact millisecond &amp; frame OSD readout.</summary>
+    public bool ShiftWheelFrameStep { get; set; } = true;
     /// <summary>Optional custom sound display names per UI sound slot (normalized WAV copies stored in .fluxtube/sfx).</summary>
     public Dictionary<string, string> CustomSfx { get; set; } = new();
 

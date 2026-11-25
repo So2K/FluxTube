@@ -47,6 +47,7 @@ public static class AccountMenu
     private static readonly string AccountsDir = Path.Combine(Paths.Data, "accounts");
     private static readonly string IndexFile = Path.Combine(AccountsDir, "index.json");
 
+    private static readonly (string Code, string Name)[] UiLangs = [("ru", "Русский"), ("en", "English")];
     private static readonly (string Code, string Name)[] Langs =
         [("ru", "Русский"), ("en", "English"), ("uk", "Українська"), ("be", "Беларуская"), ("kk", "Қазақ тілі"), ("de", "Deutsch"),
          ("es", "Español"), ("fr", "Français"), ("pt", "Português"), ("ja", "日本語")];
@@ -217,13 +218,13 @@ public static class AccountMenu
 
             InnerTube.Instance.ResetSession();
             Shell.OnAccountChanged();
-            Shell.Toast($"Аккаунт: {(target.Name.Length > 0 ? target.Name : target.Handle)}", Th.Good, 2800);
+            Shell.Toast(L.T("Аккаунт: ", "Account: ") + (target.Name.Length > 0 ? target.Name : target.Handle), Th.Good, 2800);
             Shell.OpenRoot("home");
         }
         catch (Exception e)
         {
             Paths.Log("account switch: " + e.Message);
-            Shell.Toast("Не удалось переключить аккаунт: " + e.Message, Th.Warn);
+            Shell.Toast(L.T("Не удалось переключить аккаунт: ", "Could not switch account: ") + e.Message, Th.Warn);
         }
     }
 
@@ -314,11 +315,12 @@ public static class AccountMenu
     public static void Draw()
     {
         if (!Open) return;
-        const float w = 316;
+        const float w = 324;
         var h = _page switch
         {
-            "accounts" => 54 + _saved.Count * 54 + (_saved.Count > 0 ? 12 : 34) + 168,
+            "accounts" => 54 + _saved.Count * 54 + (_saved.Count > 0 ? 12 : 34) + 178,
             "theme" => 52 + (Themes.All.Length + 1) * 38 + 10,
+            "uilang" => 52 + UiLangs.Length * 38 + 10,
             "lang" => 52 + Langs.Length * 38 + 10,
             _ => _mainH,
         };
@@ -335,16 +337,20 @@ public static class AccountMenu
         var pt = Math.Clamp((UI.Now - _pageAt) / 150f, 0, 1);
         if (pt < 1) UI.Animate();
         var slide = (1 - pt) * (1 - pt) * (_page == "" ? -18 : 18);
+        float slideVel = pt < 1 ? -2f * (1 - pt) * (_page == "" ? -18 : 18) / 0.15f : 0f;
+        bool mb = Gfx.PushMotionBlur(r, slideVel, 0f);
         Gfx.PushClip(r);
         var a = ease * pt;
         switch (_page)
         {
             case "accounts": AccountsPage(r, slide, a); break;
             case "theme": ThemePage(r, slide, a); break;
+            case "uilang": UiLangPage(r, slide, a); break;
             case "lang": LangPage(r, slide, a); break;
             default: MainPage(r, slide, a); break;
         }
         Gfx.PopClip();
+        Gfx.PopMotionBlur(mb);
 
         // a click anywhere else closes it
         if ((UI.Pressed || UI.RightClicked) && !r.Contains(UI.MX, UI.MY)) Close();
@@ -361,7 +367,7 @@ public static class AccountMenu
             Gfx.Draw(acc.Handle, x + 70, y + 21, 13.5f, Gfx.Fade(Th.Text, a), 400, r.W - 90);
             if (acc.ChannelId != null)
             {
-                var link = Gfx.Text("Перейти на канал", 13.5f, 500);
+                var link = Gfx.Text(L.T("Перейти на канал", "View your channel"), 13.5f, 500);
                 var lr = new R(x + 70, y + 46, link.W, link.H);
                 var over = UI.Hover(lr);
                 Gfx.Draw(link, lr.X, lr.Y, Gfx.Fade(over ? Gfx.Mix(Th.Brand, Th.Text, 0.3f) : Th.Brand, a));
@@ -373,33 +379,35 @@ public static class AccountMenu
         else if (CookieStore.IsLoggedIn)
         {
             Cards.Avatar(x + 16, y + 2, 40, null, "?");
-            Gfx.Draw(SessionExpired ? "Сессия YouTube устарела" : "Вы вошли в YouTube", x + 70, y + 4, 15, Th.Text, 600);
-            Gfx.Draw(SessionExpired ? "Войдите снова через окно входа" : "Загружаю профиль…", x + 70, y + 25, 13, SessionExpired ? Th.Warn : Th.Sub);
+            Gfx.Draw(SessionExpired ? L.T("Сессия YouTube устарела", "YouTube session expired") : L.T("Вы вошли в YouTube", "Signed in to YouTube"), x + 70, y + 4, 15, Th.Text, 600);
+            Gfx.Draw(SessionExpired ? L.T("Войдите снова в 1 клик", "Sign in again in 1 click") : L.T("Загружаю профиль…", "Loading profile…"), x + 70, y + 25, 13, SessionExpired ? Th.Warn : Th.Sub);
             y += 62;
         }
         else
         {
-            Gfx.Draw("Вы не вошли", x + 16, y, 15, Th.Text, 600);
-            Gfx.Draw("Откройте YouTube в обычном браузере и возьмите вход из его профиля.", x + 16, y + 22, 12.5f, Th.Sub, 400, r.W - 32, 3);
-            if (UI.Pill(UI.Id("am:login"), x + 16, y + 66, 34, Th.Globe, "Открыть YouTube", out _, accent: true)) { Close(); App.Post(Shell.LoginNewAccount); }
+            Gfx.Draw(L.T("Вы не вошли", "Not signed in"), x + 16, y, 15, Th.Text, 600);
+            Gfx.Draw(L.T("Войдите в аккаунт Google — подписки, история и рекомендации появятся сразу.", "Sign in to Google for your subscriptions, history, and recommendations."), x + 16, y + 22, 12.5f, Th.Sub, 400, r.W - 32, 3);
+            if (UI.Pill(UI.Id("am:login"), x + 16, y + 66, 34, Th.Account, L.T("Войти в YouTube", "Sign in to YouTube"), out _, accent: true)) { Close(); App.Post(LoginModal.Show); }
             y += 110;
         }
         Sep(r, ref y);
-        var accLabel = _saved.Count > 1 ? $"Сменить аккаунт ({_saved.Count})" : "Аккаунты и вход";
+        var accLabel = _saved.Count > 1 ? L.T($"Сменить аккаунт ({_saved.Count})", $"Switch account ({_saved.Count})") : L.T("Аккаунты и вход", "Accounts & sign in");
         if (Item(r, x, ref y, "\uE748", accLabel, true)) Go("accounts");
         if (CookieStore.IsLoggedIn)
         {
-            if (Item(r, x, ref y, Th.Add, "Добавить ещё аккаунт", false)) { Close(); App.Post(Shell.LoginNewAccount); }
-            if (Item(r, x, ref y, "\uE7E8", "Выйти (гостевой режим)", false)) { Close(); App.Post(Shell.Logout); }
+            if (Item(r, x, ref y, Th.Add, L.T("Добавить ещё аккаунт", "Add another account"), false)) { Close(); App.Post(LoginModal.Show); }
+            if (Item(r, x, ref y, "\uE7E8", L.T("Выйти (гостевой режим)", "Sign out (guest mode)"), false)) { Close(); App.Post(Shell.Logout); }
             Sep(r, ref y);
-            if (Item(r, x, ref y, "\uE8A7", "Творческая студия YouTube", false)) { Close(); W.Open("https://studio.youtube.com/"); }
+            if (Item(r, x, ref y, "\uE8A7", L.T("Творческая студия YouTube", "YouTube Studio"), false)) { Close(); W.Open("https://studio.youtube.com/"); }
             Sep(r, ref y);
         }
-        if (Item(r, x, ref y, "\uE790", "Тема: " + Themes.Current.Name, true)) Go("theme");
+        if (Item(r, x, ref y, "\uE790", L.T("Тема: ", "Theme: ") + Themes.DisplayName(Themes.Current.Name), true)) Go("theme");
+        var uiLangName = L.En ? "English" : "Русский";
+        if (Item(r, x, ref y, Th.Globe, L.T("Язык интерфейса: ", "App language: ") + uiLangName, true)) Go("uilang");
         var lang = Langs.FirstOrDefault(l => l.Code == AppSettings.Current.Hl).Name ?? AppSettings.Current.Hl;
-        if (Item(r, x, ref y, "\uF2B7", "Язык YouTube: " + lang, true)) Go("lang");
+        if (Item(r, x, ref y, "\uF2B7", L.T("Язык YouTube: ", "YouTube language: ") + lang, true)) Go("lang");
         Sep(r, ref y);
-        if (Item(r, x, ref y, Th.Settings, "Настройки", false)) { Close(); App.Post(() => Shell.OpenRoot("settings")); }
+        if (Item(r, x, ref y, Th.Settings, L.T("Настройки", "Settings"), false)) { Close(); App.Post(() => Shell.OpenRoot("settings")); }
         var need = y + 8 - r.Y;
         if (MathF.Abs(need - _mainH) > 0.5f) { _mainH = need; UI.Animate(); }
     }
@@ -407,15 +415,15 @@ public static class AccountMenu
     private static void AccountsPage(R r, float slide, float a)
     {
         float x = r.X + slide, y = r.Y + 8;
-        Header(r, x, ref y, "Аккаунты YouTube");
+        Header(r, x, ref y, L.T("Аккаунты YouTube", "YouTube accounts"));
         var view = new R(r.X, y, r.W, MathF.Max(40, r.Bottom - y - 4));
-        float totalH = (_saved.Count == 0 ? 34 : _saved.Count * 54 + 12) + 252;
+        float totalH = (_saved.Count == 0 ? 34 : _saved.Count * 54 + 12) + 178;
         var scroll = UI.BeginScroll(_scrollAcc, view, totalH);
         y -= scroll;
 
         if (_saved.Count == 0)
         {
-            Gfx.Draw("Пока нет сохранённых аккаунтов", x + 16, y + 6, 13, Th.Sub);
+            Gfx.Draw(L.T("Пока нет сохранённых аккаунтов", "No saved accounts yet"), x + 16, y + 6, 13, Th.Sub);
             y += 34;
         }
         else
@@ -428,7 +436,7 @@ public static class AccountMenu
                 if (active) Gfx.Fill(row.Inset(6, 2), Th.A(0.08f), 8);
                 UI.Glow(UI.Id("am:acc:" + acc.Id), row.Inset(6, 2), 8, over);
                 Cards.Avatar(x + 16, y + 8, 36, acc.Photo, acc.Name.Length > 0 ? acc.Name : acc.Handle);
-                Gfx.Draw(acc.Name.Length > 0 ? acc.Name : "Аккаунт", x + 62, y + 8, 13.5f, Gfx.Fade(Th.Text, a), active ? 700 : 500, r.W - 118);
+                Gfx.Draw(acc.Name.Length > 0 ? acc.Name : L.T("Аккаунт", "Account"), x + 62, y + 8, 13.5f, Gfx.Fade(Th.Text, a), active ? 700 : 500, r.W - 118);
                 Gfx.Draw(acc.Handle, x + 62, y + 27, 12, Gfx.Fade(Th.Sub, a), 400, r.W - 118);
 
                 var delR = new R(r.Right - 36, y + 14, 24, 24);
@@ -459,23 +467,24 @@ public static class AccountMenu
             Sep(r, ref y);
         }
 
-        if (Item(r, x, ref y, Th.Globe, "Открыть YouTube в браузере", false)) { Close(); App.Post(Shell.LoginNewAccount); }
-        if (Item(r, x, ref y, Th.Account, "Взять вход из Chrome", false)) { Close(); App.Post(() => BrowserLogin.ImportFromBrowser("chrome")); }
-        if (Item(r, x, ref y, Th.Account, "Взять вход из Firefox", false)) { Close(); App.Post(() => BrowserLogin.ImportFromBrowser("firefox")); }
-        if (Item(r, x, ref y, Th.Account, "Встроенное окно входа…", false)) { Close(); App.Post(Shell.LoginWebView); }
-        if (Item(r, x, ref y, Th.Folder, "Импорт из cookies.txt…", false))
+        if (Item(r, x, ref y, Th.Account, L.T("Войти / добавить аккаунт…", "Sign in / add account…"), false)) { Close(); App.Post(LoginModal.Show); }
+        if (BrowserLogin.HasFirefox)
+        {
+            if (Item(r, x, ref y, Th.Globe, L.T("Импорт из Firefox (1 клик)", "Import from Firefox (1 click)"), false)) { Close(); App.Post(BrowserLogin.ImportFromFirefox); }
+        }
+        if (Item(r, x, ref y, Th.Copy, L.T("Вставить cookies из буфера", "Paste cookies from clipboard"), false)) { Close(); App.Post(BrowserLogin.ImportFromClipboard); }
+        if (Item(r, x, ref y, Th.Folder, L.T("Импорт из cookies.txt…", "Import from cookies.txt…"), false))
         {
             Close();
-            App.Post(() => Dialogs.PickFileAsync("cookies.txt\0*.txt\0\0", BrowserLogin.ImportFromFile));
+            App.Post(() => Dialogs.PickFileAsync("cookies.txt\0*.txt;*.json\0\0", BrowserLogin.ImportFromFile));
         }
-        if (Item(r, x, ref y, Th.OpenNew, "Открыть YouTube в браузере", false)) { Close(); W.Open("https://www.youtube.com/"); }
         UI.EndScroll();
     }
 
     private static void ThemePage(R r, float slide, float a)
     {
         float x = r.X + slide, y = r.Y + 8;
-        Header(r, x, ref y, "Тема");
+        Header(r, x, ref y, L.T("Тема", "Theme"));
         var view = new R(r.X, y, r.W, MathF.Max(40, r.Bottom - y - 4));
         float totalH = Themes.All.Length * 38 + 44;
         var scroll = UI.BeginScroll(_scrollTheme, view, totalH);
@@ -493,20 +502,47 @@ public static class AccountMenu
                 Gfx.Circle(x + 40, y + 19, 6, p.Card);
                 Gfx.Circle(x + 54, y + 19, 6, p.Brand);
                 var on = Themes.Current.Name == t.Name;
-                Gfx.Draw(t.Name, x + 72, y + 9, 14, Gfx.Fade(Th.Text, a), on ? 600 : 400, r.W - 110);
+                Gfx.Draw(Themes.DisplayName(t.Name), x + 72, y + 9, 14, Gfx.Fade(Th.Text, a), on ? 600 : 400, r.W - 110);
                 if (on) Gfx.Icon(Th.Check, new R(r.Right - 40, y, 30, 38), 12, Th.Text);
                 if (UI.Click(UI.Id("am:t:" + t.Name), row) && !on) { var n = t.Name; App.Post(() => Themes.Apply(theme: n)); }
             }
             y += 38;
         }
-        if (Item(r, x, ref y, Th.Settings, "Цвет акцента и все темы…", false)) { Close(); App.Post(() => Shell.OpenRoot("settings")); }
+        if (Item(r, x, ref y, Th.Settings, L.T("Цвет акцента и все темы…", "Accent color & all themes…"), false)) { Close(); App.Post(() => Shell.OpenRoot("settings")); }
         UI.EndScroll();
+    }
+
+    private static void UiLangPage(R r, float slide, float a)
+    {
+        float x = r.X + slide, y = r.Y + 8;
+        Header(r, x, ref y, L.T("Язык интерфейса", "App language"));
+        foreach (var (code, name) in UiLangs)
+        {
+            var on = L.Code == code;
+            var row = new R(r.X, y, r.W, 38);
+            UI.Glow(UI.Id("am:uil:" + code), row.Inset(6, 1), 8, UI.Hover(row));
+            if (on) Gfx.Icon(Th.Check, new R(x + 12, y, 24, 38), 12, Th.Brand);
+            Gfx.Draw(name, x + 48, y + 9, 14, Gfx.Fade(Th.Text, a), on ? 600 : 400);
+            if (UI.Click(UI.Id("am:uil:" + code), row) && !on)
+            {
+                var c = code;
+                Close();
+                App.Post(() =>
+                {
+                    AppSettings.Current.UiLanguage = c;
+                    AppSettings.Current.Save();
+                    Shell.OnLanguageChanged();
+                    Shell.Toast(c == "en" ? "App language: English" : "Язык интерфейса: Русский", Th.Good, 2200);
+                });
+            }
+            y += 38;
+        }
     }
 
     private static void LangPage(R r, float slide, float a)
     {
         float x = r.X + slide, y = r.Y + 8;
-        Header(r, x, ref y, "Язык YouTube");
+        Header(r, x, ref y, L.T("Язык YouTube", "YouTube language"));
         var view = new R(r.X, y, r.W, MathF.Max(40, r.Bottom - y - 4));
         float totalH = Langs.Length * 38 + 8;
         var scroll = UI.BeginScroll(_scrollLang, view, totalH);
@@ -531,7 +567,7 @@ public static class AccountMenu
                         AppSettings.Current.Save();
                         InnerTube.Instance.ResetSession();
                         Shell.OnAccountChanged();
-                        Shell.Toast("Названия и ленты будут на языке: " + Langs.First(l => l.Code == c).Name);
+                        Shell.Toast(L.T("Названия и ленты будут на языке: ", "YouTube feeds & titles switched to: ") + Langs.First(l => l.Code == c).Name);
                     });
                 }
             }

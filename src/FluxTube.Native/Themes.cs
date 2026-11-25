@@ -64,6 +64,39 @@ public static class Themes
         ("Фиолетовый", 0xFF9B6CFF), ("Розовый", 0xFFFF5FA2),
     ];
 
+    public static string GroupLabel(string group) => group switch
+    {
+        "Свои" => L.T("Свои", "FluxTube"),
+        "Редакторы" => L.T("Редакторы", "Editors"),
+        CustomGroup => L.T("Мои темы (код)", "My themes (code)"),
+        _ => group,
+    };
+
+    public static string DisplayName(string name) => !L.En ? name : name switch
+    {
+        "Новогодняя" => "New Year",
+        "Чёрно-оранжевая" => "Black & Orange",
+        "YouTube тёмная" => "YouTube Dark",
+        "YouTube светлая" => "YouTube Light",
+        "Старый YouTube" => "Classic YouTube",
+        _ => name,
+    };
+
+    public static string AccentLabel(string name) => !L.En ? name : name switch
+    {
+        "Красный YouTube" => "YouTube Red",
+        "Малиновый" => "Crimson",
+        "Оранжевый" => "Orange",
+        "Жёлтый" => "Yellow",
+        "Зелёный" => "Green",
+        "Бирюзовый" => "Teal",
+        "Голубой" => "Sky Blue",
+        "Синий" => "Royal Blue",
+        "Фиолетовый" => "Violet",
+        "Розовый" => "Pink",
+        _ => name,
+    };
+
     public static Theme Current { get; private set; } = BuiltIn[0];
     public static bool IsNewYear => Current.Name == "Новогодняя";
     public static bool IsCustom(string name) => _customFiles.ContainsKey(name);
@@ -152,7 +185,7 @@ public static class Themes
     {
         theme = null;
         error = null;
-        if (string.IsNullOrWhiteSpace(code)) { error = "Введите JSON или список цветов (например bg: #0D0F18)"; return false; }
+        if (string.IsNullOrWhiteSpace(code)) { error = L.T("Введите JSON или список цветов (например bg: #0D0F18)", "Enter JSON or color lines (e.g. bg: #0D0F18)"); return false; }
 
         var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var trimmed = code.Trim();
@@ -166,7 +199,7 @@ public static class Themes
                         if (kv.Value != null) dict[kv.Key] = kv.Value.ToString();
                 }
             }
-            catch (Exception e) { error = "Ошибка JSON: " + e.Message; return false; }
+            catch (Exception e) { error = L.T("Ошибка JSON: ", "JSON error: ") + e.Message; return false; }
         }
         else
         {
@@ -182,11 +215,11 @@ public static class Themes
             }
         }
 
-        string name = dict.TryGetValue("name", out var n) && !string.IsNullOrWhiteSpace(n) ? n.Trim() : "Моя тема";
+        string name = dict.TryGetValue("name", out var n) && !string.IsNullOrWhiteSpace(n) ? n.Trim() : L.T("Моя тема", "My theme");
         if (name.Length > 32) name = name[..32].Trim();
 
         uint bg = TryGetColor(dict, "bg") ?? TryGetColor(dict, "background") ?? 0;
-        if (bg == 0) { error = "Укажите цвет фона \"bg\": \"#RRGGBB\""; return false; }
+        if (bg == 0) { error = L.T("Укажите цвет фона \"bg\": \"#RRGGBB\"", "Specify background color \"bg\": \"#RRGGBB\""); return false; }
 
         bool light = dict.TryGetValue("light", out var ls)
             ? ls.Equals("true", StringComparison.OrdinalIgnoreCase) || ls == "1"

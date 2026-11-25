@@ -1,4 +1,5 @@
 using FluxTube.Pages;
+using FluxTube.Services;
 
 namespace FluxTube;
 
@@ -19,7 +20,7 @@ public static class ThemePicker
         foreach (var (groupName, items) in Themes.Groups)
         {
             if (y + 24 >= clip.Y && y <= clip.Bottom)
-                Gfx.Draw(groupName, x, y, 12.5f, Th.Sub, 600);
+                Gfx.Draw(Themes.GroupLabel(groupName), x, y, 12.5f, Th.Sub, 600);
             y += 24;
             int rows = (items.Length + cols - 1) / cols;
             float rowStride = CardH + 34 + Gap;
@@ -34,7 +35,7 @@ public static class ThemePicker
 
         // accents: the theme's own, then the fixed set
         if (y + 26 >= clip.Y && y <= clip.Bottom)
-            Gfx.Draw("Акцентный цвет", x, y, 12.5f, Th.Sub, 600);
+            Gfx.Draw(L.T("Акцентный цвет", "Accent color"), x, y, 12.5f, Th.Sub, 600);
         y += 26;
         var cur = Themes.AccentOverride;
         float sx = x;
@@ -43,7 +44,7 @@ public static class ThemePicker
 
         if (Swatch(UI.Id("acc:own"), sx, y, Themes.Current.Brand, cur == null, true, () => Themes.Apply(accent: "")))
         {
-            tipName = "Как в теме"; tipX = sx + 17; tipY = y + 40;
+            tipName = L.T("Как в теме", "Theme default"); tipX = sx + 17; tipY = y + 40;
         }
         sx += 46;
         for (int i = 0; i < Themes.Accents.Length; i++)
@@ -53,7 +54,7 @@ public static class ThemePicker
             var c = color;
             if (Swatch(UI.Id("acc:" + name), sx, y, c, cur == c, false, () => Themes.Apply(accent: Themes.Hex(c))))
             {
-                tipName = name; tipX = sx + 17; tipY = y + 40;
+                tipName = Themes.AccentLabel(name); tipX = sx + 17; tipY = y + 40;
             }
             sx += 40;
         }
@@ -128,22 +129,22 @@ public static class ThemePicker
         DrawMiniature(t, r);
         Gfx.Stroke(r, on ? 0 : Gfx.Mix(p.Line, Th.Line, 0.5f), 11);
 
-        Gfx.Draw(t.Name, r.X + 2, r.Bottom + 8, 13, on ? Th.Text : Th.Sub, on ? 600 : 400, r.W - 20);
+        Gfx.Draw(Themes.DisplayName(t.Name), r.X + 2, r.Bottom + 8, 13, on ? Th.Text : Th.Sub, on ? 600 : 400, r.W - 20);
         if (on) Gfx.Icon(Th.Check, new R(r.Right - 16, r.Bottom + 7, 16, 18), 11, Th.Brand);
 
         if (UI.RightClick(hit))
         {
             var items = new List<MenuItem>
             {
-                new("Открыть код этой темы…", () => ThemeCodeEditor.Show(t), icon: Th.Settings),
-                new("Копировать код темы", () => Cards.CopyText(Themes.ExportCode(t), "Код темы скопирован"), icon: Th.Copy),
+                new(L.T("Открыть код этой темы…", "Open theme code…"), () => ThemeCodeEditor.Show(t), icon: Th.Settings),
+                new(L.T("Копировать код темы", "Copy theme code"), () => Cards.CopyText(Themes.ExportCode(t), L.T("Код темы скопирован", "Theme code copied")), icon: Th.Copy),
             };
             if (Themes.IsCustom(t.Name))
             {
                 items.Add(MenuItem.Sep);
-                items.Add(new("Удалить свою тему", () =>
+                items.Add(new(L.T("Удалить свою тему", "Delete custom theme"), () =>
                 {
-                    if (Themes.DeleteCustom(t.Name)) Shell.Toast($"Тема «{t.Name}» удалена", Th.Good, 2200);
+                    if (Themes.DeleteCustom(t.Name)) Shell.Toast(L.T($"Тема «{t.Name}» удалена", $"Theme \"{t.Name}\" deleted"), Th.Good, 2200);
                 }, icon: Th.Delete, danger: true));
             }
             Menus.Popup(items);
@@ -219,12 +220,12 @@ public static class ThemeCodeEditor
         if (Themes.SaveCustomFromCode(_edit.Text, out var name, out var err))
         {
             Sfx.Like();
-            Shell.Toast($"Тема «{name}» сохранена и применена!", Th.Good, 3000);
+            Shell.Toast(L.T($"Тема «{name}» сохранена и применена!", $"Theme \"{name}\" saved & applied!"), Th.Good, 3000);
             Close();
         }
         else
         {
-            _liveErr = err ?? "Проверьте формат кода темы";
+            _liveErr = err ?? L.T("Проверьте формат кода темы", "Check theme code syntax");
             Shell.Toast(_liveErr, Th.Warn, 3500);
             App.Invalidate();
         }
@@ -251,8 +252,8 @@ public static class ThemeCodeEditor
         Gfx.FillFrosted(card, Th.Menu, 16, opacity: 0.96f, border: true);
 
         float pad = 20, x = card.X + pad, y = card.Y + 16, innerW = card.W - pad * 2;
-        Gfx.Draw("Редактор темы (код)", x, y, 18, Th.Text, 600);
-        Gfx.Draw("JSON или строки вида bg: #0A0D16  ·  Ctrl+Enter — сохранить", x, y + 24, 12, Th.Sub);
+        Gfx.Draw(L.T("Редактор темы (код)", "Theme Code Editor"), x, y, 18, Th.Text, 600);
+        Gfx.Draw(L.T("JSON или строки вида bg: #0A0D16  ·  Ctrl+Enter — сохранить", "JSON or key: #RRGGBB lines  ·  Ctrl+Enter to save"), x, y + 24, 12, Th.Sub);
         if (UI.IconButton(UI.Id("tce:close"), new R(card.Right - 46, y, 32, 32), Th.Close, 12, Th.Sub)) { Close(); return; }
         y += 50;
 
@@ -266,7 +267,7 @@ public static class ThemeCodeEditor
 
             float sx = prevR.Right + 16, sw = card.Right - pad - sx;
             Gfx.Draw(_liveTheme.Name, sx, y + 2, 15, Th.Text, 600, sw);
-            Gfx.Draw(_liveTheme.Light ? "Светлая тема · Превью обновляется на лету" : "Тёмная тема · Превью обновляется на лету", sx, y + 23, 12, Th.Good, 400, sw);
+            Gfx.Draw(_liveTheme.Light ? L.T("Светлая тема · Превью обновляется на лету", "Light theme · Live preview") : L.T("Тёмная тема · Превью обновляется на лету", "Dark theme · Live preview"), sx, y + 23, 12, Th.Good, 400, sw);
 
             (string Lbl, uint Col)[] swatches =
             [
@@ -287,8 +288,8 @@ public static class ThemeCodeEditor
         {
             Gfx.Fill(prevR, Th.Card, 11);
             Gfx.Stroke(prevR, Gfx.Fade(Th.Warn, 0.7f), 11);
-            Gfx.Draw("Ошибка кода", prevR.X + 14, prevR.Y + 42, 13.5f, Th.Warn, 600);
-            Gfx.Draw(_liveErr ?? "Проверьте синтаксис", prevR.Right + 16, y + 20, 13, Th.Warn, 500, card.Right - pad - (prevR.Right + 16), 4);
+            Gfx.Draw(L.T("Ошибка кода", "Syntax error"), prevR.X + 14, prevR.Y + 42, 13.5f, Th.Warn, 600);
+            Gfx.Draw(_liveErr ?? L.T("Проверьте синтаксис", "Check syntax"), prevR.Right + 16, y + 20, 13, Th.Warn, 500, card.Right - pad - (prevR.Right + 16), 4);
         }
 
         y += prevH + 14;
@@ -303,33 +304,34 @@ public static class ThemeCodeEditor
         // Footer buttons
         float by = card.Bottom - 44;
         float lx = x;
-        if (UI.Pill(UI.Id("tce:paste"), lx, by, 34, Th.Link, "Вставить", out var pw1, Th.A(0.08f)))
+        if (UI.Pill(UI.Id("tce:paste"), lx, by, 34, Th.Link, L.T("Вставить", "Paste"), out var pw1, Th.A(0.08f)))
         {
             var clip = W.GetClipboardText(App.Hwnd);
             if (!string.IsNullOrWhiteSpace(clip) && _edit != null)
             {
                 _edit.Text = clip.Replace("\r\n", "\n").Replace("\n", "\r\n");
                 Reparse();
-                Shell.Toast("Код вставлен из буфера", Th.Good, 1600);
+                Shell.Toast(L.T("Код вставлен из буфера", "Code pasted from clipboard"), Th.Good, 1600);
             }
         }
         lx += pw1 + 8;
-        if (UI.Pill(UI.Id("tce:copy"), lx, by, 34, Th.Copy, "Копировать", out var pw2, Th.A(0.08f)))
-            if (_edit != null) Cards.CopyText(_edit.Text, "Код темы скопирован");
+        if (UI.Pill(UI.Id("tce:copy"), lx, by, 34, Th.Copy, L.T("Копировать", "Copy"), out var pw2, Th.A(0.08f)))
+            if (_edit != null) Cards.CopyText(_edit.Text, L.T("Код темы скопирован", "Theme code copied"));
         lx += pw2 + 8;
-        if (UI.Pill(UI.Id("tce:dir"), lx, by, 34, Th.Folder, "Папка тем", out var pw3, Th.A(0.08f)))
+        if (UI.Pill(UI.Id("tce:dir"), lx, by, 34, Th.Folder, L.T("Папка тем", "Themes folder"), out var pw3, Th.A(0.08f)))
             W.Open(Themes.CustomDir);
         lx += pw3 + 8;
-        if (_editingCustomName != null && UI.Pill(UI.Id("tce:del"), lx, by, 34, Th.Delete, "Удалить", out _, Gfx.Fade(0xFFE05252, 0.2f), 0xFFFF7A7A))
+        if (_editingCustomName != null && UI.Pill(UI.Id("tce:del"), lx, by, 34, Th.Delete, L.T("Удалить", "Delete"), out _, Gfx.Fade(0xFFE05252, 0.2f), 0xFFFF7A7A))
         {
             var delName = _editingCustomName;
             Close();
-            if (Themes.DeleteCustom(delName)) Shell.Toast($"Тема «{delName}» удалена", Th.Good, 2200);
+            if (Themes.DeleteCustom(delName)) Shell.Toast(L.T($"Тема «{delName}» удалена", $"Theme \"{delName}\" deleted"), Th.Good, 2200);
             return;
         }
 
-        var saveW = UI.PillWidth(Th.Check, "Сохранить и применить");
-        if (UI.Pill(UI.Id("tce:save"), card.Right - pad - saveW, by, 34, Th.Check, "Сохранить и применить", out _, accent: true))
+        var saveLbl = L.T("Сохранить и применить", "Save & Apply");
+        var saveW = UI.PillWidth(Th.Check, saveLbl);
+        if (UI.Pill(UI.Id("tce:save"), card.Right - pad - saveW, by, 34, Th.Check, saveLbl, out _, accent: true))
             SaveAndApply();
 
         // Click outside modal closes it

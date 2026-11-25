@@ -37,7 +37,7 @@
 
   <ItemGroup>
     <!-- services, models and the mpv layer are shared with the WinUI helper -->
-    <Compile Include="..\FluxTube\Services\Json.cs;..\FluxTube\Services\Paths.cs;..\FluxTube\Services\AppSettings.cs;..\FluxTube\Services\AudioDsp.cs;..\FluxTube\Services\CookieStore.cs;..\FluxTube\Services\InnerTube.cs;..\FluxTube\Services\YtDlp.cs;..\FluxTube\Services\Db.cs;..\FluxTube\Services\Downloader.cs;..\FluxTube\Services\Extras.cs;..\FluxTube\Services\Resolver.cs;..\FluxTube\Services\UiThread.cs;..\FluxTube\Services\MediaCache.cs;..\FluxTube\Services\QuickStream.cs" LinkBase="Shared\Services" />
+    <Compile Include="..\FluxTube\Services\Json.cs;..\FluxTube\Services\Paths.cs;..\FluxTube\Services\AppSettings.cs;..\FluxTube\Services\Loc.cs;..\FluxTube\Services\ShortsAdBlocker.cs;..\FluxTube\Services\AudioDsp.cs;..\FluxTube\Services\CookieStore.cs;..\FluxTube\Services\InnerTube.cs;..\FluxTube\Services\YtDlp.cs;..\FluxTube\Services\Db.cs;..\FluxTube\Services\Downloader.cs;..\FluxTube\Services\Extras.cs;..\FluxTube\Services\Resolver.cs;..\FluxTube\Services\UiThread.cs;..\FluxTube\Services\MediaCache.cs;..\FluxTube\Services\QuickStream.cs" LinkBase="Shared\Services" />
     <Compile Include="..\FluxTube\Models\*.cs" LinkBase="Shared\Models" />
     <Compile Include="..\FluxTube\Player\MpvNative.cs;..\FluxTube\Player\MpvPlayer.cs;..\FluxTube\Player\PlaybackTracker.cs;..\FluxTube\Player\StreamProxy.cs;..\FluxTube\Player\Win32.cs" LinkBase="Shared\Player" />
   </ItemGroup>

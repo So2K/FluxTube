@@ -20,7 +20,7 @@ internal static unsafe partial class W
     public const uint SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOZORDER = 4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20, SWP_SHOWWINDOW = 0x40, SWP_HIDEWINDOW = 0x80, SWP_NOCOPYBITS = 0x0100;
     public const int SW_HIDE = 0, SW_SHOW = 5, SW_SHOWNA = 8, SW_SHOWNOACTIVATE = 4, SW_SHOWNORMAL = 1, SW_MAXIMIZE = 3;
     public const int GWL_STYLE = -16, GWLP_WNDPROC = -4;
-    public const int VK_BACK = 8, VK_RETURN = 13, VK_ESCAPE = 27, VK_SPACE = 32, VK_LEFT = 37, VK_UP = 38, VK_RIGHT = 39, VK_DOWN = 40, VK_CONTROL = 17, VK_MENU = 18,
+    public const int VK_BACK = 8, VK_RETURN = 13, VK_SHIFT = 16, VK_CONTROL = 17, VK_MENU = 18, VK_ESCAPE = 27, VK_SPACE = 32, VK_LEFT = 37, VK_UP = 38, VK_RIGHT = 39, VK_DOWN = 40,
         VK_HOME = 36, VK_END = 35, VK_PRIOR = 33, VK_NEXT = 34, VK_F5 = 116, VK_OEM_COMMA = 0xBC, VK_OEM_PERIOD = 0xBE, VK_OEM_4 = 0xDB, VK_OEM_6 = 0xDD;
 
     [StructLayout(LayoutKind.Sequential)]

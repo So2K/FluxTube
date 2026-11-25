@@ -582,36 +582,106 @@ public sealed class InnerTube
     public async Task<FeedPage> ContinueAsync(string endpoint, string token, CancellationToken ct = default, bool shorts = false)
         => ParseFeed(await PostAsync(endpoint, new JsonObject { ["continuation"] = token }, Origin + "/", ct), playlists: shorts, shorts: shorts);
 
+    private static readonly HashSet<string> AdIndicatorKeys =
+    [
+        "adSlotRenderer", "adSlotMetadata", "adLayoutLoggingData", "adClientParams", "adBreakParams",
+        "adBreakHeartbeatParams", "inFeedAdLayoutRenderer", "promotedSparklesWebRenderer",
+        "promotedSparklesTextSearchRenderer", "displayAdRenderer", "promotedVideoRenderer",
+        "compactPromotedItemRenderer", "compactPromotedVideoRenderer", "adInfoRenderer",
+        "adBadgeRenderer", "adBadgeViewModel", "adCtaButtonRenderer", "reelAdOverlayRenderer",
+        "shortsAdOverlayRenderer", "adOverlayRenderer", "adActionInterstitialRenderer",
+        "brandVideoShelfRenderer", "brandVideoSingletonRenderer", "adModule", "adsEngagementPanelContentRenderer",
+        "visitAdvertiser", "sponsoredBadge", "adMetadata",
+    ];
+
+    private static bool HasAdMarker(JsonNode? node)
+    {
+        if (node == null) return false;
+        bool found = false;
+        J.Walk(node, (key, o) =>
+        {
+            if (found) return false;
+            if (key != null && AdIndicatorKeys.Contains(key)) { found = true; return false; }
+            foreach (var k in AdIndicatorKeys)
+                if (o.ContainsKey(k)) { found = true; return false; }
+            if (o["isAd"] is JsonValue v && v.TryGetValue<bool>(out var b) && b) { found = true; return false; }
+            if (o.S("badgeStyle") is { } bs && (bs.Contains("AD", StringComparison.OrdinalIgnoreCase) && (bs.Contains("BADGE_STYLE_TYPE_AD") || bs.Contains("SPONSOR"))))
+            { found = true; return false; }
+            return true;
+        });
+        return found;
+    }
+
+    private static bool HasPaidPromotion(JsonNode? node)
+    {
+        if (node == null) return false;
+        bool found = false;
+        J.Walk(node, (key, o) =>
+        {
+            if (found) return false;
+            if (key is "paidContentOverlayRenderer" or "paidContentOverlay" or "paidPromotionOverlayRenderer"
+                || o.ContainsKey("paidContentOverlayRenderer") || o.ContainsKey("paidContentOverlay"))
+            { found = true; return false; }
+            if (o["includesPaidPromotion"] is JsonValue v && v.TryGetValue<bool>(out var b) && b) { found = true; return false; }
+            return true;
+        });
+        return found;
+    }
+
     /// <summary>
     /// YouTube's Shorts feed: ids in the order YouTube would show them, and the token for the next batch.
-    /// Without a token the feed starts over (a fresh selection every time).
+    /// Automatically strips out all injected YouTube ad &amp; sponsored Shorts entries before they ever enter the player.
     /// </summary>
     public async Task<(List<string> Ids, string? Next)> ShortsFeedAsync(string? token, CancellationToken ct = default)
     {
         var ids = new List<string>();
+        bool blockAds = ShortsAdBlocker.Enabled;
         if (token == null)
         {
             var first = await PostAsync("reel/reel_item_watch", new JsonObject { ["params"] = "CA8%3D", ["inputType"] = "REEL_WATCH_INPUT_TYPE_SEEDLESS", ["disablePlayerResponse"] = true }, Origin + "/shorts/", ct);
-            if (first.S("replacementEndpoint", "reelWatchEndpoint", "videoId") is { } id0) ids.Add(id0);
+            if (first.S("replacementEndpoint", "reelWatchEndpoint", "videoId") is { } id0)
+            {
+                if (blockAds && (HasAdMarker(first) || HasPaidPromotion(first)))
+                {
+                    ShortsAdBlocker.RecordBlocked();
+                    Paths.Log($"shorts-adblock: dropped seed ad {id0}");
+                }
+                else ids.Add(id0);
+            }
             token = first.S("sequenceContinuation");
             if (token == null) return (ids, null);
         }
         var d = await PostAsync("reel/reel_watch_sequence", new JsonObject { ["sequenceParams"] = token }, Origin + "/shorts/", ct);
         if (d.P("entries") is JsonArray entries)
             foreach (var e in entries)
-                if (e.S("command", "reelWatchEndpoint", "videoId") is { } id && !ids.Contains(id)) ids.Add(id);
+            {
+                var id = e.S("command", "reelWatchEndpoint", "videoId");
+                if (id == null) continue;
+                if (blockAds && (HasAdMarker(e) || HasPaidPromotion(e)))
+                {
+                    ShortsAdBlocker.RecordBlocked();
+                    Paths.Log($"shorts-adblock: dropped feed ad entry {id}");
+                    continue;
+                }
+                if (!ids.Contains(id)) ids.Add(id);
+            }
         return (ids, d.S("continuationEndpoint", "continuationCommand", "token"));
     }
 
-    /// <summary>Title, channel and like count of one short.</summary>
+    /// <summary>Title, channel, like count, description, and ad/paid-promotion markers of one short.</summary>
     public async Task<VideoItem?> ShortInfoAsync(string videoId, CancellationToken ct = default)
     {
         var d = await PostAsync("reel/reel_item_watch", new JsonObject
         {
             ["playerRequest"] = new JsonObject { ["videoId"] = videoId }, ["params"] = "CA8%3D", ["disablePlayerResponse"] = true,
         }, $"{Origin}/shorts/{videoId}", ct);
+        bool isAd = HasAdMarker(d);
+        bool paid = HasPaidPromotion(d);
         var bar = J.FindFirst(d, "reelChannelBarViewModel");
         var title = J.FindFirst(d, "shortsVideoTitleViewModel").S("text", "content");
+        string? desc = J.FindFirst(d, "attributedDescription").Text()
+                    ?? J.FindFirst(d, "shortsDescriptionViewModel").S("text", "content")
+                    ?? J.FindFirst(d, "videoDescriptionHeaderRenderer").P("title").Text();
         string? channelId = null, avatar = null, likes = null;
         J.Walk(bar, (_, x) =>
         {
@@ -620,11 +690,11 @@ public sealed class InnerTube
             return true;
         });
         likes = J.FindFirst(d, "likeButtonViewModel").S("toggleButtonViewModel", "toggleButtonViewModel", "defaultButtonViewModel", "buttonViewModel", "title");
-        if (title == null && bar == null) return null;
+        if (title == null && bar == null && !isAd && !paid) return null;
         return new VideoItem
         {
             VideoId = videoId, IsShort = true, Title = title ?? "", Channel = bar.S("channelName", "content") ?? "", ChannelId = channelId,
-            AvatarUrl = avatar, Meta = likes ?? "",
+            AvatarUrl = avatar, Meta = likes ?? "", IsAd = isAd, HasPaidPromotion = paid, Description = desc ?? "",
         };
     }
 
@@ -647,7 +717,7 @@ public sealed class InnerTube
         var body = new JsonObject { ["videoId"] = videoId, ["racyCheckOk"] = true, ["contentCheckOk"] = true };
         if (playlistId != null) body["playlistId"] = playlistId;
         var data = await PostAsync("next", body, $"{Origin}/watch?v={videoId}" + (playlistId != null ? "&list=" + playlistId : ""), ct);
-        var info = new WatchInfo { VideoId = videoId };
+        var info = new WatchInfo { VideoId = videoId, HasPaidPromotion = HasPaidPromotion(data) };
         // watched inside a playlist or a mix: the list comes with the page
         if (data.P("contents", "twoColumnWatchNextResults", "playlist", "playlist") is { } pl)
         {
@@ -745,8 +815,11 @@ public sealed class InnerTube
 
     private static readonly HashSet<string> SkipKeys =
     [
-        "adSlotRenderer", "promotedSparklesWebRenderer", "displayAdRenderer", "inFeedAdLayoutRenderer",
-        "promotedVideoRenderer", "statementBannerRenderer", "searchPyvRenderer", "adsEngagementPanelContentRenderer",
+        "adSlotRenderer", "adSlotMetadata", "adLayoutLoggingData", "promotedSparklesWebRenderer", "promotedSparklesTextSearchRenderer",
+        "displayAdRenderer", "inFeedAdLayoutRenderer", "promotedVideoRenderer", "compactPromotedItemRenderer", "compactPromotedVideoRenderer",
+        "brandVideoShelfRenderer", "brandVideoSingletonRenderer", "statementBannerRenderer", "searchPyvRenderer",
+        "adsEngagementPanelContentRenderer", "reelAdOverlayRenderer", "shortsAdOverlayRenderer", "mealbarPromoRenderer",
+        "primetimePromoRenderer", "bannerPromoRenderer", "adActionInterstitialRenderer", "adInfoRenderer", "playerAds", "adPlacements", "adSlots",
         "engagementPanels", "topbar", "header", "playerOverlays", "frameworkUpdates", "menu", "commentsEntryPointHeaderRenderer",
         "itemSectionRendererComments",
     ];
@@ -916,6 +989,7 @@ public sealed class InnerTube
 
     private static VideoItem? FromShort(JsonObject o)
     {
+        if (HasAdMarker(o)) return null;
         var id = o.S("onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") ?? o.S("videoId");
         if (id == null) return null;
         return new VideoItem

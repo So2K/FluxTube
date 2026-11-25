@@ -164,7 +164,7 @@ public static class Db
         public VideoItem ToVideo() => new()
         {
             VideoId = VideoId, Title = Title, Channel = Channel, ChannelId = ChannelId,
-            Duration = Fmt.Time(Duration), Meta = $"{Fmt.When(Last)} · {Fmt.Time(Position)} из {Fmt.Time(Duration)}",
+            Duration = Fmt.Time(Duration), Meta = $"{Fmt.When(Last)} · {Fmt.Time(Position)} {L.T("из", "of")} {Fmt.Time(Duration)}",
             Progress = Duration > 0 ? Math.Clamp(Position / Duration, 0, 1) : 0,
         };
     }
@@ -307,38 +307,38 @@ public static class Fmt
     public static string When(DateTime t)
     {
         var d = DateTime.Now - t;
-        if (d.TotalMinutes < 1) return "только что";
-        if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes} мин назад";
-        if (t.Date == DateTime.Today) return $"сегодня {t:HH:mm}";
-        if (t.Date == DateTime.Today.AddDays(-1)) return $"вчера {t:HH:mm}";
-        return t.ToString("d MMM HH:mm");
+        if (d.TotalMinutes < 1) return L.T("только что", "just now");
+        if (d.TotalMinutes < 60) return L.En ? $"{(int)d.TotalMinutes}m ago" : $"{(int)d.TotalMinutes} мин назад";
+        if (t.Date == DateTime.Today) return L.En ? $"today {t:HH:mm}" : $"сегодня {t:HH:mm}";
+        if (t.Date == DateTime.Today.AddDays(-1)) return L.En ? $"yesterday {t:HH:mm}" : $"вчера {t:HH:mm}";
+        return t.ToString("d MMM HH:mm", L.En ? System.Globalization.CultureInfo.InvariantCulture : System.Globalization.CultureInfo.CurrentCulture);
     }
 
     public static string Day(DateTime t)
     {
-        if (t.Date == DateTime.Today) return "Сегодня";
-        if (t.Date == DateTime.Today.AddDays(-1)) return "Вчера";
-        return t.ToString("dddd, d MMMM");
+        if (t.Date == DateTime.Today) return L.T("Сегодня", "Today");
+        if (t.Date == DateTime.Today.AddDays(-1)) return L.T("Вчера", "Yesterday");
+        return t.ToString("dddd, d MMMM", L.En ? System.Globalization.CultureInfo.InvariantCulture : System.Globalization.CultureInfo.CurrentCulture);
     }
 
     public static string Size(long b) => b switch
     {
         <= 0 => "",
-        < 1 << 20 => $"{b / 1024.0:0} КБ",
-        < 1 << 30 => $"{b / 1048576.0:0.0} МБ",
-        _ => $"{b / 1073741824.0:0.00} ГБ",
+        < 1 << 20 => $"{b / 1024.0:0} {L.T("КБ", "KB")}",
+        < 1 << 30 => $"{b / 1048576.0:0.0} {L.T("МБ", "MB")}",
+        _ => $"{b / 1073741824.0:0.00} {L.T("ГБ", "GB")}",
     };
 
     public static string Source(string s) => s switch
     {
-        "home" => "Главная",
-        "subs" => "Подписки",
-        "wl" => "Смотреть позже",
-        "liked" => "Понравившиеся",
-        "foryou" => "Для вас",
-        _ when s.StartsWith("search:") => "Поиск: " + s[7..],
-        _ when s.StartsWith("related:") => "Рядом с: " + (s.Contains('|') ? s[(s.IndexOf('|') + 1)..] : "видео"),
-        _ when s.StartsWith("channel:") => "Канал",
+        "home" => L.T("Главная", "Home"),
+        "subs" => L.T("Подписки", "Subscriptions"),
+        "wl" => L.T("Смотреть позже", "Watch later"),
+        "liked" => L.T("Понравившиеся", "Liked"),
+        "foryou" => L.T("Для вас", "For you"),
+        _ when s.StartsWith("search:") => L.T("Поиск: ", "Search: ") + s[7..],
+        _ when s.StartsWith("related:") => L.T("Рядом с: ", "Related to: ") + (s.Contains('|') ? s[(s.IndexOf('|') + 1)..] : L.T("видео", "video")),
+        _ when s.StartsWith("channel:") => L.T("Канал", "Channel"),
         _ => s,
     };
 }

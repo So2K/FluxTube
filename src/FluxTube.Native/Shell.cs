@@ -76,13 +76,31 @@ public static class Shell
         {
             if (Pip.Active) Pip.Exit();
             P.SetVideoEnabled(false);
-            Toast("Режим «Только звук» включён — видео не декодируется (0% GPU)", Th.Good, 2400);
+            Toast(L.T("Режим «Только звук» включён — видео не декодируется (0% GPU)", "Audio-only mode on — video decoder suspended (0% GPU)"), Th.Good, 2400);
         }
         else
         {
             P.SetVideoEnabled(true);
-            Toast("Видео возвращено", Th.Sub, 1600);
+            Toast(L.T("Видео возвращено", "Video restored"), Th.Sub, 1600);
         }
+        App.Invalidate();
+    }
+
+    public static void StepVideoFrame(float wheelDelta)
+    {
+        if (!P.IsReady || !P.HasMedia || MathF.Abs(wheelDelta) < 0.01f) return;
+        int steps = Math.Max(1, (int)MathF.Round(MathF.Abs(wheelDelta)));
+        P.StepFrame(wheelDelta > 0 ? steps : -steps);
+        Sfx.Tick();
+        App.Invalidate();
+    }
+
+    public static void OnLanguageChanged()
+    {
+        Gfx.ClearTextCache();
+        _search?.SetPlaceholder(L.T("Поиск или ссылка YouTube…", "Search or YouTube link…"));
+        Updater.RefreshStatusText();
+        PushPlayerState();
         App.Invalidate();
     }
 
@@ -96,17 +114,20 @@ public static class Shell
             if (P.VideoEnabled) P.SetVideoEnabled(false);
             return;
         }
-        bool visibleNow = Pip.Active || (_videoWanted && !W.IsIconic(App.Hwnd) && !Gfx.Occluded);
-        if (visibleNow)
+        // Only suspend video when the window is genuinely minimized to taskbar OR hidden on a non-video tab for >= 4s;
+        // NEVER suspend on transient DXGI occlusion (another window briefly overlapping or multi-monitor), which caused black screens!
+        bool minimized = W.IsIconic(App.Hwnd);
+        bool visibleNow = Pip.Active || (_videoWanted && !minimized);
+        if (visibleNow || !s.AutoSuspendVideoWhenHidden)
         {
             _videoHiddenSince = 0;
             if (!P.VideoEnabled) P.SetVideoEnabled(true);
         }
-        else if (s.AutoSuspendVideoWhenHidden)
+        else
         {
             var now = Environment.TickCount64;
             if (_videoHiddenSince == 0) _videoHiddenSince = now;
-            else if (P.VideoEnabled && now - _videoHiddenSince >= 1500) P.SetVideoEnabled(false);
+            else if (P.VideoEnabled && now - _videoHiddenSince >= 4000) P.SetVideoEnabled(false);
         }
     }
     private static string[] _args = [];
@@ -155,15 +176,23 @@ public static class Shell
     {
         "root" => RootName(t.Arg),
         "search" => "«" + t.Arg + "»",
-        "channel" => "Канал",
-        "playlist" => "Плейлист",
-        _ => "Видео",
+        "channel" => L.T("Канал", "Channel"),
+        "playlist" => L.T("Плейлист", "Playlist"),
+        _ => L.T("Видео", "Video"),
     };
 
     private static string RootName(string tag) => tag switch
     {
-        "home" => "Главная", "subs" => "Подписки", "wl" => "Смотреть позже", "liked" => "Понравившиеся",
-        "history" => "История", "seen" => "Что я видел", "shorts" => "Shorts", "downloads" => "Загрузки", "settings" => "Настройки", _ => tag,
+        "home" => L.T("Главная", "Home"),
+        "subs" => L.T("Подписки", "Subscriptions"),
+        "wl" => L.T("Смотреть позже", "Watch later"),
+        "liked" => L.T("Понравившиеся", "Liked"),
+        "history" => L.T("История", "History"),
+        "seen" => L.T("Что я видел", "Seen"),
+        "shorts" => "Shorts",
+        "downloads" => L.T("Загрузки", "Downloads"),
+        "settings" => L.T("Настройки", "Settings"),
+        _ => tag,
     };
 
     private static string TabGlyph(Tab t) => t.Kind switch { "video" => Th.Play, "search" => Th.Search, "channel" => Th.Account, "playlist" => Th.Later, _ => Th.Home };
@@ -207,7 +236,7 @@ public static class Shell
         if (existing >= 0)
         {
             if (activate) GoTab(existing);
-            else Toast("Это уже открыто во вкладке");
+            else Toast(L.T("Это уже открыто во вкладке", "Already open in a tab"));
             return;
         }
         Sfx.Tab();
@@ -217,7 +246,7 @@ public static class Shell
         if (activate) GoTab(idx);
         else
         {
-            Toast("Открыто во вкладке: " + (title.Length > 0 ? title : arg));
+            Toast(L.T("Открыто во вкладке: ", "Opened in tab: ") + (title.Length > 0 ? title : arg));
             App.Invalidate();
         }
     }
@@ -495,34 +524,34 @@ public static class Shell
             var isBg = BgPlayers.Has(t.PlayKey);
             if (isMain)
             {
-                items.Add(new(P.Paused ? "Продолжить воспроизведение" : "Поставить на паузу", P.TogglePause, icon: P.Paused ? Th.Play : Th.Pause, shortcut: "Space"));
-                items.Add(new("Продолжать в фоне при переключении", () => { t.KeepInBg = !t.KeepInBg; Toast(t.KeepInBg ? "Видео продолжит играть в фоне" : "Фоновое воспроизведение выключено", Th.Good, 2200); }, check: t.KeepInBg, icon: Th.Headphones));
+                items.Add(new(P.Paused ? L.T("Продолжить воспроизведение", "Resume playback") : L.T("Поставить на паузу", "Pause"), P.TogglePause, icon: P.Paused ? Th.Play : Th.Pause, shortcut: "Space"));
+                items.Add(new(L.T("Продолжать в фоне при переключении", "Keep playing in background on switch"), () => { t.KeepInBg = !t.KeepInBg; Toast(t.KeepInBg ? L.T("Видео продолжит играть в фоне", "Video will keep playing in background") : L.T("Фоновое воспроизведение выключено", "Background playback off"), Th.Good, 2200); }, check: t.KeepInBg, icon: Th.Headphones));
             }
             else if (isBg)
             {
                 var bgPaused = BgPlayers.IsPaused(t.PlayKey);
-                items.Add(new(bgPaused ? "Продолжить в фоне" : "Пауза (в фоне)", () => { BgPlayers.TogglePause(t.PlayKey); t.StartPaused = BgPlayers.IsPaused(t.PlayKey); }, icon: bgPaused ? Th.Play : Th.Pause));
-                items.Add(new(BgPlayers.IsMuted(t.PlayKey) ? "Включить звук" : "Выключить звук", () => BgPlayers.ToggleMute(t.PlayKey), icon: BgPlayers.IsMuted(t.PlayKey) ? Th.Volume : Th.Mute));
-                items.Add(new("Остановить фоновое воспроизведение", () => { BgPlayers.Stop(t.PlayKey); t.StartPaused = true; }, icon: Th.Stop));
+                items.Add(new(bgPaused ? L.T("Продолжить в фоне", "Resume in background") : L.T("Пауза (в фоне)", "Pause (background)"), () => { BgPlayers.TogglePause(t.PlayKey); t.StartPaused = BgPlayers.IsPaused(t.PlayKey); }, icon: bgPaused ? Th.Play : Th.Pause));
+                items.Add(new(BgPlayers.IsMuted(t.PlayKey) ? L.T("Включить звук", "Unmute") : L.T("Выключить звук", "Mute"), () => BgPlayers.ToggleMute(t.PlayKey), icon: BgPlayers.IsMuted(t.PlayKey) ? Th.Volume : Th.Mute));
+                items.Add(new(L.T("Остановить фоновое воспроизведение", "Stop background playback"), () => { BgPlayers.Stop(t.PlayKey); t.StartPaused = true; }, icon: Th.Stop));
             }
             else
             {
-                items.Add(new("Запустить в фоне (звук)", () => { t.KeepInBg = true; t.StartPaused = false; BgPlayers.Play(t.PlayKey); Toast("Играет в фоне: " + TabLabel(t), Th.Good, 2000); }, icon: Th.Headphones));
+                items.Add(new(L.T("Запустить в фоне (звук)", "Play in background (audio)"), () => { t.KeepInBg = true; t.StartPaused = false; BgPlayers.Play(t.PlayKey); Toast(L.T("Играет в фоне: ", "Playing in background: ") + TabLabel(t), Th.Good, 2000); }, icon: Th.Headphones));
             }
             items.Add(MenuItem.Sep);
         }
-        items.Add(new("Новая вкладка", () => { NewTab(); _search.Focus(); }, icon: Th.Add, shortcut: "Ctrl+T"));
-        items.Add(new("Дублировать вкладку", () => DuplicateTab(i), icon: Th.Copy));
+        items.Add(new(L.T("Новая вкладка", "New tab"), () => { NewTab(); _search.Focus(); }, icon: Th.Add, shortcut: "Ctrl+T"));
+        items.Add(new(L.T("Дублировать вкладку", "Duplicate tab"), () => DuplicateTab(i), icon: Th.Copy));
         if (_tabs.Count > 1)
         {
-            if (i > 0) items.Add(new("Переместить влево", () => MoveTab(i, i - 1), icon: Th.Back, shortcut: "Ctrl+Shift+PgUp"));
-            if (i < _tabs.Count - 1) items.Add(new("Переместить вправо", () => MoveTab(i, i + 1), icon: Th.ChevronRight, shortcut: "Ctrl+Shift+PgDn"));
+            if (i > 0) items.Add(new(L.T("Переместить влево", "Move left"), () => MoveTab(i, i - 1), icon: Th.Back, shortcut: "Ctrl+Shift+PgUp"));
+            if (i < _tabs.Count - 1) items.Add(new(L.T("Переместить вправо", "Move right"), () => MoveTab(i, i + 1), icon: Th.ChevronRight, shortcut: "Ctrl+Shift+PgDn"));
         }
-        if (_closedTabs.Count > 0) items.Add(new("Открыть закрытую вкладку", ReopenClosedTab, icon: Th.Restart, shortcut: "Ctrl+Shift+T"));
+        if (_closedTabs.Count > 0) items.Add(new(L.T("Открыть закрытую вкладку", "Reopen closed tab"), ReopenClosedTab, icon: Th.Restart, shortcut: "Ctrl+Shift+T"));
         items.Add(MenuItem.Sep);
-        items.Add(new("Закрыть вкладку", () => CloseTab(i), icon: Th.Close, shortcut: "Ctrl+W", danger: true));
-        if (_tabs.Count > 1) items.Add(new("Закрыть другие вкладки", () => CloseOtherTabs(i), icon: Th.Close));
-        if (i < _tabs.Count - 1) items.Add(new("Закрыть вкладки справа", () => CloseTabsRight(i), icon: Th.Close));
+        items.Add(new(L.T("Закрыть вкладку", "Close tab"), () => CloseTab(i), icon: Th.Close, shortcut: "Ctrl+W", danger: true));
+        if (_tabs.Count > 1) items.Add(new(L.T("Закрыть другие вкладки", "Close other tabs"), () => CloseOtherTabs(i), icon: Th.Close));
+        if (i < _tabs.Count - 1) items.Add(new(L.T("Закрыть вкладки справа", "Close tabs to the right"), () => CloseTabsRight(i), icon: Th.Close));
         Menus.Popup(items);
     }
 
@@ -806,7 +835,7 @@ public static class Shell
             var thumbUrl = t.Arg.Length == 11 ? $"https://i.ytimg.com/vi/{t.Arg}/hq720.jpg" : null;
             Cards.ThumbUrl(thumbR, thumbUrl, 8, Th.Menu);
 
-            string? status = isMain ? (P.Paused ? "Пауза" : "Играет") : isBg ? (BgPlayers.IsPaused(t.PlayKey) ? "Пауза (фон)" : "В фоне") : (!AppSettings.Current.AutoPlayOpenedTabs && t.StartPaused ? "На паузе" : null);
+            string? status = isMain ? (P.Paused ? L.T("Пауза", "Paused") : L.T("Играет", "Playing")) : isBg ? (BgPlayers.IsPaused(t.PlayKey) ? L.T("Пауза (фон)", "Paused (bg)") : L.T("В фоне", "Background")) : (!AppSettings.Current.AutoPlayOpenedTabs && t.StartPaused ? L.T("На паузе", "Paused") : null);
             if (status != null)
             {
                 var sr = Gfx.Text(status, 11, 600);
@@ -837,7 +866,7 @@ public static class Shell
                 var rowR = new R(card.X + pad, ty, tw, 24);
                 Gfx.Fill(rowR, Gfx.Fade(Th.A(0.08f), ease), 6);
                 Gfx.Icon(muted || vol == 0 ? Th.Mute : Th.Volume, new R(rowR.X + 6, rowR.Y + 4, 16, 16), 11, Gfx.Fade(muted ? Th.Warn : Th.Brand, ease));
-                var vTxt = Gfx.Text(muted ? "Выкл" : $"{vol}%", 11.5f, 600);
+                var vTxt = Gfx.Text(muted ? L.T("Выкл", "Mute") : $"{vol}%", 11.5f, 600);
                 Gfx.Draw(vTxt, rowR.Right - vTxt.W - 8, rowR.Y + (rowR.H - vTxt.H) / 2, Gfx.Fade(Th.Text, ease));
                 float barX = rowR.X + 26, barW = MathF.Max(20, rowR.Right - vTxt.W - 16 - barX);
                 UI.Progress(new R(barX, rowR.Y + 10, barW, 4), muted ? 0 : Math.Clamp(vol / 100.0, 0, 1), Th.A(0.22f));
@@ -882,7 +911,7 @@ public static class Shell
     private static readonly List<R> _topHits = new(8);
     private static readonly List<R> _holes = new(8);
     private static long _navAt, _toastAt;
-    private static float _markY = -1, _markShown;
+    private static float _markY = -1, _markShown, _prevSideW = SideW;
 
     public static bool TopBarControlAt(float x, float y)
     {
@@ -933,7 +962,7 @@ public static class Shell
         ThumbPack.Open();
         MediaCache.IsActive = BgPlayers.HasVideo;
         ThreadPool.SetMinThreads(4, 2);
-        _search = new Edit("Поиск или ссылка YouTube…") { Bg = () => Th.Card };
+        _search = new Edit(L.T("Поиск или ссылка YouTube…", "Search or YouTube link…")) { Bg = () => Th.Card };
         _search.Enter = () => Submit(_search.Text);
         _search.Changed = OnSearchChanged;
         _search.Escape = Suggest.Hide;
@@ -976,8 +1005,9 @@ public static class Shell
         T.VerificationRequired += VerifyYouTube;
         P.LoadFailed += msg =>
         {
-            if (T.Retrying) Toast("Поток оборвался, открываю заново…", Th.Warn, 2500);
-            else Toast("Видео не открылось (" + msg + "). Попробуйте другое качество в настройках или обновите страницу.", Th.Brand, 9000);
+            if (T.Retrying) Toast(L.T("Поток оборвался, открываю заново…", "Stream interrupted, reconnecting…"), Th.Warn, 2500);
+            else Toast(L.T($"Видео не открылось ({msg}). Попробуйте другое качество в настройках или обновите страницу.",
+                           $"Could not open video ({msg}). Try another quality in Settings or refresh the page."), Th.Brand, 9000);
         };
         P.EndOfFile += OnEnded;
         P.TimeChanged += t => { if (_cur is WatchPage near) near.NearEnd(t, P.Duration); };
@@ -1045,9 +1075,11 @@ public static class Shell
                 case "--theme": AppSettings.Current.Theme = v; Themes.Load(); break;
                 case "--test-menu": App.After(int.Parse(v), () => AccountMenu.Toggle(Gfx.W - 46 * 3 - 8, TopH - 2)); break;
                 case "--test-dsp": App.After(int.Parse(v), AudioStudioPanel.Show); break;
+                case "--test-login": App.After(int.Parse(v), () => LoginModal.Show()); break;
+                case "--lang": AppSettings.Current.UiLanguage = v; OnLanguageChanged(); break;
                 case "--test-pip": App.After(int.Parse(v), Pip.Enter); break;
                 case "--test-pip-lock": App.After(int.Parse(v), () => { Pip.Enter(); App.After(1500, () => Pip.SetLocked(true)); }); break;
-                case "--test-scroll": App.After(2500, () => UI.ScrollBy(_cur?.MainScroll ?? 0, float.Parse(v, System.Globalization.CultureInfo.InvariantCulture))); break;
+                case "--test-scroll": App.After(3500, () => UI.ScrollJump(_cur?.MainScroll ?? 0, float.Parse(v, System.Globalization.CultureInfo.InvariantCulture))); break;
                 case "--page": OpenRoot(v); break;
                 case "--test-click": _testClickAt = Environment.TickCount64 + double.Parse(v, System.Globalization.CultureInfo.InvariantCulture) * 1000; break;
                 case "--test-next": _testNextAt = Environment.TickCount64 + double.Parse(v, System.Globalization.CultureInfo.InvariantCulture) * 1000; break;
@@ -1170,17 +1202,19 @@ public static class Shell
     /// <summary>Ctrl+C with nothing selected: the link to what is on screen, ready to send to someone.</summary>
     private static bool CopyPageLink(bool withTime)
     {
-        string? url = null, what = "Ссылка на страницу скопирована";
+        string? url = null, what = L.T("Ссылка на страницу скопирована", "Page link copied");
         switch (_cur)
         {
             case WatchPage w:
                 url = w.PageLink(withTime);
-                what = w.PlaylistId != null ? "Ссылка на видео в плейлисте скопирована" : withTime ? "Ссылка на видео с текущего момента скопирована" : "Ссылка на видео скопирована";
+                what = w.PlaylistId != null ? L.T("Ссылка на видео в плейлисте скопирована", "Playlist video link copied")
+                     : withTime ? L.T("Ссылка на видео с текущего момента скопирована", "Timestamped video link copied")
+                     : L.T("Ссылка на видео скопирована", "Video link copied");
                 break;
-            case ChannelPage c: url = "https://www.youtube.com/channel/" + c.ChannelId; what = "Ссылка на канал скопирована"; break;
-            case ShortsPage { CurrentId: { } sid }: url = "https://www.youtube.com/shorts/" + sid; what = "Ссылка на Shorts скопирована"; break;
-            case FeedPage { Kind: "search", Arg: { } q }: url = "https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(q); what = "Ссылка на поиск скопирована"; break;
-            case FeedPage { Kind: "playlist", Arg: { Length: > 2 } pl }: url = "https://www.youtube.com/playlist?list=" + pl[2..]; what = "Ссылка на плейлист скопирована"; break;
+            case ChannelPage c: url = "https://www.youtube.com/channel/" + c.ChannelId; what = L.T("Ссылка на канал скопирована", "Channel link copied"); break;
+            case ShortsPage { CurrentId: { } sid }: url = "https://www.youtube.com/shorts/" + sid; what = L.T("Ссылка на Shorts скопирована", "Short link copied"); break;
+            case FeedPage { Kind: "search", Arg: { } q }: url = "https://www.youtube.com/results?search_query=" + Uri.EscapeDataString(q); what = L.T("Ссылка на поиск скопирована", "Search link copied"); break;
+            case FeedPage { Kind: "playlist", Arg: { Length: > 2 } pl }: url = "https://www.youtube.com/playlist?list=" + pl[2..]; what = L.T("Ссылка на плейлист скопирована", "Playlist link copied"); break;
         }
         if (url == null) return false;
         if (App.Test) { Paths.Log("copy link: " + url); return true; }
@@ -1285,6 +1319,9 @@ public static class Shell
             }
             if (v.IsShort && source == "shorts") P.Command("set", "loop-file", "inf");
             else if (T.Current?.VideoId != v.VideoId || T.CurrentSource == "shorts") P.Command("set", "loop-file", "no");
+            // Always restore video decoding BEFORE loadfile when not in Audio-Only mode (prevents black screen after tab/minimize suspend!)
+            _videoHiddenSince = 0;
+            if (!AppSettings.Current.AudioOnlyMode || Pip.Active) P.SetVideoEnabled(true);
             T.Play(v, source, exactStart, startPaused);
         }
 
@@ -1301,6 +1338,8 @@ public static class Shell
         void StartNow()
         {
             if (reqGen != _playReqGen || !P.IsReady) return;
+            _videoHiddenSince = 0;
+            if (!AppSettings.Current.AudioOnlyMode || Pip.Active) P.SetVideoEnabled(true);
             P.Command("set", "loop-file", "no");
             T.PlayFile(d);
         }
@@ -1315,7 +1354,7 @@ public static class Shell
         if (!P.IsReady) return;
         var w = _cur as WatchPage;
         var sp = _cur as ShortsPage;
-        var q = AppSettings.Current.PlayerQuality == "best" ? "Макс" : Cards.QualityName(AppSettings.Current.PlayerQuality);
+        var q = AppSettings.Current.PlayerQuality == "best" ? L.T("Макс", "Max") : Cards.QualityName(AppSettings.Current.PlayerQuality);
         var segs = new System.Text.Json.Nodes.JsonArray();
         foreach (var s in T.Segments)
             segs.Add(new System.Text.Json.Nodes.JsonArray(System.Text.Json.Nodes.JsonValue.Create(s.Start), System.Text.Json.Nodes.JsonValue.Create(s.End)));
@@ -1411,7 +1450,7 @@ public static class Shell
         {
             Downloader.Instance.Enqueue(q);
             OpenRoot("downloads");
-            Toast("Ссылка добавлена в загрузки", Th.Good);
+            Toast(L.T("Ссылка добавлена в загрузки", "Link added to downloads"), Th.Good);
         }
         else OpenSearch(q);
     }
@@ -1451,7 +1490,7 @@ public static class Shell
             Sfx.VideoOpen();
             var title = Path.GetFileNameWithoutExtension(path);
             PlayFile(new DownloadItem { File = path, Title = title, Url = path });
-            Toast("Открыт файл: " + title, Th.Good, 2400);
+            Toast(L.T("Открыт файл: ", "Opened file: ") + title, Th.Good, 2400);
             return;
         }
 
@@ -1467,7 +1506,7 @@ public static class Shell
             if (newTab)
             {
                 OpenVideoInNewTab(new VideoItem { VideoId = vid }, activate: !backgroundTab);
-                if (backgroundTab) Toast("Видео добавлено в фоновую вкладку", Th.Good, 2000);
+                if (backgroundTab) Toast(L.T("Видео добавлено в фоновую вкладку", "Video added to background tab"), Th.Good, 2000);
             }
             else
             {
@@ -1505,7 +1544,7 @@ public static class Shell
         {
             Downloader.Instance.Enqueue(url);
             OpenRoot("downloads");
-            Toast("Ссылка добавлена в загрузки", Th.Good);
+            Toast(L.T("Ссылка добавлена в загрузки", "Link added to downloads"), Th.Good);
             return;
         }
 
@@ -1549,7 +1588,7 @@ public static class Shell
             var sub = Gfx.Text(DropTarget.DragSubtitle, 12.5f, 400, tw, 1);
             Gfx.Draw(sub, tx, card.Y + 48, Th.Sub);
         }
-        var hint = Gfx.Text(onTabs ? "Отпустите — откроется в новой вкладке" : "На панель вкладок или Ctrl — открыть в новой вкладке", 11.5f, 500, tw, 1);
+        var hint = Gfx.Text(onTabs ? L.T("Отпустите — откроется в новой вкладке", "Drop to open in a new tab") : L.T("На панель вкладок или Ctrl — открыть в новой вкладке", "Drop on tab bar or hold Ctrl to open in a new tab"), 11.5f, 500, tw, 1);
         Gfx.Draw(hint, tx, card.Bottom - 30, Th.Brand);
     }
 
@@ -1576,7 +1615,7 @@ public static class Shell
         s.UiScale = next;
         s.Save();
         Gfx.ApplyScale();
-        Toast($"Масштаб: {(int)MathF.Round(next * 100)}%", Th.Sub, 1600);
+        Toast($"{L.T("Масштаб", "Zoom")}: {(int)MathF.Round(next * 100)}%", Th.Sub, 1600);
     }
 
     public static void AdjustZoom(float delta) => SetZoom(AppSettings.Current.UiScale + delta);
@@ -1586,7 +1625,7 @@ public static class Shell
     public static bool OverVideo(float x, float y)
     {
         if (Pip.Active || !_hostVisible || !_hostRect.Contains(x, y)) return false;
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open) return false;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open) return false;
         if (_tabPreviewRect.W > 0 && _tabPreviewRect.Contains(x, y)) return false;
         if (_toastRect.W > 0 && _toastRect.Contains(x, y)) return false;
         return true;
@@ -1598,7 +1637,7 @@ public static class Shell
         _videoWanted = false;
         _miniVideoRect = null;
         _toastRect = default;
-        if (Menus.Open || AccountMenu.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
+        if (Menus.Open || AccountMenu.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
         var cur = T.Current;
 
         if (_fullscreen)
@@ -1623,16 +1662,23 @@ public static class Shell
         var barA = UI.Anim(UI.Id("npbar"), bar ? 1 : 0, 16);
         var barH = BarH * barA;
         var sideW = UI.Smooth(UI.Id("sidew"), AppSettings.Current.SidebarCollapsed ? 0 : SideW, 18);
-        var navT = Math.Clamp((UI.Now - _navAt) / 150f, 0, 1);
-        var slide = (1 - navT) * (1 - navT) * 10;
+        float sideVelX = (sideW - _prevSideW) / MathF.Max(0.002f, (float)UI.Dt);
+        _prevSideW = sideW;
+
+        var navT = Math.Clamp((UI.Now - _navAt) / 170f, 0, 1);
+        var slide = (1 - navT) * (1 - navT) * 12f;
 
         var tabsH = TabH;
+        var contentR = new R(sideW, TopH + tabsH, w - sideW, h - TopH - tabsH - barH);
+        float navVelY = navT < 1 ? -2f * (1f - navT) * 12f / 0.17f * 10f : 0f;
+        bool navMb = Gfx.PushMotionBlur(contentR, 0f, navVelY);
         _cur?.Draw(new R(sideW, TopH + tabsH + slide, w - sideW, h - TopH - tabsH - barH - slide));
+        Gfx.PopMotionBlur(navMb);
         DrawTabs(new R(sideW, TopH, w - sideW, TabH));
 
         if (navT < 1)
         {
-            Gfx.Fill(new R(sideW, TopH + tabsH, w - sideW, h - TopH - tabsH - barH), Gfx.Fade(Th.Bg, (1 - navT) * (1 - navT)));
+            Gfx.Fill(contentR, Gfx.Fade(Th.Bg, (1 - navT) * (1 - navT)));
             UI.Animate();
         }
 
@@ -1655,7 +1701,7 @@ public static class Shell
         Gfx.Fill(new R(140, 17, 27, 18), Th.Brand, 5);
         Gfx.Icon("\uF5B0", new R(140, 17, 27, 18), 9, Th.OnBrand);
         Gfx.Draw("FluxTube", 175, 15, 15.5f, Th.Text, 600);
-        if (UI.MiddleClick(logo)) App.Post(() => { NewTab("root", "home", activate: false); Toast("Открыта новая вкладка: Главная", Th.Sub, 1800); });
+        if (UI.MiddleClick(logo)) App.Post(() => { NewTab("root", "home", activate: false); Toast(L.T("Открыта новая вкладка: Главная", "Opened new tab: Home"), Th.Sub, 1800); });
         else if (UI.Click(logoId, logo)) App.Post(() => OpenRoot("home"));
 
         const float cbw = 46, cbh = TopH;
@@ -1691,10 +1737,11 @@ public static class Shell
         }
         else
         {
-            var accW = UI.PillWidth(Th.Account, "Войти");
+            var signInText = L.T("Войти", "Sign in");
+            var accW = UI.PillWidth(Th.Account, signInText);
             accLeft = rightEdge - accW;
             _topHits.Add(new R(accLeft, 9, accW, 34));
-            if (UI.Pill(UI.Id("acc"), accLeft, 9, 34, Th.Account, "Войти", out _, Th.A(0.08f))) AccountMenu.Toggle(rightEdge, TopH - 2);
+            if (UI.Pill(UI.Id("acc"), accLeft, 9, 34, Th.Account, signInText, out _, Th.A(0.10f))) LoginModal.Show();
         }
 
         var fxBtnLbl = AppSettings.Current.AudioFxEnabled ? AudioDsp.DisplayPresetName(AppSettings.Current) : "EQ";
@@ -1714,7 +1761,7 @@ public static class Shell
 
         if (Updater.HasUpdate || Updater.Downloading)
         {
-            var upLabel = Updater.Downloading ? $"{(int)(Updater.Progress * 100)}%" : $"Обновить {Updater.AvailableVersion}";
+            var upLabel = Updater.Downloading ? $"{(int)(Updater.Progress * 100)}%" : $"{L.T("Обновить", "Update")} {Updater.AvailableVersion}";
             var upW = UI.PillWidth(Th.Download, upLabel);
             var upX = accLeft - upW - 10;
             if (upX > _searchBox.Right + 10)
@@ -1725,32 +1772,35 @@ public static class Shell
             }
         }
 
-        // side bar (TikTok removed cleanly)
+        // side bar
         if (sideW > 0.5f)
         {
-            Gfx.PushClip(new R(0, TopH, sideW, h - TopH));
+            var sideClip = new R(0, TopH, sideW, h - TopH);
+            bool sideMb = Gfx.PushMotionBlur(sideClip, sideVelX, 0f);
+            Gfx.PushClip(sideClip);
             float sx = sideW - SideW;
             Gfx.FillFrosted(new R(sx, TopH, SideW, h - TopH), Th.Bg, 0, opacity: 0.82f);
             Gfx.Fill(new R(sx + SideW - 1, TopH, 1, h - TopH), Gfx.Fade(Th.Line, 0.7f));
             float y = TopH + 4;
             var tag = _cur?.Tag ?? "";
-            SideItem(sx, ref y, Th.Home, "Главная", "home", tag);
-            SideItem(sx, ref y, Th.Subs, "Подписки", "subs", tag);
-            SideItem(sx, ref y, Th.Later, "Позже", "wl", tag);
-            SideItem(sx, ref y, Th.Like, "Лайки", "liked", tag);
+            SideItem(sx, ref y, Th.Home, L.T("Главная", "Home"), "home", tag);
+            SideItem(sx, ref y, Th.Subs, L.T("Подписки", "Subs"), "subs", tag);
+            SideItem(sx, ref y, Th.Later, L.T("Позже", "Later"), "wl", tag);
+            SideItem(sx, ref y, Th.Like, L.T("Лайки", "Liked"), "liked", tag);
             y += 6; Gfx.Fill(new R(sx + 18, y, SideW - 36, 1), Th.Line); y += 7;
-            SideItem(sx, ref y, Th.History, "История", "history", tag);
-            SideItem(sx, ref y, Th.Eye, "Видел", "seen", tag);
-            SideItem(sx, ref y, Th.Download, "Загрузки", "downloads", tag, Downloader.Instance.Items.Any(i => i.IsActive));
+            SideItem(sx, ref y, Th.History, L.T("История", "History"), "history", tag);
+            SideItem(sx, ref y, Th.Eye, L.T("Видел", "Seen"), "seen", tag);
+            SideItem(sx, ref y, Th.Download, L.T("Загрузки", "Saved"), "downloads", tag, Downloader.Instance.Items.Any(i => i.IsActive));
             y += 6; Gfx.Fill(new R(sx + 18, y, SideW - 36, 1), Th.Line); y += 7;
             SideItem(sx, ref y, "\uE714", "Shorts", "shorts", tag);
-            var sy = h - 64 - barH;
-            if (sy > y) SideItem(sx, ref sy, Th.Settings, "Настройки", "settings", tag);
+            var sy = h - 56 - barH;
+            if (sy > y) SideItem(sx, ref sy, Th.Settings, L.T("Настройки", "Settings"), "settings", tag);
             var markA = UI.Anim(UI.Id("sidemark:a"), _markY >= 0 ? 1 : 0, 18);
             if (_markY >= 0) _markShown = UI.Smooth(UI.Id("sidemark:y"), _markY, 20);
-            if (markA > 0.01f) Gfx.Fill(new R(sx, _markShown, 3, 24), Gfx.Fade(Th.Brand, markA), 1.5f);
+            if (markA > 0.01f) Gfx.Fill(new R(sx + 3, _markShown, 3, 22), Gfx.Fade(Th.Brand, markA), 1.5f);
             _markY = -1;
             Gfx.PopClip();
+            Gfx.PopMotionBlur(sideMb);
         }
         else _markY = -1;
 
@@ -1770,6 +1820,7 @@ public static class Shell
         DrawTabPreview();
         ThemeCodeEditor.Draw();
         AudioStudioPanel.Draw();
+        LoginModal.Draw();
         AccountMenu.Draw();
         Menus.Draw();
     }
@@ -1924,7 +1975,7 @@ public static class Shell
         var selA = UI.Anim(id ^ 0x77, sel ? 1 : 0, 18);
         if (selA > 0.01f) Gfx.Fill(r, Th.A(0.086f * selA), 10);
         if (!sel) UI.Glow(id, r, 10, UI.Hover(r));
-        if (sel) _markY = y + 12;
+        if (sel) _markY = y + 13;
         Gfx.Icon(glyph, new R(r.X, y + 5, r.W, 22), 18, sel ? Th.Text : Th.Icon);
         var run = Gfx.Text(label, 10.5f, sel ? 600 : 400);
         Gfx.Draw(run, Gfx.Snap(r.X + (r.W - run.W) / 2), y + 29, sel ? Th.Text : Th.Sub);
@@ -1970,7 +2021,7 @@ public static class Shell
         if (showWaves)
             AudioAnalyzer.DrawMiniWaves(new R(tx, r.Y + 11, 24, 15));
 
-        var titleText = string.IsNullOrEmpty(cur.Title) ? "Видео" : cur.Title;
+        var titleText = string.IsNullOrEmpty(cur.Title) ? L.T("Видео", "Video") : cur.Title;
         var titleRun = Gfx.Text(titleText, 14, 600, MathF.Max(40, tw - waveW));
         var titleR = new R(tx + waveW, r.Y + 8, MathF.Min(titleRun.W, MathF.Max(40, tw - waveW)), titleRun.H + 2);
         Gfx.Draw(titleRun, titleR.X, titleR.Y, UI.Hover(titleR) ? Th.Brand : Th.Text);
@@ -2103,18 +2154,18 @@ public static class Shell
         W.SetWindowRgn(App.VideoHwnd, 0, false);
     }
 
-    /// <summary>Switches straight to the existing tab that owns the video instead of overwriting the current tab.</summary>
+    /// <summary>Switches straight to the existing video tab that owns the video, or re-opens it if the tab navigated away.</summary>
     public static void FocusVideoTab(string? tabKey, string? videoId)
     {
         if (tabKey != null)
         {
-            int idx = _tabs.FindIndex(t => t.Key == tabKey);
-            if (idx >= 0) { GoTab(idx); return; }
+            int idx = _tabs.FindIndex(t => t.Key == tabKey && t.Kind == "video" && (videoId == null || t.Arg == videoId));
+            if (idx >= 0 && idx != _tab) { GoTab(idx); return; }
         }
         if (videoId != null)
         {
             int idx = _tabs.FindIndex(t => t.Kind == "video" && t.Arg == videoId);
-            if (idx >= 0) { GoTab(idx); return; }
+            if (idx >= 0 && idx != _tab) { GoTab(idx); return; }
         }
         OpenCurrentVideo();
     }
@@ -2123,9 +2174,10 @@ public static class Shell
     {
         if (T.Current is not { } cur) return;
         if (_cur is WatchPage wp && wp.Video.VideoId == cur.VideoId) return;
-        int ownerIdx = _mainTabKey != null ? _tabs.FindIndex(t => t.Key == _mainTabKey) : -1;
+        // Only switch to another tab if that tab STILL holds this video (never stall when current tab navigated to Settings/Home!)
+        int ownerIdx = _mainTabKey != null ? _tabs.FindIndex(t => t.Key == _mainTabKey && t.Kind == "video" && t.Arg == cur.VideoId) : -1;
         if (ownerIdx < 0) ownerIdx = _tabs.FindIndex(t => t.Kind == "video" && t.Arg == cur.VideoId);
-        if (ownerIdx >= 0) { GoTab(ownerIdx); return; }
+        if (ownerIdx >= 0 && ownerIdx != _tab) { GoTab(ownerIdx); return; }
         OpenVideo(cur, T.CurrentSource ?? "home");
     }
 
@@ -2169,6 +2221,10 @@ public static class Shell
                     _holes.Add(SharePanel.Rect);
                 if (ThemeCodeEditor.Open && ThemeCodeEditor.Rect.W > 0 && ThemeCodeEditor.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
                     _holes.Add(ThemeCodeEditor.Rect);
+                if (AudioStudioPanel.Open && AudioStudioPanel.PanelRect.W > 0 && AudioStudioPanel.PanelRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                    _holes.Add(AudioStudioPanel.PanelRect);
+                if (LoginModal.Open && LoginModal.Rect.W > 0 && LoginModal.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                    _holes.Add(LoginModal.Rect);
                 if (AccountMenu.Open && AccountMenu.Rect.W > 0 && AccountMenu.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
                     _holes.Add(AccountMenu.Rect);
                 if (Menus.Open)
@@ -2228,7 +2284,7 @@ public static class Shell
 
     public static bool SpaceDown(bool repeat)
     {
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open) return false;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open) return false;
         if (T.Current == null || !P.HasMedia) return false;
         if (!repeat)
         {
@@ -2289,7 +2345,7 @@ public static class Shell
 
     // ---------------- keys ----------------
 
-    /// <summary>Global Ctrl+V when no text box is focused: pastes clipboard link or query straight into the search bar.</summary>
+    /// <summary>Global Ctrl+V outside text boxes: immediately opens the pasted YouTube link/playlist/channel or runs search (no Enter needed).</summary>
     private static bool PasteToSearch()
     {
         var raw = W.GetClipboardText(App.Hwnd, 1024);
@@ -2297,10 +2353,7 @@ public static class Shell
         var clean = string.Join(' ', raw.Split(['\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries)).Trim();
         if (clean.Length == 0) return false;
         _search.Text = clean;
-        _search.Focus(selectAll: false);
-        OnSearchChanged();
-        bool isLink = ExtractYouTubeId(clean) != null || clean.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || clean.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
-        Toast(isLink ? "Ссылка вставлена в поиск — нажмите Enter, чтобы открыть" : "Текст вставлен в поиск — нажмите Enter", Th.Good, 2400);
+        Submit(clean);
         App.Invalidate();
         return true;
     }
@@ -2311,6 +2364,7 @@ public static class Shell
         if (vk == W.VK_ESCAPE)
         {
             if (UI.AutoScrollActive) UI.StopAutoScroll();
+            else if (LoginModal.Open) LoginModal.Close();
             else if (AudioStudioPanel.Open) AudioStudioPanel.Close();
             else if (ThemeCodeEditor.Open) ThemeCodeEditor.Close();
             else if (AccountMenu.Open) AccountMenu.Close();
@@ -2321,7 +2375,7 @@ public static class Shell
         }
         if (ctrl && !alt && vk == 'E' && !Edit.AnyFocused) { AudioStudioPanel.Toggle(); return true; }
         // Block navigation/player hotkeys while an overlay panel is open
-        if (AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open) return false;
+        if (AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open) return false;
 
         // Global Ctrl+V anywhere outside Edit boxes -> immediately paste link or text into search!
         if (ctrl && !alt && vk == 'V' && !Edit.AnyFocused)
@@ -2437,11 +2491,11 @@ public static class Shell
 
     public static void Login() => LoginNewAccount();
 
-    /// <summary>Primary sign-in: opens the user's real DEFAULT Windows browser (Chrome/Edge/Brave/etc.) with clean profile + auto cookie capture.</summary>
-    public static void LoginNewAccount() => BrowserLogin.OpenExistingBrowserForLogin();
+    /// <summary>Opens the clean 1-click frosted-glass Sign-In Modal.</summary>
+    public static void LoginNewAccount() => LoginModal.Show(verification: false, autoStart: false);
 
-    /// <summary>Open the default browser for a YouTube challenge and capture the refreshed session.</summary>
-    public static void VerifyYouTube() => BrowserLogin.OpenExistingBrowserForLogin();
+    /// <summary>Opens the clean isolated verification window pre-seeded with current cookies so bot checks take 2 seconds.</summary>
+    public static void VerifyYouTube() => LoginModal.Show(verification: true, verifyVideoId: T.Current?.VideoId, autoStart: true);
 
     /// <summary>Secondary fallback: opens the built-in WebView2 Login Window with a clean session.</summary>
     public static void LoginWebView()
@@ -2469,7 +2523,7 @@ public static class Shell
 
         _awaitingLogin = true;
         _helperExitedAt = 0;
-        StartHelper("--login", "Вход в YouTube");
+        StartHelper("--login", L.T("Вход в YouTube", "YouTube Sign-In"));
     }
 
     public static void Logout()
@@ -2480,14 +2534,14 @@ public static class Shell
         _awaitingLogin = false;
 
         OnAccountChanged();
-        Toast("Вы вышли. Локальная история сохранена.");
+        Toast(L.T("Вы вышли. Локальная история сохранена.", "Signed out. Local history kept."));
     }
 
     /// <summary>Browser sign-in window lives in a separate process that exists only while signing in.</summary>
     private static void StartHelper(string args, string what)
     {
         var exe = Path.Combine(AppContext.BaseDirectory, "web", "FluxTube.exe");
-        if (!File.Exists(exe)) { _awaitingLogin = false; Toast(what + ": не найден модуль web\\FluxTube.exe. В настройках есть импорт cookies.txt.", Th.Warn, 7000); return; }
+        if (!File.Exists(exe)) { _awaitingLogin = false; Toast(what + L.T(": не найден модуль web\\FluxTube.exe.", ": web\\FluxTube.exe module not found."), Th.Warn, 7000); return; }
         try
         {
             _helper = Process.Start(new ProcessStartInfo(exe, args) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)! });
@@ -2557,7 +2611,7 @@ public static class Shell
                 OnAccountChanged();
                 if (nowLogged && (wasAwaiting || !was))
                 {
-                    Toast(was ? "Новый аккаунт добавлен и активирован" : "Вы вошли в YouTube", Th.Good, 3500);
+                    Toast(was ? L.T("Новый аккаунт добавлен и активирован", "New account added and active") : L.T("Вы вошли в YouTube", "Signed in to YouTube"), Th.Good, 3500);
                     OpenRoot("home");
                 }
             }
@@ -2581,7 +2635,7 @@ public static class Shell
                 {
                     var url = File.ReadAllText(f).Trim();
                     File.Delete(f);
-                    if (url.StartsWith("http")) { Downloader.Instance.Enqueue(url); Toast("Добавлено в загрузки", Th.Good); }
+                    if (url.StartsWith("http")) { Downloader.Instance.Enqueue(url); Toast(L.T("Добавлено в загрузки", "Added to downloads"), Th.Good); }
                 }
         }
         catch { }

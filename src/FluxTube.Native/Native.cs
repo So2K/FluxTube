@@ -16,22 +16,38 @@ public sealed unsafe class Edit
 
     public static bool AnyFocused => _all.ContainsKey(W.GetFocus());
 
+    public static bool IsPointInFocusedSingleLine(float x, float y)
+    {
+        var fh = W.GetFocus();
+        if (fh == 0 || !_all.TryGetValue(fh, out var e) || e.Multiline) return false;
+        return Gfx.Frame - e._placedFrame <= 1 && e._lastBox.Contains(x, y);
+    }
+
     public nint H { get; }
     public bool Multiline { get; }
     public Action? Enter, Changed, Escape;
     public Func<int, bool>? Arrow;
     /// <summary>Colour of the box the renderer draws behind the control (read on every repaint: themes change it).</summary>
     public Func<uint> Bg = () => Th.Field;
-    private readonly string _placeholder;
+    private string _placeholder;
     private string _cachedText = "";
     private nint _font;
     private float _fontScale;
     private W.RECT _last, _wantRect;
+    private R _lastBox;
     private long _placedFrame;
     private bool _wantShow;
     private bool _visible;
     private bool _silent;
     private bool _pendingFocus, _pendingSelectAll;
+    // Direct2D visual text-box state for single-line inputs (zero Win32 GDI child-HWND over DXGI artifacts!)
+    private float _scrollX;
+    private bool _mouseSelecting;
+    private int _dragAnchor;
+    private long _caretBlinkAt = Environment.TickCount64;
+    private long _lastClickAt;
+    private int _lastClickPos, _clickStreak;
+    private Vortice.DirectWrite.HitTestMetrics[] _selRects = new Vortice.DirectWrite.HitTestMetrics[8];
 
     public Edit(string placeholder, bool multiline = false)
     {
@@ -40,17 +56,21 @@ public sealed unsafe class Edit
         uint style = W.WS_CHILD | W.WS_CLIPSIBLINGS | (multiline
             ? (W.ES_MULTILINE | W.ES_WANTRETURN | W.ES_AUTOVSCROLL | W.ES_AUTOHSCROLL | W.WS_VSCROLL)
             : W.ES_AUTOHSCROLL);
-        // Start at a sane non-tiny size (320x24) so setting Text before first Place() never scrolls characters off-left!
-        H = W.CreateWindowExW(0, "EDIT", "", style, 0, 0, 320, multiline ? 200 : 24, App.Hwnd, 0, 0, 0);
+        // Single-line Edit stays off-screen as a native keyboard/IME/clipboard/undo engine while Direct2D draws 100% of pixels!
+        H = W.CreateWindowExW(0, "EDIT", "", style, multiline ? 0 : -4000, multiline ? 0 : -4000, 320, multiline ? 200 : 28, App.Hwnd, 0, 0, 0);
         _all[H] = this;
         delegate* unmanaged[Stdcall]<nint, uint, nuint, nint, nint> proc = &Proc;
         var prev = W.SetWindowLongPtrW(H, W.GWLP_WNDPROC, (nint)proc);
         if (_oldProc == 0) _oldProc = prev;
-        if (!multiline)
-        {
-            fixed (char* p = placeholder) W.SendMessageW(H, 0x1501 /*EM_SETCUEBANNER*/, 1, (nint)p);
-        }
+        if (multiline) W.SetWindowTheme(H, "", "");
         W.SendMessageW(H, 0x00C5 /*EM_SETLIMITTEXT*/, multiline ? 16384u : 2000u, 0);
+    }
+
+    public void SetPlaceholder(string text)
+    {
+        if (_placeholder == text) return;
+        _placeholder = text;
+        App.Invalidate();
     }
 
     public string Text
@@ -70,15 +90,19 @@ public sealed unsafe class Edit
             {
                 W.SendMessageW(H, 0x00B1 /*EM_SETSEL*/, 0, 0);
                 W.SendMessageW(H, 0x00B7 /*EM_SCROLLCARET*/, 0, 0);
+                _scrollX = 0;
             }
+            _caretBlinkAt = Environment.TickCount64;
             _silent = false;
-            if (_visible) W.InvalidateRect(H, null, 1);
+            if (Multiline && _visible) W.InvalidateRect(H, null, 1);
+            App.Invalidate();
         }
     }
 
     /// <summary>Shows the start of the text (a long link otherwise sits scrolled to its end).</summary>
     public void ShowStart()
     {
+        _scrollX = 0;
         W.SendMessageW(H, 0x00B1 /*EM_SETSEL*/, 0, 0);
         W.SendMessageW(H, 0x00B7 /*EM_SCROLLCARET*/, 0, 0);
     }
@@ -86,6 +110,20 @@ public sealed unsafe class Edit
     public bool Focused => W.GetFocus() == H;
     public void Focus(bool selectAll = true)
     {
+        _caretBlinkAt = Environment.TickCount64;
+        if (!Multiline)
+        {
+            if (!_visible)
+            {
+                _visible = true;
+                W.SetWindowPos(H, 0, -4000, -4000, 320, 28, W.SWP_NOZORDER | W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW | W.SWP_NOCOPYBITS);
+            }
+            W.SetFocus(H);
+            if (selectAll) W.SendMessageW(H, 0x00B1, 0, -1);
+            else { var len = W.GetWindowTextLengthW(H); W.SendMessageW(H, 0x00B1, (nuint)len, len); }
+            App.Invalidate();
+            return;
+        }
         if (!_visible)
         {
             _pendingFocus = true;
@@ -99,17 +137,39 @@ public sealed unsafe class Edit
         W.SendMessageW(H, 0x00B7 /*EM_SCROLLCARET*/, 0, 0);
     }
 
+    private (int A, int B) GetSelection()
+    {
+        uint a = 0, b = 0;
+        W.SendMessageW(H, 0x00B0 /*EM_GETSEL*/, (nuint)(&a), (nint)(&b));
+        int len = _cachedText.Length;
+        return (Math.Clamp((int)a, 0, len), Math.Clamp((int)b, 0, len));
+    }
+
+    private void SetSelection(int a, int b)
+    {
+        W.SendMessageW(H, 0x00B1 /*EM_SETSEL*/, (nuint)Math.Max(0, a), Math.Max(0, b));
+        _caretBlinkAt = Environment.TickCount64;
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '-';
+
     /// <summary>
-    /// Schedules the native EDIT inside box (DIPs) for AfterFrame() placement.
-    /// While actively scrolling, partially clipped, or covered by an overlay, seamlessly renders the text/placeholder
-    /// directly in Direct2D and hides the native HWND so it NEVER floats outside its box or captures stale pixels.
+    /// Renders single-line text boxes 100% natively in Direct2D (crisp vertical centering, zero Win32 child-HWND artifacts,
+    /// zero clipped letters, smooth caret &amp; selection, native keyboard/IME via off-screen Win32 EDIT).
+    /// Multiline editors (ThemeCodeEditor) place their native EDIT cleanly inside the modal.
     /// </summary>
     public void Place(R box, float padLeft = 14, float padRight = 14, bool allowInModal = false)
     {
         _placedFrame = Gfx.Frame;
 
-        // Check overlays, active scroll animation, or partial viewport clipping
-        bool blocked = (!allowInModal && ThemeCodeEditor.Open)
+        if (!Multiline)
+        {
+            DrawSingleLineD2D(box, padLeft, padRight, allowInModal);
+            return;
+        }
+
+        // Multiline Win32 EDIT placement (ThemeCodeEditor)
+        bool blocked = (!allowInModal && (ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open))
             || (AccountMenu.Open && AccountMenu.Rect is { W: > 0 } m && box.Right > m.X && box.X < m.Right && box.Bottom > m.Y && box.Y < m.Bottom)
             || (Menus.Open && Menus.Bounds is { W: > 0 } mb && box.Right > mb.X && box.X < mb.Right && box.Bottom > mb.Y && box.Y < mb.Bottom)
             || (SharePanel.Open && SharePanel.Rect is { W: > 0 } sp && box.Right > sp.X && box.X < sp.Right && box.Bottom > sp.Y && box.Y < sp.Bottom)
@@ -127,15 +187,12 @@ public sealed unsafe class Edit
             return;
         }
 
-        // Clicking anywhere on the rounded outer box (including left/right padding) focuses the control cleanly
         if (UI.Pressed && UI.Hover(box) && !Focused)
         {
             UI.Pressed = false;
             App.Post(() => Focus(selectAll: false));
         }
 
-        // An unfocused Win32 child EDIT can display stale pixels over the swap chain.
-        // Draw its text with Direct2D until it actually needs native input/IME.
         if (!Focused && !_pendingFocus)
         {
             _wantShow = false;
@@ -147,28 +204,181 @@ public sealed unsafe class Edit
         if (_fontScale != s)
         {
             var oldFont = _font;
-            _font = W.CreateFontW(-(int)MathF.Round((Multiline ? 13.5f : 14.5f) * s), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5 /*CLEARTYPE*/, 0, Multiline ? "Consolas" : Gfx.Font);
+            _font = W.CreateFontW(-(int)MathF.Round(13.5f * s), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5 /*CLEARTYPE*/, 0, "Consolas");
             _fontScale = s;
             W.SendMessageW(H, W.WM_SETFONT, (nuint)_font, 1);
             if (oldFont != 0) W.DeleteObject(oldFont);
         }
         int l = (int)MathF.Round((box.X + padLeft) * s);
         int r = Math.Max(l + 1, (int)MathF.Round((box.Right - padRight) * s));
-        W.RECT rc;
-        if (Multiline)
-        {
-            int padY = (int)MathF.Round(10 * s);
-            rc = new W.RECT { L = l, T = (int)MathF.Round(box.Y * s) + padY, R = r, B = Math.Max((int)MathF.Round(box.Y * s) + padY + 20, (int)MathF.Round(box.Bottom * s) - padY) };
-        }
-        else
-        {
-            int h = (int)MathF.Round(21 * s);
-            rc = new W.RECT { L = l, T = (int)MathF.Round((box.Y + box.H / 2) * s) - h / 2, R = r };
-            rc.B = rc.T + h;
-        }
+        int padY = (int)MathF.Round(10 * s);
+        var rc = new W.RECT { L = l, T = (int)MathF.Round(box.Y * s) + padY, R = r, B = Math.Max((int)MathF.Round(box.Y * s) + padY + 20, (int)MathF.Round(box.Bottom * s) - padY) };
         _wantRect = rc;
         _wantShow = true;
     }
+
+    private void DrawSingleLineD2D(R box, float padLeft, float padRight, bool allowInModal)
+    {
+        _lastBox = box;
+        float innerW = MathF.Max(8, box.W - padLeft - padRight);
+        var textClip = new R(box.X + padLeft, box.Y + 2, innerW, MathF.Max(4, box.H - 4));
+        bool focused = Focused;
+        _wantShow = focused; // keep off-screen HWND alive only while focused
+
+        bool canInteract = !Menus.Open && !AccountMenu.Open && (allowInModal || (!ThemeCodeEditor.Open && !AudioStudioPanel.Open && !LoginModal.Open));
+        bool over = canInteract && UI.Hover(box);
+        if (over) Sel.RequestIBeam();
+
+        // Measure unwrapped full text for exact hit-testing, selection, and smooth horizontal caret scroll
+        var txt = _cachedText;
+        var run = txt.Length > 0 ? Gfx.Text(txt, 14f, 400, 0, 1) : null;
+        var layout = run?.Layout;
+        float textH = run?.H ?? Gfx.LineHeight(14f);
+        float textY = Gfx.Snap(box.Y + (box.H - textH) * 0.5f);
+
+        int HitPos(float mx)
+        {
+            if (layout == null || txt.Length == 0) return 0;
+            layout.HitTestPoint(mx - (textClip.X - _scrollX), textH * 0.5f, out var trailing, out _, out var m);
+            return Math.Clamp((int)m.TextPosition + (trailing ? (int)m.Length : 0), 0, txt.Length);
+        }
+
+        if (over && UI.Pressed)
+        {
+            UI.Pressed = false;
+            int pos = HitPos(UI.MX);
+            bool rapid = UI.Now - _lastClickAt < 400 && Math.Abs(pos - _lastClickPos) <= 2;
+            _clickStreak = rapid ? (_clickStreak % 3) + 1 : 1;
+            _lastClickAt = UI.Now;
+            _lastClickPos = pos;
+
+            if (!focused) Focus(selectAll: false);
+            if (_clickStreak == 3)
+            {
+                SetSelection(0, txt.Length);
+                _mouseSelecting = false;
+            }
+            else if (_clickStreak == 2 && txt.Length > 0)
+            {
+                int a = pos, b = pos;
+                while (a > 0 && IsWordChar(txt[a - 1])) a--;
+                while (b < txt.Length && IsWordChar(txt[b])) b++;
+                SetSelection(a, b);
+                _mouseSelecting = false;
+            }
+            else
+            {
+                _dragAnchor = pos;
+                SetSelection(pos, pos);
+                _mouseSelecting = true;
+            }
+            focused = true;
+        }
+        else if (_mouseSelecting)
+        {
+            if (!UI.Down || !focused) _mouseSelecting = false;
+            else
+            {
+                int pos = HitPos(UI.MX);
+                SetSelection(Math.Min(_dragAnchor, pos), Math.Max(_dragAnchor, pos));
+                UI.Animate();
+            }
+        }
+
+        if (over && UI.RightClicked)
+        {
+            if (!focused) Focus(selectAll: false);
+            var (sa, sb) = GetSelection();
+            bool hasSel = sb > sa;
+            var items = new List<MenuItem>();
+            if (hasSel)
+            {
+                items.Add(new(Services.L.T("Вырезать", "Cut"), () => W.SendMessageW(H, 0x0300 /*WM_CUT*/, 0, 0), icon: Th.Copy, shortcut: "Ctrl+X"));
+                items.Add(new(Services.L.T("Копировать", "Copy"), () => W.SendMessageW(H, 0x0301 /*WM_COPY*/, 0, 0), icon: Th.Copy, shortcut: "Ctrl+C"));
+            }
+            items.Add(new(Services.L.T("Вставить", "Paste"), () => { Focus(selectAll: false); W.SendMessageW(H, 0x0302 /*WM_PASTE*/, 0, 0); }, icon: Th.Link, shortcut: "Ctrl+V"));
+            if (txt.Length > 0)
+            {
+                items.Add(MenuItem.Sep);
+                items.Add(new(Services.L.T("Выделить всё", "Select all"), () => { Focus(selectAll: true); }, shortcut: "Ctrl+A"));
+            }
+            Menus.Popup(items);
+        }
+
+        var (selA, selB) = focused ? GetSelection() : (0, 0);
+
+        // Smooth horizontal scroll keeping caret visible inside the pill
+        float caretX = 0f;
+        if (layout != null && txt.Length > 0)
+        {
+            int caretPos = Math.Clamp(selB, 0, txt.Length);
+            if (caretPos == txt.Length) caretX = run!.W;
+            else
+            {
+                layout.HitTestTextPosition((uint)caretPos, false, out var px, out _, out _);
+                caretX = px;
+            }
+        }
+        if (focused)
+        {
+            if (caretX - _scrollX > innerW - 4) _scrollX = caretX - (innerW - 4);
+            if (caretX - _scrollX < 0) _scrollX = caretX;
+            float maxScr = MathF.Max(0, (run?.W ?? 0) - innerW + 4);
+            _scrollX = Math.Clamp(_scrollX, 0, maxScr);
+        }
+        else _scrollX = 0;
+
+        Gfx.PushClip(textClip);
+        if (txt.Length == 0)
+        {
+            if (_placeholder.Length > 0)
+            {
+                var pr = Gfx.Text(_placeholder, 14f, 400, innerW, 1);
+                Gfx.Draw(pr, textClip.X, Gfx.Snap(box.Y + (box.H - pr.H) * 0.5f), Th.Dim);
+            }
+        }
+        else
+        {
+            float drawX = textClip.X - _scrollX;
+            // Selection highlight
+            if (focused && selB > selA && layout != null)
+            {
+                int n = 0;
+                for (int attempt = 0; attempt < 2; attempt++)
+                {
+                    var hr = layout.HitTestTextRange((uint)selA, (uint)(selB - selA), drawX, textY, _selRects, out var got);
+                    if (hr.Success) { n = (int)got; break; }
+                    _selRects = new Vortice.DirectWrite.HitTestMetrics[Math.Max((int)got, _selRects.Length * 2)];
+                }
+                var hl = Gfx.Fade(Th.Brand, Th.Light ? 0.28f : 0.42f);
+                for (int i = 0; i < n; i++)
+                    Gfx.Fill(new R(_selRects[i].Left, _selRects[i].Top, _selRects[i].Width, _selRects[i].Height), hl, 2f);
+            }
+            Gfx.Draw(run!, drawX, textY, Th.Text);
+        }
+
+        // Crisp blinking caret when focused
+        if (focused)
+        {
+            long elapsed = UI.Now - _caretBlinkAt;
+            bool caretOn = (elapsed / 530) % 2 == 0;
+            if (caretOn)
+            {
+                float cx = Gfx.Snap(textClip.X + caretX - _scrollX);
+                Gfx.Fill(new R(cx, textY + 1, 1.5f, MathF.Max(14, textH - 2)), Th.Brand, 0.75f);
+            }
+            // Schedule a clean blink wakeup (zero 60 FPS idle spin while just sitting in search box!)
+            long nextFlip = 535 - (elapsed % 530);
+            if (_caretWakeAt < UI.Now + 10)
+            {
+                _caretWakeAt = UI.Now + nextFlip;
+                App.After((int)Math.Clamp(nextFlip, 40, 560), App.Invalidate);
+            }
+        }
+        Gfx.PopClip();
+    }
+
+    private long _caretWakeAt;
 
     private void DrawFallback(R box, float padLeft, float padRight)
     {
@@ -186,6 +396,8 @@ public sealed unsafe class Edit
     {
         _wantShow = false;
         _pendingFocus = false;
+        _mouseSelecting = false;
+        _lastBox = default;
         if (!_visible) return;
         _visible = false;
         if (Focused) W.SetFocus(App.Hwnd);
@@ -193,14 +405,24 @@ public sealed unsafe class Edit
     }
 
     /// <summary>
-    /// Runs once per frame AFTER Gfx.End() / DXGI Present: commits native Win32 EDIT positions with SWP_NOCOPYBITS
-    /// and automatically hides any Edit that was not placed this frame (prevents leaked controls across pages/tabs).
+    /// Runs once per frame AFTER Gfx.End() / DXGI Present: commits multiline Win32 EDIT positions
+    /// and keeps off-screen single-line input engines cleanly synced.
     /// </summary>
     public static void AfterFrame()
     {
         var curFrame = Gfx.Frame;
         foreach (var e in _all.Values)
         {
+            if (!e.Multiline)
+            {
+                if (e._placedFrame != curFrame && e._visible)
+                {
+                    e._visible = false;
+                    if (e.Focused) W.SetFocus(App.Hwnd);
+                    W.ShowWindow(e.H, W.SW_HIDE);
+                }
+                continue;
+            }
             if (e._placedFrame != curFrame || !e._wantShow)
             {
                 if (e._visible)
@@ -221,7 +443,6 @@ public sealed unsafe class Edit
                 e._last = rc;
                 e._visible = true;
                 W.SetWindowPos(e.H, 0, rc.L, rc.T, w, h, W.SWP_NOZORDER | W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW | W.SWP_NOCOPYBITS);
-                // When an unfocused single-line Edit first appears or changes width, ensure text starts cleanly at X=0 (never clipped off-left!)
                 if (!e.Multiline && !e.Focused && !e._pendingFocus && (!wasVisible || oldW != w))
                     e.ShowStart();
                 W.InvalidateRect(e.H, null, 1);
@@ -249,7 +470,9 @@ public sealed unsafe class Edit
         if (_all.TryGetValue(h, out var e))
         {
             e._cachedText = W.GetText(h);
+            e._caretBlinkAt = Environment.TickCount64;
             if (!e._silent) e.Changed?.Invoke();
+            App.Invalidate();
         }
     }
 
@@ -275,6 +498,7 @@ public sealed unsafe class Edit
         {
             if (m == W.WM_KEYDOWN)
             {
+                e._caretBlinkAt = Environment.TickCount64;
                 if ((int)w == 'R' && W.KeyDown(W.VK_CONTROL))
                 {
                     Shell.Key('R', true, false);
@@ -283,6 +507,7 @@ public sealed unsafe class Edit
                 if ((int)w == 'A' && W.KeyDown(W.VK_CONTROL))
                 {
                     W.SendMessageW(h, 0x00B1 /*EM_SETSEL*/, 0, -1);
+                    App.Invalidate();
                     return 0;
                 }
                 switch ((int)w)
@@ -294,9 +519,13 @@ public sealed unsafe class Edit
                     case W.VK_UP: if (!e.Multiline && e.Arrow?.Invoke(-1) == true) return 0; break;
                     case W.VK_DOWN: if (!e.Multiline && e.Arrow?.Invoke(1) == true) return 0; break;
                 }
+                var retK = W.CallWindowProcW(_oldProc, h, m, w, l);
+                if (!e.Multiline) App.Invalidate();
+                return retK;
             }
             else if (m == W.WM_CHAR)
             {
+                e._caretBlinkAt = Environment.TickCount64;
                 if ((!e.Multiline && w == 13) || w == 27 || w == 1) return 0; // no beep / no control char
                 if (w == 0x7F) // Ctrl+Backspace: delete previous word instead of inserting a tofu square
                 {
@@ -312,8 +541,12 @@ public sealed unsafe class Edit
                         W.SendMessageW(h, 0x00B1 /*EM_SETSEL*/, (nuint)p, a);
                     }
                     fixed (char* empty = "") W.SendMessageW(h, 0x00C2 /*EM_REPLACESEL*/, 1, (nint)empty);
+                    if (!e.Multiline) App.Invalidate();
                     return 0;
                 }
+                var retC = W.CallWindowProcW(_oldProc, h, m, w, l);
+                if (!e.Multiline) App.Invalidate();
+                return retC;
             }
             else if (m == W.WM_MOUSEWHEEL && !e.Multiline)
             {
@@ -321,8 +554,8 @@ public sealed unsafe class Edit
                 W.SendMessageW(App.Hwnd, m, w, l);
                 return 0;
             }
-            else if (m == W.WM_KILLFOCUS) { Suggest.Hide(); if (!e.Multiline) e.ShowStart(); W.InvalidateRect(h, null, 1); App.Invalidate(); }
-            else if (m == W.WM_SETFOCUS) { W.InvalidateRect(h, null, 1); App.Invalidate(); }
+            else if (m == W.WM_KILLFOCUS) { Suggest.Hide(); e._mouseSelecting = false; if (!e.Multiline) e.ShowStart(); if (e.Multiline) W.InvalidateRect(h, null, 1); App.Invalidate(); }
+            else if (m == W.WM_SETFOCUS) { e._caretBlinkAt = Environment.TickCount64; if (e.Multiline) W.InvalidateRect(h, null, 1); App.Invalidate(); }
         }
         return W.CallWindowProcW(_oldProc, h, m, w, l);
     }

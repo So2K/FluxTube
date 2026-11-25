@@ -198,7 +198,7 @@ public sealed class PlaybackTracker
                         Paths.Log($"play {id}: cached formats are gone, {(fresh != null ? "switching to current ones" : "no link available")} after {Elapsed():0} ms");
                         if (fresh == null)
                         {
-                            UiThread.Post(() => { if (gen == _gen) _p.ShowText("Нет связи с YouTube: доступна только сохранённая часть видео", 5000); });
+                            UiThread.Post(() => { if (gen == _gen) _p.ShowText(L.T("Нет связи с YouTube: доступна только сохранённая часть видео", "No connection to YouTube: only cached portion is available"), 5000); });
                             return;
                         }
                         UiThread.Post(() =>
@@ -243,7 +243,7 @@ public sealed class PlaybackTracker
                                 LoadFull(s, v.Title, _timeValid ? _p.TimePos : _startPos, _p.Paused);
                                 Paths.Log($"play {id}: switched formats after {Elapsed():0} ms");
                             }
-                            else _p.ShowText("Полная ссылка не получена: видео может остановиться. Обновите страницу (F5).", 6000);
+                            else _p.ShowText(L.T("Полная ссылка не получена: видео может остановиться. Обновите страницу (F5).", "Full stream link unavailable: playback may stop. Press F5 to refresh."), 6000);
                             CurrentChanged?.Invoke();
                         });
                     }
@@ -261,8 +261,10 @@ public sealed class PlaybackTracker
                                 var needsLogin = error?.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase) == true
                                     || error?.Contains("not a bot", StringComparison.OrdinalIgnoreCase) == true;
                                 PlaybackUnavailable?.Invoke(needsLogin
-                                    ? "YouTube запросил проверку. Пройдите её в браузере и закройте окно браузера — FluxTube сохранит вход."
-                                    : "Не удалось получить видеопоток YouTube. Проверьте подключение и попробуйте ещё раз.");
+                                    ? L.T("YouTube запросил проверку. Пройдите её в открывшемся окне — FluxTube сохранит вход автоматически.",
+                                          "YouTube requested verification. Complete it in the sign-in window — FluxTube will save your session automatically.")
+                                    : L.T("Не удалось получить видеопоток YouTube. Проверьте подключение и попробуйте ещё раз.",
+                                          "Could not load the YouTube video stream. Check your connection and try again."));
                                 if (needsLogin) VerificationRequired?.Invoke();
                             }
                             Paths.Log($"play {id}: {(s != null ? "yt-dlp link" : "no playable link")} after {Elapsed():0} ms (no quick start)");
@@ -272,16 +274,24 @@ public sealed class PlaybackTracker
             }
             Resolver.Instance.MarkWatched(v.VideoId);
         }
-        if (start > 0 && startOverride == null) _p.ShowText($"Продолжение с {Fmt.Time(start)}", 2000);
+        if (start > 0 && startOverride == null) _p.ShowText(L.T($"Продолжение с {Fmt.Time(start)}", $"Resuming at {Fmt.Time(start)}"), 2000);
         CurrentChanged?.Invoke();
 
-        if (AppSettings.Current.SponsorBlock)
+        if (AppSettings.Current.SponsorBlock || (source == "shorts" && ShortsAdBlocker.Enabled))
         {
             var id = v.VideoId;
+            var isShort = source == "shorts";
             _ = Task.Run(async () =>
             {
-                var segs = await Extras.SponsorSegmentsAsync(id);
-                UiThread.Post(() => { if (gen == _gen) { _segments = segs; CurrentChanged?.Invoke(); } });
+                var segs = isShort
+                    ? await Extras.ShortsSponsorSegmentsAsync(id)
+                    : await Extras.SponsorSegmentsAsync(id);
+                UiThread.Post(() =>
+                {
+                    if (gen != _gen) return;
+                    _segments = segs;
+                    CurrentChanged?.Invoke();
+                });
             });
         }
     }
@@ -340,13 +350,16 @@ public sealed class PlaybackTracker
             for (int i = 0; i < _segments.Count; i++)
             {
                 var s = _segments[i];
+                if (s.ActionType != "skip") continue;
                 if (t >= s.Start && t < s.End - 0.5 && !_skipped.Contains(i))
                 {
                     _skipped.Add(i);
                     Save(force: true);  // what was watched up to the segment counts, the jump over it does not
-                    _lastPos = s.End;
-                    _p.SeekAbsolute(s.End);
-                    _p.ShowText("Пропущено: " + Extras.CategoryName(s.Category), 2200);
+                    var dur = _p.Duration;
+                    var dest = CurrentSource == "shorts" && dur > 2 && s.End >= dur - 1.2 ? 0.0 : s.End;
+                    _lastPos = dest;
+                    _p.SeekAbsolute(dest);
+                    _p.ShowText(L.T("Пропущено: ", "Skipped: ") + Extras.CategoryName(s.Category), 2200);
                     break;
                 }
             }

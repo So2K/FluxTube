@@ -28,9 +28,10 @@ public sealed class ChannelPage(string channelId, string name) : IPage
     private bool _loading, _failed;
     private int _loadGen;
     private int _tab; // index into _tabs; 0 = home
-    private readonly List<(string Title, string Params)> _tabs = [("Главная", "")];
+    private readonly List<(string Title, string Params)> _tabs = [(L.T("Главная", "Home"), "")];
     private readonly Dictionary<string, Grid> _grids = new();
     private readonly Dictionary<int, float> _shelfPage = new();
+    private readonly Dictionary<int, float> _shelfPrevShift = new();
     private readonly Cards.HoverPrefetch _hover = new();
     private readonly int _scroll = UI.Id("channel:" + channelId);
     private bool _descOpen;
@@ -63,7 +64,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                     _subscribed = c.Subscribed;
                     _tabs.Clear();
                     foreach (var t in c.Tabs.Where(t => !SkipTabs.Contains(t.Title))) _tabs.Add(t);
-                    if (_tabs.Count == 0) _tabs.Add(("Главная", ""));
+                    if (_tabs.Count == 0) _tabs.Add((L.T("Главная", "Home"), ""));
                     // a channel without a home tab (or with an empty one): open on its videos
                     if (c.Shelves.Count == 0 && _tabs.Count > 1) SelectTab(1);
                     _tab = Math.Min(_tab, _tabs.Count - 1);
@@ -180,7 +181,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
 
     private void ToggleSubscribe()
     {
-        if (!CookieStore.IsLoggedIn) { Shell.Toast("Чтобы подписаться, войдите в аккаунт YouTube", Th.Warn); return; }
+        if (!CookieStore.IsLoggedIn) { Shell.Toast(L.T("Чтобы подписаться, войдите в аккаунт YouTube", "Sign in to YouTube to subscribe"), Th.Warn); return; }
         var want = _subscribed != true;
         _subscribed = want; // shows at once; put back if YouTube says no
         _ = Task.Run(async () =>
@@ -190,8 +191,8 @@ public sealed class ChannelPage(string channelId, string name) : IPage
             catch (Exception e) { Paths.Log("subscribe: " + e.Message); ok = false; }
             App.Post(() =>
             {
-                if (!ok) { _subscribed = !want; Shell.Toast("YouTube не принял подписку, попробуйте позже", Th.Warn); }
-                else Shell.Toast(want ? "Вы подписались на " + (_info?.Title ?? name) : "Подписка отменена", want ? Th.Good : null);
+                if (!ok) { _subscribed = !want; Shell.Toast(L.T("YouTube не принял подписку, попробуйте позже", "YouTube rejected subscription, try later"), Th.Warn); }
+                else Shell.Toast(want ? L.T("Вы подписались на ", "Subscribed to ") + (_info?.Title ?? name) : L.T("Подписка отменена", "Unsubscribed"), want ? Th.Good : null);
                 App.Invalidate();
             });
         });
@@ -226,14 +227,14 @@ public sealed class ChannelPage(string channelId, string name) : IPage
         float tx = x0 + av + 22, tw = w - av - 22;
         var title = c?.Title is { Length: > 0 } t0 ? t0 : name;
         var tr = Gfx.Draw(title, tx, y + 4, w > 900 ? 34 : 26, Th.Text, 700, tw - 40);
-        Cards.CopyMenu(new R(tx, y + 4, tr.W, tr.H), title, "Копировать название канала");
+        Cards.CopyMenu(new R(tx, y + 4, tr.W, tr.H), title, L.T("Копировать название канала", "Copy channel name"));
         if (c?.Verified == true) Gfx.Icon(Th.Check, new R(tx + tr.W + 8, y + 4 + tr.H / 2 - 10, 20, 20), 12, Th.Sub);
         var ty = y + 8 + tr.H;
         if (c != null)
         {
             var meta = string.Join("  ·  ", new[] { c.Handle, c.Subscribers, c.VideoCount }.Where(s => s.Length > 0));
             var mr = Gfx.Draw(meta, tx, ty, 14, Th.Sub, 400, tw);
-            Cards.CopyMenu(new R(tx, ty, mr.W, mr.H), c.Handle, "Копировать " + c.Handle);
+            Cards.CopyMenu(new R(tx, ty, mr.W, mr.H), c.Handle, L.T("Копировать ", "Copy ") + c.Handle);
             ty += mr.H + 8;
             if (c.Description.Length > 0)
             {
@@ -242,16 +243,16 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                 Sel.Text(UI.Id(_scroll, 8003), c.Description, tx, ty, 13.5f, Th.Sub, 400, MathF.Min(tw, 760), _descOpen ? 12 : 2, links: true,
                     onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
                 ty += dr.H + 2;
-                var more = Gfx.Text(_descOpen ? "Свернуть" : "Ещё", 13, 600);
+                var more = Gfx.Text(_descOpen ? L.T("Свернуть", "Show less") : L.T("Ещё", "More"), 13, 600);
                 var moreR = new R(tx, ty, more.W, more.H);
                 Gfx.Draw(more, tx, ty, UI.Hover(moreR) ? Th.Text : Th.Sub);
                 if (UI.Click(UI.Id("ch:desc", _scroll), moreR)) _descOpen = !_descOpen;
                 ty += more.H + 10;
-                Cards.CopyMenu(dRect, c.Description, "Копировать описание");
+                Cards.CopyMenu(dRect, c.Description, L.T("Копировать описание", "Copy description"));
             }
             // subscribe: filled like youtube.com when not subscribed, quiet when already
             float bx = tx;
-            var subText = _subscribed == true ? "Вы подписаны" : "Подписаться";
+            var subText = _subscribed == true ? L.T("Вы подписаны", "Subscribed") : L.T("Подписаться", "Subscribe");
             if (_subscribed == true)
             {
                 if (UI.Pill(UI.Id("ch:sub", _scroll), bx, ty, 36, Th.Subs, subText, out var sw)) ToggleSubscribe();
@@ -262,14 +263,14 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                 if (UI.Pill(UI.Id("ch:sub", _scroll), bx, ty, 36, null, subText, out var sw, Th.Text, Th.Bg)) ToggleSubscribe();
                 bx += sw + 8;
             }
-            if (UI.Pill(UI.Id("ch:web", _scroll), bx, ty, 36, Th.Link, "На YouTube", out _))
+            if (UI.Pill(UI.Id("ch:web", _scroll), bx, ty, 36, Th.Link, L.T("На YouTube", "On YouTube"), out _))
                 W.Open("https://www.youtube.com/" + (c.Handle.StartsWith('@') ? c.Handle : "channel/" + channelId));
             ty += 36;
         }
         else if (_failed)
         {
-            Gfx.Draw("Не удалось загрузить канал.", tx, ty, 14, Th.Sub);
-            if (UI.Pill(UI.Id("ch:retry", _scroll), tx, ty + 28, 34, Th.Refresh, "Повторить", out _)) App.Post(Load);
+            Gfx.Draw(L.T("Не удалось загрузить канал.", "Could not load channel."), tx, ty, 14, Th.Sub);
+            if (UI.Pill(UI.Id("ch:retry", _scroll), tx, ty + 28, 34, Th.Refresh, L.T("Повторить", "Retry"), out _)) App.Post(Load);
             ty += 64;
         }
         y = MathF.Max(y + av, ty) + 20;
@@ -317,7 +318,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
     {
         var c = _info;
         if (c == null) return Skeleton(x0, y, w);
-        if (c.Shelves.Count == 0) { Gfx.Draw("На главной канала пусто: загляните во вкладку «Видео».", x0, y, 14, Th.Sub); return y + 40; }
+        if (c.Shelves.Count == 0) { Gfx.Draw(L.T("На главной канала пусто: загляните во вкладку «Видео».", "Channel home is empty: check the Videos tab."), x0, y, 14, Th.Sub); return y + 40; }
         var (cols, cardW, thumbH) = Layout(w);
         const float gap = 18;
         for (int s = 0; s < c.Shelves.Count; s++)
@@ -334,12 +335,12 @@ public sealed class ChannelPage(string channelId, string name) : IPage
             if (sh.BrowseId?.StartsWith("VL") == true)
             {
                 var pid = sh.BrowseId[2..];
-                if (UI.Pill(UI.Id("ch:all", s), hx, y - 4, 32, Th.Play, "Воспроизвести все", out _, Th.A(0.08f)))
+                if (UI.Pill(UI.Id("ch:all", s), hx, y - 4, 32, Th.Play, L.T("Воспроизвести все", "Play all"), out _, Th.A(0.08f)))
                     App.Post(() => Shell.OpenPlaylist(pid, sh.Title));
             }
             else if (sh.Params is { Length: > 0 } prm && _tabs.FindIndex(t => t.Params == prm) is var ti && ti > 0)
             {
-                if (UI.Pill(UI.Id("ch:all", s), hx, y - 4, 32, null, "Все", out _, Th.A(0.08f))) SelectTab(ti);
+                if (UI.Pill(UI.Id("ch:all", s), hx, y - 4, 32, null, L.T("Все", "All"), out _, Th.A(0.08f))) SelectTab(ti);
             }
             var pages = Math.Max(1, (sh.Items.Count + cols - 1) / cols);
             var page = Math.Clamp((int)_shelfPage.GetValueOrDefault(s), 0, pages - 1);
@@ -352,10 +353,14 @@ public sealed class ChannelPage(string channelId, string name) : IPage
             y += 40;
             // the row slides sideways when paged
             var shift = UI.Smooth(UI.Id(_scroll, 7000 + s), page * (cardW + gap) * cols, 16);
+            float prevShift = _shelfPrevShift.TryGetValue(s, out var ps) ? ps : shift;
+            _shelfPrevShift[s] = shift;
+            float shelfVelX = (shift - prevShift) / MathF.Max(0.004f, (float)UI.Dt);
             var rowH = thumbH + 92;
             var clip = new R(x0 - 8, y - 8, w + 16, rowH + 8);
             if (clip.Bottom > r.Y && clip.Y < r.Bottom)
             {
+                bool shMb = Gfx.PushMotionBlur(clip, -shelfVelX, 0f);
                 Gfx.PushClip(clip);
                 for (int i = 0; i < sh.Items.Count; i++)
                 {
@@ -364,6 +369,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                     Cards.GridCard(new R(cx, y, cardW, rowH - 8), thumbH, sh.Items[i], UI.Id(UI.Id("ch:shelf", s), i), _hover, "channel:" + channelId, channelLine: false);
                 }
                 Gfx.PopClip();
+                Gfx.PopMotionBlur(shMb);
             }
             y += rowH + 18;
             Gfx.Fill(new R(x0, y - 10, w, 1), Th.Line);
@@ -409,8 +415,8 @@ public sealed class ChannelPage(string channelId, string name) : IPage
         if (g.Loading) return Skeleton(x0, y, w);
         if (g.Failed || g.Items.Count == 0)
         {
-            Gfx.Draw(g.Failed ? "Не удалось загрузить." : "Здесь пока пусто.", x0, y, 14, Th.Sub);
-            if (g.Failed && UI.Pill(UI.Id("ch:tabretry", _tab), x0, y + 28, 34, Th.Refresh, "Повторить", out _))
+            Gfx.Draw(g.Failed ? L.T("Не удалось загрузить.", "Could not load.") : L.T("Здесь пока пусто.", "Nothing here yet."), x0, y, 14, Th.Sub);
+            if (g.Failed && UI.Pill(UI.Id("ch:tabretry", _tab), x0, y + 28, 34, Th.Refresh, L.T("Повторить", "Retry"), out _))
             {
                 var prm = _tabs[_tab].Params;
                 App.Post(() => LoadGrid(prm));

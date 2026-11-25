@@ -317,7 +317,7 @@ internal static unsafe class DropTarget
         if (payload.StartsWith("localfile:", StringComparison.Ordinal))
         {
             var file = payload[10..];
-            DragTitle = "Открыть файл в плеере";
+            DragTitle = L.T("Открыть файл в плеере", "Open file in player");
             DragSubtitle = Path.GetFileName(file);
             return;
         }
@@ -327,28 +327,28 @@ internal static unsafe class DropTarget
         if (vid != null)
         {
             DragTitle = newTab
-                ? (DragBackground ? "Открыть видео в фоновой вкладке" : "Открыть видео в новой вкладке")
-                : "Открыть видео";
+                ? (DragBackground ? L.T("Открыть видео в фоновой вкладке", "Open video in background tab") : L.T("Открыть видео в новой вкладке", "Open video in new tab"))
+                : L.T("Открыть видео", "Open video");
             DragSubtitle = TrimPreview(url);
         }
         else if (Regex.IsMatch(url, @"youtube\.com/playlist\?.*list=", RegexOptions.IgnoreCase))
         {
-            DragTitle = newTab ? "Открыть плейлист в новой вкладке" : "Открыть плейлист";
+            DragTitle = newTab ? L.T("Открыть плейлист в новой вкладке", "Open playlist in new tab") : L.T("Открыть плейлист", "Open playlist");
             DragSubtitle = TrimPreview(url);
         }
         else if (Regex.IsMatch(url, @"youtube\.com/(?:channel/UC[\w-]+|@[\w.-]+)", RegexOptions.IgnoreCase))
         {
-            DragTitle = newTab ? "Открыть канал в новой вкладке" : "Открыть канал";
+            DragTitle = newTab ? L.T("Открыть канал в новой вкладке", "Open channel in new tab") : L.T("Открыть канал", "Open channel");
             DragSubtitle = TrimPreview(url);
         }
         else if (Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Scheme.StartsWith("http", StringComparison.OrdinalIgnoreCase))
         {
-            DragTitle = "Добавить ссылку в загрузки";
+            DragTitle = L.T("Добавить ссылку в загрузки", "Add link to downloads");
             DragSubtitle = TrimPreview(url);
         }
         else
         {
-            DragTitle = newTab ? "Найти в новой вкладке" : "Найти в FluxTube";
+            DragTitle = newTab ? L.T("Найти в новой вкладке", "Search in new tab") : L.T("Найти в FluxTube", "Search in FluxTube");
             DragSubtitle = TrimPreview(payload.Trim());
         }
     }

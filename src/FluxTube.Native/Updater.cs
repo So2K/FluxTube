@@ -12,7 +12,7 @@ namespace FluxTube;
 /// </summary>
 public static class Updater
 {
-    public const string CurrentVersion = "9.1.7";
+    public const string CurrentVersion = "9.1.8";
     public const string Repo = "So2K/FluxTube";
 
     private static readonly HttpClient Http = MakeClient();
@@ -25,9 +25,17 @@ public static class Updater
     public static string? DownloadUrl { get; private set; }
     public static string? AssetName { get; private set; }
     public static long AssetSize { get; private set; }
-    public static string StatusText { get; private set; } = $"Версия {CurrentVersion}";
+    public static string StatusText { get; private set; } = L.T($"Версия {CurrentVersion}", $"Version {CurrentVersion}");
 
     public static bool HasUpdate => AvailableVersion != null && DownloadUrl != null;
+
+    public static void RefreshStatusText()
+    {
+        if (_checking || _downloading) return;
+        StatusText = HasUpdate
+            ? L.T($"Доступно обновление {AvailableVersion}", $"Update {AvailableVersion} available") + (AssetSize > 0 ? $" ({Fmt.Size(AssetSize)})" : "")
+            : L.T($"Версия {CurrentVersion}", $"Version {CurrentVersion}");
+    }
 
     private static HttpClient MakeClient()
     {
@@ -42,7 +50,7 @@ public static class Updater
     {
         if (_checking || _downloading) return;
         _checking = true;
-        if (manual) StatusText = "Проверяю обновления…";
+        if (manual) StatusText = L.T("Проверяю обновления…", "Checking for updates…");
         App.WakeUi();
         _ = Task.Run(async () =>
         {
@@ -57,8 +65,8 @@ public static class Updater
                     App.Post(() =>
                     {
                         _checking = false;
-                        StatusText = $"Версия {CurrentVersion}";
-                        if (manual) Shell.Toast("Не удалось проверить обновления (" + (int)resp.StatusCode + ")", Th.Warn);
+                        StatusText = L.T($"Версия {CurrentVersion}", $"Version {CurrentVersion}");
+                        if (manual) Shell.Toast(L.T("Не удалось проверить обновления (", "Could not check for updates (") + (int)resp.StatusCode + ")", Th.Warn);
                         App.Invalidate();
                     });
                     return;
@@ -93,15 +101,15 @@ public static class Updater
                         DownloadUrl = url;
                         AssetName = name ?? $"FluxTube-{tag}-Setup-x64.exe";
                         AssetSize = size;
-                        StatusText = $"Доступно обновление {tag}" + (size > 0 ? $" ({Fmt.Size(size)})" : "");
-                        if (manual) Shell.Toast($"Доступна новая версия FluxTube {tag}", Th.Good, 4500);
+                        StatusText = L.T($"Доступно обновление {tag}", $"Update {tag} available") + (size > 0 ? $" ({Fmt.Size(size)})" : "");
+                        if (manual) Shell.Toast(L.T($"Доступна новая версия FluxTube {tag}", $"New FluxTube {tag} available"), Th.Good, 4500);
                     }
                     else
                     {
                         AvailableVersion = null;
                         DownloadUrl = null;
-                        StatusText = $"Установлена последняя версия ({CurrentVersion})";
-                        if (manual) Shell.Toast($"У вас последняя версия FluxTube ({CurrentVersion})", Th.Good, 3000);
+                        StatusText = L.T($"Установлена последняя версия ({CurrentVersion})", $"Up to date ({CurrentVersion})");
+                        if (manual) Shell.Toast(L.T($"У вас последняя версия FluxTube ({CurrentVersion})", $"FluxTube is up to date ({CurrentVersion})"), Th.Good, 3000);
                     }
                     App.Invalidate();
                 });
@@ -112,8 +120,8 @@ public static class Updater
                 App.Post(() =>
                 {
                     _checking = false;
-                    StatusText = $"Версия {CurrentVersion}";
-                    if (manual) Shell.Toast("Ошибка проверки обновлений: " + e.Message, Th.Warn);
+                    StatusText = L.T($"Версия {CurrentVersion}", $"Version {CurrentVersion}");
+                    if (manual) Shell.Toast(L.T("Ошибка проверки обновлений: ", "Update check error: ") + e.Message, Th.Warn);
                     App.Invalidate();
                 });
             }
@@ -131,8 +139,8 @@ public static class Updater
         var part = dest + ".part";
         _downloading = true;
         Progress = 0;
-        StatusText = $"Скачиваю FluxTube {ver}…";
-        Shell.Toast($"Скачиваю обновление {ver}…", Th.Good, 3000);
+        StatusText = L.T($"Скачиваю FluxTube {ver}…", $"Downloading FluxTube {ver}…");
+        Shell.Toast(L.T($"Скачиваю обновление {ver}…", $"Downloading update {ver}…"), Th.Good, 3000);
         App.Invalidate();
 
         _ = Task.Run(async () =>
@@ -159,14 +167,14 @@ public static class Updater
                             lastUi = now;
                             var prog = total > 0 ? Math.Clamp((double)readTotal / total, 0, 1) : 0;
                             var st = total > 0
-                                ? $"Скачивание {ver}: {Fmt.Size(readTotal)} / {Fmt.Size(total)} ({(int)(prog * 100)}%)"
-                                : $"Скачивание {ver}: {Fmt.Size(readTotal)}";
+                                ? L.T($"Скачивание {ver}: {Fmt.Size(readTotal)} / {Fmt.Size(total)} ({(int)(prog * 100)}%)", $"Downloading {ver}: {Fmt.Size(readTotal)} / {Fmt.Size(total)} ({(int)(prog * 100)}%)")
+                                : L.T($"Скачивание {ver}: {Fmt.Size(readTotal)}", $"Downloading {ver}: {Fmt.Size(readTotal)}");
                             App.Post(() => { Progress = prog; StatusText = st; });
                         }
                     }
                 }
                 File.Move(part, dest, overwrite: true);
-                App.Post(() => { Progress = 1; StatusText = $"Запускаю установку {ver}…"; });
+                App.Post(() => { Progress = 1; StatusText = L.T($"Запускаю установку {ver}…", $"Launching installer {ver}…"); });
                 Process.Start(new ProcessStartInfo(dest, "/SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /NORESTART")
                 {
                     UseShellExecute = true,
@@ -181,8 +189,8 @@ public static class Updater
                 {
                     _downloading = false;
                     Progress = 0;
-                    StatusText = $"Ошибка скачивания ({ver})";
-                    Shell.Toast("Не удалось скачать обновление: " + e.Message, Th.Warn, 6000);
+                    StatusText = L.T($"Ошибка скачивания ({ver})", $"Download failed ({ver})");
+                    Shell.Toast(L.T("Не удалось скачать обновление: ", "Failed to download update: ") + e.Message, Th.Warn, 6000);
                     App.Invalidate();
                 });
             }

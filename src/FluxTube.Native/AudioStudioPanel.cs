@@ -16,15 +16,15 @@ public static class AudioStudioPanel
 
     private static int _dragBand = -1;
     private static string? _dragKnob;
-    private static long _lastApplyAt, _saveDueAt;
+    private static long _lastApplyAt, _saveDueAt, _openedAt;
     private static bool _pendingApply, _pendingSpeed;
 
-    private static readonly (string Key, string Label)[] VisStyles =
+    private static readonly (string Key, string Ru, string En)[] VisStyles =
     [
-        ("bars_wave", "Волны + спектр"),
-        ("ribbon", "Шёлковые волны"),
-        ("bars", "Спектр"),
-        ("off", "Выкл"),
+        ("bars_wave", "Волны + спектр", "Waves + bars"),
+        ("ribbon", "Шёлковые волны", "Silk waves"),
+        ("bars", "Спектр", "Spectrum"),
+        ("off", "Выкл", "Off"),
     ];
 
     public static void Toggle()
@@ -38,8 +38,10 @@ public static class AudioStudioPanel
         AccountMenu.Close();
         SharePanel.Close();
         ThemeCodeEditor.Close();
+        LoginModal.Close();
         AudioDsp.EnsureEqArray(AppSettings.Current);
         Open = true;
+        _openedAt = UI.Now;
         _dragBand = -1;
         _dragKnob = null;
         Sfx.Tab();
@@ -106,23 +108,29 @@ public static class AudioStudioPanel
         float w = Gfx.W, h = Gfx.H;
         float pw = MathF.Min(820, w - 40);
         float ph = MathF.Min(610, h - 40);
-        var panel = new R(Gfx.Snap((w - pw) / 2), Gfx.Snap((h - ph) / 2), pw, ph);
+        float ot = Math.Clamp((UI.Now - _openedAt) / 145f, 0f, 1f);
+        if (ot < 1f) UI.Animate();
+        float oEase = 1f - (1f - ot) * (1f - ot);
+        float dy = (1f - oEase) * 14f;
+        float velY = ot < 1f ? -2f * (1f - ot) * 14f / 0.145f : 0f;
+        var panel = new R(Gfx.Snap((w - pw) / 2), Gfx.Snap((h - ph) / 2 + dy), pw, ph);
         PanelRect = panel;
 
         // Dim backdrop — clicking outside closes the studio rack
-        Gfx.Fill(new R(0, 0, w, h), Gfx.Fade(0xFF000000, Th.Light ? 0.28f : 0.56f));
+        Gfx.Fill(new R(0, 0, w, h), Gfx.Fade(0xFF000000, (Th.Light ? 0.28f : 0.56f) * oEase));
         if (UI.Pressed && !panel.Contains(UI.MX, UI.MY) && !Menus.Open) { Close(); return; }
 
         var savedModal = UI.Modal;
         UI.Modal = panel;
 
-        Gfx.Fill(panel.Inset(-4), Gfx.Fade(0xFF000000, 0.36f), 20);
+        bool mb = Gfx.PushMotionBlur(panel.Inset(-8), 0f, velY);
+        Gfx.Fill(panel.Inset(-4), Gfx.Fade(0xFF000000, 0.36f * oEase), 20);
         Gfx.FillFrosted(panel, Th.Panel, 16, opacity: 0.94f, border: true);
 
         // ---- Header ----
         float pad = 18;
         float y = panel.Y + 14;
-        var title = Gfx.Text("DSP Студия · Эквалайзер и эффекты", 17, 600);
+        var title = Gfx.Text(L.T("DSP Студия · Эквалайзер и эффекты", "DSP Studio · Equalizer & FX"), 17, 600);
         Gfx.Draw(title, panel.X + pad, y + 6, Th.Text);
 
         var presetBadge = AudioDsp.DisplayPresetName(s);
@@ -133,20 +141,21 @@ public static class AudioStudioPanel
         Gfx.Draw(bRun, bRect.X + 8, bRect.Y + (bRect.H - bRun.H) / 2, s.AudioFxEnabled ? Th.Brand : Th.Sub);
 
         float rx = panel.Right - pad;
-        if (UI.IconButton(UI.Id("dsp:close"), new R(rx - 32, y + 1, 32, 32), Th.Close, 12, Th.Sub)) { Close(); UI.Modal = savedModal; return; }
+        if (UI.IconButton(UI.Id("dsp:close"), new R(rx - 32, y + 1, 32, 32), Th.Close, 12, Th.Sub)) { Gfx.PopMotionBlur(mb); Close(); UI.Modal = savedModal; return; }
         rx -= 38;
 
-        var resetW = UI.PillWidth(Th.Restart, "Сброс");
+        var resetLbl = L.T("Сброс", "Reset");
+        var resetW = UI.PillWidth(Th.Restart, resetLbl);
         rx -= resetW;
-        if (UI.Pill(UI.Id("dsp:reset"), rx, y + 1, 32, Th.Restart, "Сброс", out _))
+        if (UI.Pill(UI.Id("dsp:reset"), rx, y + 1, 32, Th.Restart, resetLbl, out _))
         {
             AudioDsp.ApplyPreset(s, "Flat");
             ApplyNow(syncSpeed: true);
-            Shell.Toast("DSP сброшен на Чистый", Th.Sub, 1800);
+            Shell.Toast(L.T("DSP сброшен на Чистый", "DSP reset to Flat"), Th.Sub, 1800);
         }
         rx -= 8;
 
-        var bypassLabel = s.AudioFxEnabled ? "FX: ВКЛ" : "FX: BYPASS";
+        var bypassLabel = s.AudioFxEnabled ? L.T("FX: ВКЛ", "FX: ON") : "FX: BYPASS";
         var byW = UI.PillWidth(Th.Headphones, bypassLabel);
         rx -= byW;
         if (UI.Pill(UI.Id("dsp:bypass"), rx, y + 1, 32, Th.Headphones, bypassLabel, out _, accent: s.AudioFxEnabled))
@@ -193,7 +202,7 @@ public static class AudioStudioPanel
         for (int i = 0; i < AudioDsp.Presets.Length; i++)
         {
             var pr = AudioDsp.Presets[i];
-            var lbl = pr.Id == "Flat" ? pr.Name : $"{pr.Name}";
+            var lbl = AudioDsp.PresetLabel(pr);
             var pwBtn = UI.PillWidth(null, lbl) - 8;
             if (px + pwBtn > maxRight && px > panel.X + pad) { px = panel.X + pad; y += rowH + 6; }
             bool active = (s.AudioFxEnabled && s.AudioPreset.Equals(pr.Id, StringComparison.OrdinalIgnoreCase))
@@ -207,7 +216,7 @@ public static class AudioStudioPanel
             {
                 AudioDsp.ApplyPreset(s, pr.Id);
                 ApplyNow(syncSpeed: true);
-                Shell.Toast($"Пресет: {pr.Name}", Th.Good, 1600);
+                Shell.Toast(L.T("Пресет: ", "Preset: ") + lbl, Th.Good, 1600);
             }
             px += pwBtn + 6;
         }
@@ -221,7 +230,7 @@ public static class AudioStudioPanel
 
         // Left: 10-band graphic EQ
         Gfx.FillFrosted(eqBox, Th.Card, 12, opacity: 0.42f, border: true);
-        Gfx.Draw("10-полосный эквалайзер (ПКМ — сбросить полосу)", eqBox.X + 12, eqBox.Y + 8, 11.5f, Th.Sub, 500);
+        Gfx.Draw(L.T("10-полосный эквалайзер (ПКМ — сбросить полосу)", "10-band graphic EQ (right-click to reset band)"), eqBox.X + 12, eqBox.Y + 8, 11.5f, Th.Sub, 500);
         float faderTop = eqBox.Y + 42;
         float faderBot = eqBox.Bottom - 26;
         float faderH = MathF.Max(60, faderBot - faderTop);
@@ -339,14 +348,15 @@ public static class AudioStudioPanel
             return val;
         }
 
-        s.FxReverb = DrawFxSlider("rev", "Реверберация (Reverb)", s.FxReverb, 0, 100, 0, $"{s.FxReverb:0}%");
+        s.FxReverb = DrawFxSlider("rev", L.T("Реверберация (Reverb)", "Reverb"), s.FxReverb, 0, 100, 0, $"{s.FxReverb:0}%");
 
         // Room space selector pills
         float rpx = fx;
         float rbw = (fw - 12) / AudioDsp.Rooms.Length;
         for (int i = 0; i < AudioDsp.Rooms.Length; i++)
         {
-            var (rk, rl) = AudioDsp.Rooms[i];
+            var (rk, _) = AudioDsp.Rooms[i];
+            var rl = AudioDsp.RoomLabel(rk);
             var rr = new R(rpx, fyCur - 2, rbw, 22);
             bool on = s.FxReverbRoom == rk;
             Gfx.Fill(rr, on ? Gfx.Fade(Th.Brand, 0.25f) : Th.A(0.07f), 6);
@@ -364,12 +374,13 @@ public static class AudioStudioPanel
         }
         fyCur += 28;
 
-        s.FxBass = DrawFxSlider("bass", "Бас / Суб-удар", s.FxBass, 0, 100, 0, $"{s.FxBass:0}%");
-        s.FxExciter = DrawFxSlider("exc", "Сочность / Exciter + Компрессор", s.FxExciter, 0, 100, 0, $"{s.FxExciter:0}%");
-        s.FxStereo = DrawFxSlider("st", "Сцена / 3D Stereo", s.FxStereo, 0, 100, 0, $"{s.FxStereo:0}%");
-        s.FxSpeed = DrawFxSlider("spd", "Скорость (Nightcore / Slowed)", s.FxSpeed, 0.70f, 1.45f, 1.0f, $"{s.FxSpeed:0.00}×", enabled: true, affectsSpeed: true);
-        s.FxPitchSemitones = DrawFxSlider("pit", s.FxTapePitch ? "Тон привязан к скорости (Tape)" : "Высота тона (полутона)",
-            s.FxPitchSemitones, -6f, 6f, 0f, s.FxTapePitch ? "Auto" : (s.FxPitchSemitones >= 0 ? $"+{s.FxPitchSemitones:0.#} пт" : $"{s.FxPitchSemitones:0.#} пт"),
+        s.FxBass = DrawFxSlider("bass", L.T("Бас / Суб-удар", "Bass / Sub punch"), s.FxBass, 0, 100, 0, $"{s.FxBass:0}%");
+        s.FxExciter = DrawFxSlider("exc", L.T("Сочность / Exciter + Компрессор", "Exciter + Punch"), s.FxExciter, 0, 100, 0, $"{s.FxExciter:0}%");
+        s.FxStereo = DrawFxSlider("st", L.T("Сцена / 3D Stereo", "3D Stereo width"), s.FxStereo, 0, 100, 0, $"{s.FxStereo:0}%");
+        s.FxSpeed = DrawFxSlider("spd", L.T("Скорость (Nightcore / Slowed)", "Speed (Nightcore / Slowed)"), s.FxSpeed, 0.70f, 1.45f, 1.0f, $"{s.FxSpeed:0.00}×", enabled: true, affectsSpeed: true);
+        var stUnit = L.T(" пт", " st");
+        s.FxPitchSemitones = DrawFxSlider("pit", s.FxTapePitch ? L.T("Тон привязан к скорости (Tape)", "Tape-linked pitch") : L.T("Высота тона (полутона)", "Pitch shift (semitones)"),
+            s.FxPitchSemitones, -6f, 6f, 0f, s.FxTapePitch ? "Auto" : (s.FxPitchSemitones >= 0 ? $"+{s.FxPitchSemitones:0.#}{stUnit}" : $"{s.FxPitchSemitones:0.#}{stUnit}"),
             enabled: !s.FxTapePitch);
 
         // ---- Footer Studio Toggles ----
@@ -389,14 +400,15 @@ public static class AudioStudioPanel
             bx += tw + 8;
         }
 
-        MiniToggle("dsp:tape", "Тон со скоростью", s.FxTapePitch, () => { s.FxTapePitch = !s.FxTapePitch; AudioDsp.MarkCustom(s); ApplyNow(syncSpeed: true); });
-        MiniToggle("dsp:8d", "8D Орбита", s.PlayerAudio8D, () => { s.PlayerAudio8D = !s.PlayerAudio8D; AudioDsp.MarkCustom(s); ApplyNow(); });
-        MiniToggle("dsp:lim", "Лимитер (без клиппинга)", s.FxLimiter, () => { s.FxLimiter = !s.FxLimiter; ApplyNow(); });
-        MiniToggle("dsp:audioonly", "Только звук (0% GPU)", s.AudioOnlyMode, () => Shell.ToggleAudioOnlyMode());
+        MiniToggle("dsp:tape", L.T("Тон со скоростью", "Tape pitch"), s.FxTapePitch, () => { s.FxTapePitch = !s.FxTapePitch; AudioDsp.MarkCustom(s); ApplyNow(syncSpeed: true); });
+        MiniToggle("dsp:8d", L.T("8D Орбита", "8D Orbit"), s.PlayerAudio8D, () => { s.PlayerAudio8D = !s.PlayerAudio8D; AudioDsp.MarkCustom(s); ApplyNow(); });
+        MiniToggle("dsp:lim", L.T("Лимитер (без клиппинга)", "Limiter (no clip)"), s.FxLimiter, () => { s.FxLimiter = !s.FxLimiter; ApplyNow(); });
+        MiniToggle("dsp:audioonly", L.T("Только звук (0% GPU)", "Audio only (0% GPU)"), s.AudioOnlyMode, () => Shell.ToggleAudioOnlyMode());
 
         // Right-aligned visualizer style cycler
         var curVis = VisStyles.FirstOrDefault(v => v.Key == s.VisualizerStyle);
-        var visLbl = "Волны: " + (curVis.Label ?? "Волны + спектр");
+        var visName = curVis.Ru != null ? L.T(curVis.Ru, curVis.En) : L.T("Волны + спектр", "Waves + bars");
+        var visLbl = L.T("Волны: ", "Visual: ") + visName;
         var vw = UI.PillWidth(null, visLbl) - 6;
         var vrBtn = new R(panel.Right - pad - vw, footY, vw, 28);
         Gfx.Fill(vrBtn, Th.A(0.08f), 14);
@@ -411,6 +423,7 @@ public static class AudioStudioPanel
             App.Invalidate();
         }
 
+        Gfx.PopMotionBlur(mb);
         UI.Modal = savedModal;
     }
 }

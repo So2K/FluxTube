@@ -11,6 +11,12 @@ public sealed class VideoItem
     public string? AvatarUrl { get; init; }
     public bool IsLive { get; init; }
     public bool IsShort { get; init; }
+    /// <summary>Marked as an injected YouTube advertisement in InnerTube responses.</summary>
+    public bool IsAd { get; init; }
+    /// <summary>Marked by YouTube with a paidContentOverlay ("Includes paid promotion").</summary>
+    public bool HasPaidPromotion { get; init; }
+    /// <summary>Optional Short description text for ad/promo inspection.</summary>
+    public string Description { get; init; } = "";
     /// <summary>Set for a playlist card: VideoId is then its first video (for the thumbnail), Duration the video count.</summary>
     public string? PlaylistId { get; init; }
     /// <summary>A channel card (search results): ChannelId, Title and AvatarUrl are set, VideoId is empty.</summary>
@@ -147,4 +153,6 @@ public sealed class WatchInfo
     public List<(double Start, string Title)> Chapters { get; } = [];
     /// <summary>"LIKE", "DISLIKE" or "INDIFFERENT" for the signed-in account; null when not known.</summary>
     public string? LikeStatus { get; set; }
+    /// <summary>True when YouTube attaches a paidContentOverlay ("Includes paid promotion").</summary>
+    public bool HasPaidPromotion { get; set; }
 }

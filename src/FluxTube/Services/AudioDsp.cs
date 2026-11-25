@@ -99,11 +99,31 @@ public static class AudioDsp
         return null;
     }
 
+    public static string PresetLabel(Preset p) => p.Id switch
+    {
+        "Flat" => L.T("Чистый", "Flat"),
+        "Juicy" => L.T("Сочный Мастер", "Juicy Master"),
+        "Space8D" => L.T("8D Космос", "8D Space"),
+        "Lofi" => L.T("Lofi / Винил", "Lofi / Vinyl"),
+        "Vocal" => L.T("Вокал / Подкаст", "Vocal / Podcast"),
+        _ => p.Name,
+    };
+
+    public static string RoomLabel(string key) => key switch
+    {
+        "room" => L.T("Комната", "Room"),
+        "plate" => L.T("Плейт", "Plate"),
+        "hall" => L.T("Зал", "Hall"),
+        "cathedral" => L.T("Космос", "Cathedral"),
+        _ => key,
+    };
+
     public static string DisplayPresetName(AppSettings s)
     {
         if (!s.AudioFxEnabled)
-            return s.PlayerAudio8D ? "8D" : "Выкл";
-        return FindPreset(s.AudioPreset)?.Name ?? "Свой";
+            return s.PlayerAudio8D ? "8D" : L.T("Выкл", "Off");
+        var p = FindPreset(s.AudioPreset);
+        return p != null ? PresetLabel(p) : L.T("Свой", "Custom");
     }
 
     public static void ApplyPreset(AppSettings s, string presetId)

@@ -28,7 +28,7 @@ public sealed class TimelinePage(bool seen, bool embedded = false) : IPage
     {
         if (_filter == null)
         {
-            _filter = new Edit("Искать по названию, каналу, разделу") { Bg = () => Th.Card };
+            _filter = new Edit(L.T("Искать по названию, каналу, разделу", "Filter by title, channel, or section")) { Bg = () => Th.Card };
             _filter.Changed = () =>
             {
                 UI.ScrollReset(_scroll);
@@ -73,7 +73,9 @@ public sealed class TimelinePage(bool seen, bool embedded = false) : IPage
             }
             else
                 foreach (var h in Db.History(f))
-                    Add(h.Last, h.ToVideo(), $"Остановились на {Fmt.Time(h.Position)}{(h.Duration > 0 ? " из " + Fmt.Time(h.Duration) : "")} · смотрели {Fmt.Time(h.Watched)} · {Fmt.Source(h.Source)}", h.Id, "history");
+                    Add(h.Last, h.ToVideo(), L.T(
+                        $"Остановились на {Fmt.Time(h.Position)}{(h.Duration > 0 ? " из " + Fmt.Time(h.Duration) : "")} · смотрели {Fmt.Time(h.Watched)} · {Fmt.Source(h.Source)}",
+                        $"Stopped at {Fmt.Time(h.Position)}{(h.Duration > 0 ? " / " + Fmt.Time(h.Duration) : "")} · watched {Fmt.Time(h.Watched)} · {Fmt.Source(h.Source)}"), h.Id, "history");
             App.Post(() => { if (gen == _gen) { _entries = list; _total = y; _loading = false; } });
           }
           catch (Exception e)
@@ -87,25 +89,27 @@ public sealed class TimelinePage(bool seen, bool embedded = false) : IPage
     public void Draw(R r)
     {
         float x0 = r.X + 24;
-        var cw = UI.PillWidth(Th.Delete, "Очистить");
+        var clearLbl = L.T("Очистить", "Clear");
+        var cw = UI.PillWidth(Th.Delete, clearLbl);
         float topY = embedded ? r.Y + 4 : r.Y + 10;
-        if (!embedded) Gfx.Draw(seen ? "Что я видел" : "История просмотров", x0, topY, 24, Th.Text, 600);
-        if (UI.Pill(UI.Id("clear", _scroll), r.Right - cw - 22, topY + 2, 32, Th.Delete, "Очистить", out _, Th.A(0.08f))) App.Post(Clear);
+        if (!embedded) Gfx.Draw(seen ? L.T("Что я видел", "Seen") : L.T("История просмотров", "Watch history"), x0, topY, 24, Th.Text, 600);
+        if (UI.Pill(UI.Id("clear", _scroll), r.Right - cw - 22, topY + 2, 32, Th.Delete, clearLbl, out _, Th.A(0.08f))) App.Post(Clear);
         var fb = new R(r.Right - cw - 22 - 12 - 320, topY + 1, 320, 34);
         Gfx.Fill(fb, Th.Card, 17);
+        _filter?.SetPlaceholder(L.T("Искать по названию, каналу, разделу", "Filter by title, channel, or section"));
         _filter?.Place(fb, 16, 16);
         float descY = embedded ? topY + 8 : r.Y + 50;
         float descW = embedded ? MathF.Max(120, fb.X - x0 - 16) : r.W - 48;
         Gfx.Draw(seen
-            ? "Каждое видео, которое появлялось на экране: на главной, в поиске, в похожих. С временем и местом."
-            : "Все запуски видео с позицией остановки. Клик продолжает с того же места.", x0, descY, 12.5f, Th.Sub, 400, descW);
+            ? L.T("Каждое видео, которое появлялось на экране: на главной, в поиске, в похожих. С временем и местом.", "Every video shown on screen across Home, search, and related — with time and source.")
+            : L.T("Все запуски видео с позицией остановки. Клик продолжает с того же места.", "Every played video with resume position. Click to continue right where you left off."), x0, descY, 12.5f, Th.Sub, 400, descW);
 
         float viewTop = embedded ? r.Y + 48 : r.Y + 78;
         var view = new R(x0, viewTop, r.Right - x0 - 4, r.Bottom - viewTop);
         if (_entries.Count == 0)
         {
             if (_loading) UI.Spinner(view.X + 20, view.Y + 30, 10, Th.Sub);
-            else Gfx.Draw("Пока пусто.", view.X, view.Y + 10, 14, Th.Sub);
+            else Gfx.Draw(L.T("Пока пусто.", "Nothing here yet."), view.X, view.Y + 10, 14, Th.Sub);
             return;
         }
         var scroll = UI.BeginScroll(_scroll, view, _total + 30);
@@ -138,7 +142,8 @@ public sealed class TimelinePage(bool seen, bool embedded = false) : IPage
 
     private void Clear()
     {
-        if (Dialogs.Ask("Это только локальные данные FluxTube. Отменить нельзя.", seen ? "Очистить «Что я видел»?" : "Очистить историю просмотров?") != 1) return;
+        if (Dialogs.Ask(L.T("Это только локальные данные FluxTube. Отменить нельзя.", "This only clears local FluxTube data and cannot be undone."),
+            seen ? L.T("Очистить «Что я видел»?", "Clear Seen history?") : L.T("Очистить историю просмотров?", "Clear watch history?")) != 1) return;
         if (seen) Db.ClearSeen(); else Db.ClearHistory();
         Reload();
     }
@@ -157,7 +162,7 @@ public sealed class DownloadsPage : IPage
     {
         if (_url == null)
         {
-            _url = new Edit("Вставьте ссылку на видео (YouTube, VK, Twitch и др.)") { Bg = () => Th.Card };
+            _url = new Edit(L.T("Вставьте ссылку на видео (YouTube, VK, Twitch и др.)", "Paste a video link (YouTube, Twitch, VK, etc.)")) { Bg = () => Th.Card };
             _url.Enter = Add;
         }
         foreach (var d in Downloader.Instance.Items) d.Refresh();
@@ -177,28 +182,31 @@ public sealed class DownloadsPage : IPage
     public void Draw(R r)
     {
         float x0 = r.X + 24, right = r.Right - 22;
-        Gfx.Draw("Загрузки", x0, r.Y + 10, 24, Th.Text, 600);
-        var fw = UI.PillWidth(Th.Folder, "Папка");
-        if (UI.Pill(UI.Id("dl:folder"), right - fw, r.Y + 12, 32, Th.Folder, "Папка", out _, Th.A(0.08f)))
+        Gfx.Draw(L.T("Загрузки", "Downloads"), x0, r.Y + 10, 24, Th.Text, 600);
+        var folderLbl = L.T("Папка", "Folder");
+        var fw = UI.PillWidth(Th.Folder, folderLbl);
+        if (UI.Pill(UI.Id("dl:folder"), right - fw, r.Y + 12, 32, Th.Folder, folderLbl, out _, Th.A(0.08f)))
         {
             try { Directory.CreateDirectory(AppSettings.Current.DownloadDir); W.Open(AppSettings.Current.DownloadDir); }
-            catch (Exception e) { Shell.Toast("Не удалось открыть папку: " + e.Message, Th.Warn); }
+            catch (Exception e) { Shell.Toast(L.T("Не удалось открыть папку: ", "Could not open folder: ") + e.Message, Th.Warn); }
         }
 
         float y = r.Y + 58;
-        var addW = UI.PillWidth(Th.Download, "Скачать");
+        var dlLbl = L.T("Скачать", "Download");
+        var addW = UI.PillWidth(Th.Download, dlLbl);
         var ql = Cards.QualityName(_quality);
         var qW = UI.PillWidth(null, ql);
-        if (UI.Pill(UI.Id("dl:add"), right - addW, y, 36, Th.Download, "Скачать", out _, accent: true)) App.Post(Add);
+        if (UI.Pill(UI.Id("dl:add"), right - addW, y, 36, Th.Download, dlLbl, out _, accent: true)) App.Post(Add);
         if (UI.Pill(UI.Id("dl:q"), right - addW - 8 - qW, y, 36, null, ql, out _))
             Menus.Popup(AppSettings.Qualities.Select(q => new MenuItem(Cards.QualityName(q), () => _quality = q, null, q == _quality)).ToList());
         var box = new R(x0, y, right - addW - 8 - qW - 10 - x0, 36);
         Gfx.Fill(box, Th.Card, 18);
+        _url?.SetPlaceholder(L.T("Вставьте ссылку на видео (YouTube, VK, Twitch и др.)", "Paste a video link (YouTube, Twitch, VK, etc.)"));
         _url?.Place(box, 18, 18);
 
         var items = Downloader.Instance.Items;
         var view = new R(x0, y + 50, r.Right - x0 - 4, r.Bottom - y - 50);
-        if (items.Count == 0) { Gfx.Draw("Скачанные видео появятся здесь и будут играть без интернета.", view.X, view.Y + 8, 14, Th.Sub); return; }
+        if (items.Count == 0) { Gfx.Draw(L.T("Скачанные видео появятся здесь и будут играть без интернета.", "Downloaded videos appear here and play offline."), view.X, view.Y + 8, 14, Th.Sub); return; }
         const float rowH = 116;
         var scroll = UI.BeginScroll(_scroll, view, items.Count * rowH + 20);
         int first = Math.Max(0, (int)(scroll / rowH)), last = Math.Min(items.Count - 1, (int)((scroll + view.H) / rowH));
@@ -233,15 +241,15 @@ public sealed class DownloadsPage : IPage
 
     private static void Play(DownloadItem d)
     {
-        if (d.File == null || !File.Exists(d.File)) { Shell.Toast("Файл не найден: возможно, его переместили или удалили.", Th.Warn); return; }
+        if (d.File == null || !File.Exists(d.File)) { Shell.Toast(L.T("Файл не найден: возможно, его переместили или удалили.", "File not found: it may have been moved or deleted."), Th.Warn); return; }
         if (d.VideoId is { Length: 11 }) Shell.OpenVideo(new VideoItem { VideoId = d.VideoId, Title = d.Title, Channel = d.Channel }, "downloads");
-        else { Shell.PlayFile(d); Shell.Toast("Играет в мини-плеере: " + d.Title); }
+        else { Shell.PlayFile(d); Shell.Toast(L.T("Играет в мини-плеере: ", "Playing in mini-player: ") + d.Title); }
     }
 
     private static void Delete(DownloadItem d)
     {
         if (!d.IsDone) { Downloader.Instance.Remove(d, deleteFile: false); return; }
-        var a = Dialogs.Ask(d.Title + "\n\nДа: удалить файл с диска.\nНет: убрать только из списка.", "Удалить загрузку?", threeWay: true);
+        var a = Dialogs.Ask(d.Title + L.T("\n\nДа: удалить файл с диска.\nНет: убрать только из списка.", "\n\nYes: delete file from disk.\nNo: remove from list only."), L.T("Удалить загрузку?", "Delete download?"), threeWay: true);
         if (a < 0) return;
         Downloader.Instance.Remove(d, deleteFile: a == 1);
     }
@@ -256,18 +264,24 @@ public sealed class SettingsPage : IPage
     private bool _dragSfxVol;
     private long _lastSfxVolAt;
     private readonly int _scroll = UI.Id("settings");
-    private static readonly (string Key, string Name)[] Cats =
-        [("sponsor", "Спонсоры"), ("selfpromo", "Самореклама"), ("interaction", "«Подпишись»"), ("intro", "Заставки"), ("outro", "Концовки")];
+    private static readonly (string Key, string Ru, string En)[] Cats =
+        [("sponsor", "Спонсоры", "Sponsors"), ("selfpromo", "Самореклама", "Self-promo"), ("interaction", "«Подпишись»", "Interaction"), ("intro", "Заставки", "Intro"), ("outro", "Концовки", "Outro")];
     private static readonly float[] ZoomPresets = [0.75f, 0.85f, 0.90f, 1.00f, 1.10f, 1.25f, 1.40f, 1.50f];
-    private static readonly (string Key, string Label)[] SeasonalEffects =
-        [("none", "Выкл"), ("newyear", "❄ Новый год"), ("halloween", "🎃 Хэллоуин")];
-    private static readonly (string Key, string Label)[] FrostedModes =
-        [("off", "Выкл"), ("soft", "Лёгкое"), ("matte", "Матовое стекло")];
-    private static readonly (string Code, string Name)[] AudioLangs =
+    private static readonly (string Code, string Label)[] AppLangs =
+        [("ru", "Русский"), ("en", "English")];
+    private static readonly (string Key, string Ru, string En)[] MotionBlurStrengths =
+        [("soft", "Лёгкий", "Light"), ("medium", "Средний", "Medium"), ("cinema", "Кино", "Cinema")];
+    private static readonly (string Key, string Ru, string En)[] ShortsAdModes =
+        [("off", "Выкл", "Off"), ("standard", "Стандарт", "Standard"), ("max", "Максимум", "Max")];
+    private static readonly (string Key, string Ru, string En)[] SeasonalEffects =
+        [("none", "Выкл", "Off"), ("newyear", "❄ Новый год", "❄ New Year"), ("halloween", "🎃 Хэллоуин", "🎃 Halloween")];
+    private static readonly (string Key, string Ru, string En)[] FrostedModes =
+        [("off", "Выкл", "Off"), ("soft", "Лёгкое", "Light"), ("matte", "Матовое стекло", "Matte glass")];
+    private static readonly (string Code, string Ru, string En)[] AudioLangs =
     [
-        ("", "Оригинал (как на YouTube)"),
-        ("ru", "Русский"), ("en", "English"), ("uk", "Українська"),
-        ("de", "Deutsch"), ("es", "Español"), ("fr", "Français"), ("ja", "日本語"),
+        ("", "Оригинал (как на YouTube)", "Original (YouTube default)"),
+        ("ru", "Русский", "Русский"), ("en", "English", "English"), ("uk", "Українська", "Українська"),
+        ("de", "Deutsch", "Deutsch"), ("es", "Español", "Español"), ("fr", "Français", "Français"), ("ja", "日本語", "日本語"),
     ];
     private static readonly int[] CacheLimits = [0, 512, 1024, 2048, 5120, 10240];
 
@@ -279,9 +293,9 @@ public sealed class SettingsPage : IPage
         var s = AppSettings.Current;
         if (_proxy == null)
         {
-            _proxy = new Edit("пусто = системный прокси; пример: socks5://127.0.0.1:1080");
+            _proxy = new Edit(L.T("пусто = системный прокси; пример: socks5://127.0.0.1:1080", "empty = system proxy; e.g. socks5://127.0.0.1:1080"));
             _hl = new Edit("ru");
-            _gl = new Edit("по IP");
+            _gl = new Edit(L.T("по IP", "by IP"));
             _proxy.Changed = () => { s.Proxy = _proxy.Text.Trim(); Saved(); };
             _hl.Changed = () => { s.Hl = string.IsNullOrWhiteSpace(_hl.Text) ? "ru" : _hl.Text.Trim(); Saved(); InnerTube.Instance.ResetSession(); };
             _gl.Changed = () => { s.Gl = _gl.Text.Trim().ToUpperInvariant(); Saved(); InnerTube.Instance.ResetSession(); };
@@ -315,10 +329,10 @@ public sealed class SettingsPage : IPage
 
     private long _cacheAt, _cacheBytes, _statsAt;
     private string _stats = "";
-    private static string CacheName(int mb) => mb switch { 0 => "Выключен", < 1024 => mb + " МБ", _ => (mb / 1024) + " ГБ" };
+    private static string CacheName(int mb) => mb switch { 0 => L.T("Выключен", "Off"), < 1024 => mb + L.T(" МБ", " MB"), _ => (mb / 1024) + L.T(" ГБ", " GB") };
 
     // layout state for one Draw
-    private float _x, _y, _w, _contentH = 2100;
+    private float _x, _y, _w, _contentH = 2400;
     private R _view;
 
     private bool Visible(float y, float h) => y + h >= _view.Y - 24 && y <= _view.Bottom + 24;
@@ -372,42 +386,46 @@ public sealed class SettingsPage : IPage
     public void Draw(R r)
     {
         var s = AppSettings.Current;
+        _proxy?.SetPlaceholder(L.T("пусто = системный прокси; пример: socks5://127.0.0.1:1080", "empty = system proxy; e.g. socks5://127.0.0.1:1080"));
+        _gl?.SetPlaceholder(L.T("по IP", "by IP"));
+
         _view = new R(r.X, r.Y, r.W - 4, r.H);
         var scroll = UI.BeginScroll(_scroll, _view, _contentH);
         _x = r.X + 24; _w = MathF.Min(880, r.W - 60); _y = r.Y + 10 - scroll;
-        if (Visible(_y, 34)) Gfx.Draw("Настройки", _x, _y, 24, Th.Text, 600);
+        if (Visible(_y, 34)) Gfx.Draw(L.T("Настройки", "Settings"), _x, _y, 24, Th.Text, 600);
         _y += 34;
 
-        Section("Аккаунты YouTube");
+        Section(L.T("Аккаунты YouTube", "YouTube Accounts"));
         var logged = CookieStore.IsLoggedIn;
         var curAcc = AccountMenu.Current;
         var accTitle = logged
-            ? (curAcc is { Name.Length: > 0 } ? $"Активный аккаунт: {curAcc.Name}" : "Вы вошли в YouTube")
-            : "Вы не вошли в аккаунт";
-        var addLabel = logged ? $"Добавить ({BrowserLogin.DefaultBrowserName})" : $"Войти через {BrowserLogin.DefaultBrowserName}";
-        float accReserve = 36 + UI.PillWidth(logged ? Th.Add : Th.Globe, addLabel)
-            + (logged ? UI.PillWidth(null, "Выйти") + 8 : 0)
-            + (AccountMenu.Saved.Count > 0 ? UI.PillWidth(Th.Account, $"Аккаунты ({AccountMenu.Saved.Count})") + 8 : 0);
+            ? (curAcc is { Name.Length: > 0 } ? L.T($"Активный аккаунт: {curAcc.Name}", $"Active account: {curAcc.Name}") : L.T("Вы вошли в YouTube", "Signed in to YouTube"))
+            : L.T("Вы не вошли в аккаунт", "Not signed in");
+        var addLabel = logged ? L.T("Добавить аккаунт", "Add account") : L.T("Войти в YouTube", "Sign in to YouTube");
+        var outLabel = L.T("Выйти", "Sign out");
+        var accsLabel = L.T($"Аккаунты ({AccountMenu.Saved.Count})", $"Accounts ({AccountMenu.Saved.Count})");
+        float accReserve = 36 + UI.PillWidth(logged ? Th.Add : Th.Account, addLabel)
+            + (logged ? UI.PillWidth(null, outLabel) + 8 : 0)
+            + (AccountMenu.Saved.Count > 0 ? UI.PillWidth(Th.Account, accsLabel) + 8 : 0);
         var acc = Row(accTitle,
-            logged ? $"Вход через {BrowserLogin.DefaultBrowserName}: добавляйте несколько аккаунтов и переключайте их в 1 клик."
-                   : $"Войдите в Google через {BrowserLogin.DefaultBrowserName} — подписки, история и рекомендации подтянутся автоматически.", 58, accReserve);
+            logged ? L.T("Простой вход в 1 клик через изолированное окно браузера, Firefox, буфер обмена или cookies.txt.", "Easy 1-click sign-in via isolated browser window, Firefox, clipboard, or cookies.txt.")
+                   : L.T("Войдите в Google в 1 клик — подписки, история и рекомендации подтянутся автоматически.", "Sign in to Google in 1 click — subscriptions, history, and recommendations sync automatically."), 58, accReserve);
         if (Visible(acc.Y, acc.H))
         {
             float bx = acc.Right - 14;
             if (logged)
             {
-                var lw = UI.PillWidth(null, "Выйти"); bx -= lw;
-                if (UI.Pill(UI.Id("set:logout"), bx, acc.Y + 12, 34, null, "Выйти", out _)) App.Post(Shell.Logout);
+                var lw = UI.PillWidth(null, outLabel); bx -= lw;
+                if (UI.Pill(UI.Id("set:logout"), bx, acc.Y + 12, 34, null, outLabel, out _)) App.Post(Shell.Logout);
                 bx -= 8;
             }
-            var aw = UI.PillWidth(logged ? Th.Add : Th.Globe, addLabel); bx -= aw;
-            if (UI.Pill(UI.Id("set:login"), bx, acc.Y + 12, 34, logged ? Th.Add : Th.Globe, addLabel, out _, accent: true))
-                App.Post(Shell.LoginNewAccount);
+            var aw = UI.PillWidth(logged ? Th.Add : Th.Account, addLabel); bx -= aw;
+            if (UI.Pill(UI.Id("set:login"), bx, acc.Y + 12, 34, logged ? Th.Add : Th.Account, addLabel, out _, accent: true))
+                App.Post(LoginModal.Show);
             if (AccountMenu.Saved.Count > 0)
             {
-                var swLabel = $"Аккаунты ({AccountMenu.Saved.Count})";
-                var swW = UI.PillWidth(Th.Account, swLabel); bx -= swW + 8;
-                if (UI.Pill(UI.Id("set:accs"), bx, acc.Y + 12, 34, Th.Account, swLabel, out _))
+                var swW = UI.PillWidth(Th.Account, accsLabel); bx -= swW + 8;
+                if (UI.Pill(UI.Id("set:accs"), bx, acc.Y + 12, 34, Th.Account, accsLabel, out _))
                 {
                     var list = AccountMenu.Saved.Select(a => new MenuItem(
                         (a.Name.Length > 0 ? a.Name : a.Handle) + (a.Handle.Length > 0 && a.Name.Length > 0 ? $" ({a.Handle})" : ""),
@@ -415,48 +433,83 @@ public sealed class SettingsPage : IPage
                         check: logged && a.Id == AccountMenu.ActiveId,
                         icon: Th.Account)).ToList();
                     list.Add(MenuItem.Sep);
-                    list.Add(new($"Войти через {BrowserLogin.DefaultBrowserName}…", Shell.LoginNewAccount, icon: Th.Globe));
-                    list.Add(new("Встроенное окно входа…", Shell.LoginWebView, icon: Th.Account));
+                    list.Add(new(L.T("Войти / добавить аккаунт…", "Sign in / add account…"), LoginModal.Show, icon: Th.Add));
                     Menus.Popup(list);
                 }
             }
         }
-        var imp = Row("Резервные способы входа", "Встроенное окно входа или импорт файла Netscape cookies.txt.", 54, 380);
+        var imp = Row(L.T("Быстрый импорт сессии", "Quick session import"),
+            L.T("Импорт из Firefox (1 клик), вставка cookies из буфера обмена или файл cookies.txt.", "1-click Firefox import, paste cookies from clipboard, or load cookies.txt."), 54, 410);
         if (Visible(imp.Y, imp.H))
         {
             float bx = imp.Right - 14;
-            var w2 = UI.PillWidth(Th.Folder, "Выбрать cookies.txt"); bx -= w2;
-            if (UI.Pill(UI.Id("set:ck"), bx, imp.Y + 10, 34, Th.Folder, "Выбрать cookies.txt", out _))
-                App.Post(() => Dialogs.PickFileAsync("cookies.txt\0*.txt\0\0", BrowserLogin.ImportFromFile));
+            var ckLbl = "cookies.txt";
+            var w2 = UI.PillWidth(Th.Folder, ckLbl); bx -= w2;
+            if (UI.Pill(UI.Id("set:ck"), bx, imp.Y + 10, 34, Th.Folder, ckLbl, out _))
+                App.Post(() => Dialogs.PickFileAsync("cookies.txt / JSON\0*.txt;*.json\0\0", BrowserLogin.ImportFromFile));
             bx -= 8;
-            var w3 = UI.PillWidth(Th.Account, "Встроенное окно"); bx -= w3;
-            if (UI.Pill(UI.Id("set:wvlogin"), bx, imp.Y + 10, 34, Th.Account, "Встроенное окно", out _))
-                App.Post(Shell.LoginWebView);
+            var clipLbl = L.T("Из буфера", "Clipboard");
+            var wClip = UI.PillWidth(Th.Copy, clipLbl); bx -= wClip;
+            if (UI.Pill(UI.Id("set:ckclip"), bx, imp.Y + 10, 34, Th.Copy, clipLbl, out _))
+                App.Post(BrowserLogin.ImportFromClipboard);
+            if (BrowserLogin.HasFirefox)
+            {
+                bx -= 8;
+                var ffLbl = "Firefox";
+                var wFf = UI.PillWidth(Th.Globe, ffLbl); bx -= wFf;
+                if (UI.Pill(UI.Id("set:ckff"), bx, imp.Y + 10, 34, Th.Globe, ffLbl, out _))
+                    App.Post(BrowserLogin.ImportFromFirefox);
+            }
         }
 
-        Section("Оформление");
+        Section(L.T("Оформление и язык", "Appearance & Language"));
+        var langRow = Row(L.T("Язык интерфейса", "App language"),
+            L.T("Меняет язык всех меню, настроек и кнопок FluxTube мгновенно без перезапуска", "Switches all FluxTube menus, settings, and labels instantly without restart"), 58, 240);
+        if (Visible(langRow.Y, langRow.H))
+        {
+            float lx = langRow.Right - 14;
+            for (int li = AppLangs.Length - 1; li >= 0; li--)
+            {
+                var (lc, ll) = AppLangs[li];
+                var lw = UI.PillWidth(null, ll); lx -= lw;
+                bool on = L.Code == lc;
+                if (UI.Pill(UI.Id("set:uilang:" + lc), lx, langRow.Y + 12, 34, null, ll, out _, accent: on) && !on)
+                {
+                    s.UiLanguage = lc;
+                    Saved();
+                    Shell.OnLanguageChanged();
+                }
+                lx -= 8;
+            }
+        }
+
         _y += ThemePicker.Draw(_x, _y, _w);
 
-        var customThemeRow = Row("Свои темы (редактор кода)", "Пишите темы в JSON или key: #RRGGBB с живым превью · ПКМ по любой теме открывает её код", 58, 340);
+        var customThemeRow = Row(L.T("Свои темы (редактор кода)", "Custom themes (code editor)"),
+            L.T("Пишите темы в JSON или key: #RRGGBB с живым превью · ПКМ по любой теме открывает её код", "Author themes in JSON or key: #RRGGBB with live preview · Right-click any theme to view its code"), 58, 340);
         if (Visible(customThemeRow.Y, customThemeRow.H))
         {
             float tx = customThemeRow.Right - 14;
-            var tdW = UI.PillWidth(Th.Folder, "Папка тем"); tx -= tdW;
-            if (UI.Pill(UI.Id("set:tdir"), tx, customThemeRow.Y + 12, 34, Th.Folder, "Папка тем", out _))
+            var tdLbl = L.T("Папка тем", "Themes folder");
+            var tdW = UI.PillWidth(Th.Folder, tdLbl); tx -= tdW;
+            if (UI.Pill(UI.Id("set:tdir"), tx, customThemeRow.Y + 12, 34, Th.Folder, tdLbl, out _))
                 W.Open(Themes.CustomDir);
             tx -= 8;
-            var teW = UI.PillWidth(Th.Add, "Создать / код темы…"); tx -= teW;
-            if (UI.Pill(UI.Id("set:tedit"), tx, customThemeRow.Y + 12, 34, Th.Add, "Создать / код темы…", out _, accent: true))
+            var teLbl = L.T("Создать / код темы…", "Create / edit code…");
+            var teW = UI.PillWidth(Th.Add, teLbl); tx -= teW;
+            if (UI.Pill(UI.Id("set:tedit"), tx, customThemeRow.Y + 12, 34, Th.Add, teLbl, out _, accent: true))
                 App.Post(() => ThemeCodeEditor.Show());
         }
 
-        var frostRow = Row("Матовое стекло на фон", "Приятная шероховатая текстура матового стекла и мягкий рассеянный свет на любую тему", 58, 360);
+        var frostRow = Row(L.T("Матовое стекло на фон", "Frosted glass surface"),
+            L.T("Приятная шероховатая текстура матового стекла и мягкий рассеянный свет на любую тему", "Subtle matte glass texture and soft diffused lighting on any theme"), 58, 360);
         if (Visible(frostRow.Y, frostRow.H))
         {
             float fx = frostRow.Right - 14;
             for (int fi = FrostedModes.Length - 1; fi >= 0; fi--)
             {
-                var (fk, fl) = FrostedModes[fi];
+                var (fk, fru, fen) = FrostedModes[fi];
+                var fl = L.T(fru, fen);
                 var fw = UI.PillWidth(null, fl); fx -= fw;
                 bool on = s.FrostedGlass == fk;
                 if (UI.Pill(UI.Id("set:frost:" + fk), fx, frostRow.Y + 12, 34, null, fl, out _, accent: on))
@@ -468,7 +521,35 @@ public sealed class SettingsPage : IPage
                 fx -= 8;
             }
         }
-        var zr = Row("Масштаб интерфейса", "Как в браузере: Ctrl + колёсико мыши, Ctrl + / − или Ctrl + 0 для сброса", 58, 220);
+
+        ToggleRow("mblur", L.T("Motion Blur интерфейса (GPU)", "UI Motion Blur (GPU)"), s.UiMotionBlur, v => s.UiMotionBlur = v,
+            L.T("Аппаратное направленное размытие в движении при скролле, переходах страниц и свайпе Shorts", "Hardware-accelerated directional motion blur on scrolling, page transitions, and Shorts swipes"));
+        if (s.UiMotionBlur)
+        {
+            var mbRow = Row(L.T("Сила Motion Blur", "Motion Blur strength"),
+                L.T("Регулирует интенсивность размытия при быстром движении интерфейса", "Controls blur intensity during fast UI motion"), 54, 340);
+            if (Visible(mbRow.Y, mbRow.H))
+            {
+                float mx = mbRow.Right - 14;
+                for (int mi = MotionBlurStrengths.Length - 1; mi >= 0; mi--)
+                {
+                    var (mk, mru, men) = MotionBlurStrengths[mi];
+                    var ml = L.T(mru, men);
+                    var mw = UI.PillWidth(null, ml); mx -= mw;
+                    bool on = s.UiMotionBlurStrength == mk;
+                    if (UI.Pill(UI.Id("set:mbs:" + mk), mx, mbRow.Y + 10, 34, null, ml, out _, accent: on))
+                    {
+                        s.UiMotionBlurStrength = mk;
+                        Saved();
+                        App.Invalidate();
+                    }
+                    mx -= 8;
+                }
+            }
+        }
+
+        var zr = Row(L.T("Масштаб интерфейса", "Interface zoom"),
+            L.T("Как в браузере: Ctrl + колёсико мыши, Ctrl + / − или Ctrl + 0 для сброса", "Like a browser: Ctrl + wheel, Ctrl + / −, or Ctrl + 0 to reset"), 58, 220);
         if (Visible(zr.Y, zr.H))
         {
             float bx = zr.Right - 14;
@@ -486,9 +567,9 @@ public sealed class SettingsPage : IPage
             Gfx.Fill(zm, Th.A(0.1f), 17);
             if (UI.IconButton(UI.Id("set:zminus"), zm, "\uE738", 12)) Shell.AdjustZoom(-0.10f);
         }
-        ToggleRow("side", "Скрыть боковую панель", s.SidebarCollapsed, v => s.SidebarCollapsed = v, "Также переключается кнопкой меню сверху слева или Ctrl+B");
-        ToggleRow("ambient", "Подсветка видео (Ambient Mode)", s.AmbientMode, v => s.AmbientMode = v, "Мягкое GPU-свечение вокруг плеера в цветах текущей сцены (обычные видео и Shorts)");
-        ToggleRow("sfx", "Звуки интерфейса (Silent Hill / MGS)", s.UiSounds, v => { s.UiSounds = v; if (v) Sfx.Tab(); }, "Отдельные тактильные звуки на клик, открытие видео, лайк, канал, громкость (зависит от громкости видео), вкладки и тумблеры");
+        ToggleRow("side", L.T("Скрыть боковую панель", "Collapse sidebar"), s.SidebarCollapsed, v => s.SidebarCollapsed = v, L.T("Также переключается кнопкой меню сверху слева или Ctrl+B", "Also toggled by top-left menu button or Ctrl+B"));
+        ToggleRow("ambient", L.T("Подсветка видео (Ambient Mode)", "Video glow (Ambient Mode)"), s.AmbientMode, v => s.AmbientMode = v, L.T("Мягкое GPU-свечение вокруг плеера в цветах текущей сцены (обычные видео и Shorts)", "Soft GPU glow around the player matching the current scene (videos & Shorts)"));
+        ToggleRow("sfx", L.T("Звуки интерфейса (Silent Hill / MGS)", "UI Sound Effects (Silent Hill / MGS)"), s.UiSounds, v => { s.UiSounds = v; if (v) Sfx.Tab(); }, L.T("Отдельные тактильные звуки на клик, открытие видео, лайк, канал, громкость, вкладки и тумблеры", "Tactile sound effects for clicks, opening videos, likes, channels, volume, tabs, and toggles"));
 
         if (!UI.Down && _dragSfxVol)
         {
@@ -497,7 +578,8 @@ public sealed class SettingsPage : IPage
             Sfx.Preview("click");
             Saved();
         }
-        var sfxVolRow = Row("Громкость звуков интерфейса", "Увеличьте (до 300%) или убавьте громкость стандартных и своих звуков", 58, 300);
+        var sfxVolRow = Row(L.T("Громкость звуков интерфейса", "UI sounds volume"),
+            L.T("Увеличьте (до 300%) или убавьте громкость стандартных и своих звуков", "Boost (up to 300%) or lower built-in and custom UI sound volume"), 58, 300);
         if (Visible(sfxVolRow.Y, sfxVolRow.H))
         {
             int sv = Math.Clamp(s.UiSoundsVolume, 10, 300);
@@ -538,32 +620,36 @@ public sealed class SettingsPage : IPage
                 Sfx.RebuildBuffers(); Sfx.Preview("click"); Saved();
             }
         }
-        ToggleRow("sfx8d", "Реверберация звуков интерфейса", s.UiSoundsReverb8D, v => { s.UiSoundsReverb8D = v; Sfx.RebuildBuffers(); Sfx.Preview("video_open"); }, "Короткое мягкое эхо по центру для стандартных и своих звуков");
+        ToggleRow("sfx8d", L.T("Реверберация звуков интерфейса", "UI sound reverb"), s.UiSoundsReverb8D, v => { s.UiSoundsReverb8D = v; Sfx.RebuildBuffers(); Sfx.Preview("video_open"); }, L.T("Короткое мягкое эхо по центру для стандартных и своих звуков", "Subtle centered hall tail for built-in and custom UI sounds"));
 
-        var sfxCustomRow = Row("Свои звуки интерфейса (WAV / MP3 / OGG / FLAC / ZIP)",
-            s.CustomSfx.Count > 0 ? $"Заменено звуков: {s.CustomSfx.Count} из {Sfx.Slots.Length}. Можно закинуть сразу .zip архив со звуками."
-                                  : "Замените отдельные события или загрузите готовый .zip звуковой пак целиком", 58, 430);
+        var sfxCustomRow = Row(L.T("Свои звуки интерфейса (WAV / MP3 / OGG / FLAC / ZIP)", "Custom UI sounds (WAV / MP3 / OGG / FLAC / ZIP)"),
+            s.CustomSfx.Count > 0 ? L.T($"Заменено звуков: {s.CustomSfx.Count} из {Sfx.Slots.Length}. Можно закинуть сразу .zip архив со звуками.", $"Custom sounds: {s.CustomSfx.Count} of {Sfx.Slots.Length}. You can also import a .zip soundpack.")
+                                  : L.T("Замените отдельные события или загрузите готовый .zip звуковой пак целиком", "Replace individual UI events or import a complete .zip soundpack"), 58, 430);
         if (Visible(sfxCustomRow.Y, sfxCustomRow.H))
         {
             float sfxX = sfxCustomRow.Right - 14;
             if (s.CustomSfx.Count > 0)
             {
-                var rsw = UI.PillWidth(Th.Restart, "Сбросить");
+                var rsl = L.T("Сбросить", "Reset");
+                var rsw = UI.PillWidth(Th.Restart, rsl);
                 sfxX -= rsw;
-                if (UI.Pill(UI.Id("set:sfxreset"), sfxX, sfxCustomRow.Y + 12, 34, Th.Restart, "Сбросить", out _)) App.Post(Sfx.ResetAll);
+                if (UI.Pill(UI.Id("set:sfxreset"), sfxX, sfxCustomRow.Y + 12, 34, Th.Restart, rsl, out _)) App.Post(Sfx.ResetAll);
                 sfxX -= 8;
             }
-            var gw = UI.PillWidth(Th.Info, _sfxGuideOpen ? "Скрыть гайд" : "Гайд имён");
+            var glbl = _sfxGuideOpen ? L.T("Скрыть гайд", "Hide guide") : L.T("Гайд имён", "Naming guide");
+            var gw = UI.PillWidth(Th.Info, glbl);
             sfxX -= gw;
-            if (UI.Pill(UI.Id("set:sfxguide"), sfxX, sfxCustomRow.Y + 12, 34, Th.Info, _sfxGuideOpen ? "Скрыть гайд" : "Гайд имён", out _))
+            if (UI.Pill(UI.Id("set:sfxguide"), sfxX, sfxCustomRow.Y + 12, 34, Th.Info, glbl, out _))
                 _sfxGuideOpen = !_sfxGuideOpen;
             sfxX -= 8;
 
-            var csw = UI.PillWidth(Th.Volume, "По одному…");
+            var csl = L.T("По одному…", "Per event…");
+            var csw = UI.PillWidth(Th.Volume, csl);
             sfxX -= csw;
-            if (UI.Pill(UI.Id("set:sfxpick"), sfxX, sfxCustomRow.Y + 12, 34, Th.Volume, "По одному…", out _))
+            if (UI.Pill(UI.Id("set:sfxpick"), sfxX, sfxCustomRow.Y + 12, 34, Th.Volume, csl, out _))
             {
-                const string audioFilter = "Аудиофайлы (WAV, MP3, OGG, FLAC, M4A)\0*.wav;*.mp3;*.ogg;*.flac;*.m4a;*.opus;*.aac\0Все файлы\0*.*\0\0";
+                string audioFilter = L.T("Аудиофайлы (WAV, MP3, OGG, FLAC, M4A)\0*.wav;*.mp3;*.ogg;*.flac;*.m4a;*.opus;*.aac\0Все файлы\0*.*\0\0",
+                    "Audio files (WAV, MP3, OGG, FLAC, M4A)\0*.wav;*.mp3;*.ogg;*.flac;*.m4a;*.opus;*.aac\0All files\0*.*\0\0");
                 var menu = new List<MenuItem>();
                 foreach (var (slotKey, slotLabel) in Sfx.Slots)
                 {
@@ -571,25 +657,26 @@ public sealed class SettingsPage : IPage
                     var hasCustom = s.CustomSfx.TryGetValue(k, out var cname) && !string.IsNullOrEmpty(cname);
                     var sub = new List<MenuItem>
                     {
-                        new("Выбрать свой файл…", () => App.Post(() => Dialogs.PickFileAsync(audioFilter, f => Sfx.SetCustom(k, f))), icon: Th.Folder),
-                        new("Прослушать", () => Sfx.Preview(k), icon: Th.Play),
+                        new(L.T("Выбрать свой файл…", "Choose audio file…"), () => App.Post(() => Dialogs.PickFileAsync(audioFilter, f => Sfx.SetCustom(k, f))), icon: Th.Folder),
+                        new(L.T("Прослушать", "Preview"), () => Sfx.Preview(k), icon: Th.Play),
                     };
-                    if (hasCustom) sub.Add(new("Сбросить на стандартный", () => Sfx.ResetSlot(k), icon: Th.Restart, danger: true));
+                    if (hasCustom) sub.Add(new(L.T("Сбросить на стандартный", "Reset to default"), () => Sfx.ResetSlot(k), icon: Th.Restart, danger: true));
                     menu.Add(new(hasCustom ? $"{slotLabel}  ·  {cname}" : slotLabel, null, sub, check: hasCustom, icon: Th.Volume));
                 }
                 if (s.CustomSfx.Count > 0)
                 {
                     menu.Add(MenuItem.Sep);
-                    menu.Add(new("Сбросить все на стандартные", Sfx.ResetAll, icon: Th.Restart, danger: true));
+                    menu.Add(new(L.T("Сбросить все на стандартные", "Reset all to defaults"), Sfx.ResetAll, icon: Th.Restart, danger: true));
                 }
                 Menus.Popup(menu);
             }
             sfxX -= 8;
 
-            var zw2 = UI.PillWidth(Th.Download, "Архив .zip…");
+            var zlbl = L.T("Архив .zip…", "Import .zip…");
+            var zw2 = UI.PillWidth(Th.Download, zlbl);
             sfxX -= zw2;
-            if (UI.Pill(UI.Id("set:sfxzip"), sfxX, sfxCustomRow.Y + 12, 34, Th.Download, "Архив .zip…", out _, accent: true))
-                App.Post(() => Dialogs.PickFileAsync("ZIP-архив со звуками (*.zip)\0*.zip\0\0", Sfx.ImportZip));
+            if (UI.Pill(UI.Id("set:sfxzip"), sfxX, sfxCustomRow.Y + 12, 34, Th.Download, zlbl, out _, accent: true))
+                App.Post(() => Dialogs.PickFileAsync("ZIP (*.zip)\0*.zip\0\0", Sfx.ImportZip));
         }
 
         if (_sfxGuideOpen)
@@ -601,22 +688,25 @@ public sealed class SettingsPage : IPage
             {
                 Gfx.Fill(gBox, Th.Card, 10);
                 Gfx.Stroke(gBox, Gfx.Fade(Th.Brand, 0.35f), 10);
-                Gfx.Draw("Мини-гайд: как назвать файлы внутри ZIP-архива", _x + 16, _y + 12, 13.5f, Th.Text, 600);
-                var cpW = UI.PillWidth(Th.Copy, "Копировать список");
-                if (UI.Pill(UI.Id("set:sfxcopy"), gBox.Right - cpW - 12, _y + 7, 28, Th.Copy, "Копировать список", out _))
-                    Cards.CopyText(Sfx.NamingGuide, "Список имён звуков скопирован");
+                Gfx.Draw(L.T("Мини-гайд: как назвать файлы внутри ZIP-архива", "Quick guide: file names inside your ZIP pack"), _x + 16, _y + 12, 13.5f, Th.Text, 600);
+                var cpLbl = L.T("Копировать список", "Copy list");
+                var cpW = UI.PillWidth(Th.Copy, cpLbl);
+                if (UI.Pill(UI.Id("set:sfxcopy"), gBox.Right - cpW - 12, _y + 7, 28, Th.Copy, cpLbl, out _))
+                    Cards.CopyText(Sfx.NamingGuide, L.T("Список имён звуков скопирован", "Sound names copied"));
                 Gfx.Draw(guideRun, _x + 16, _y + 40, Th.Sub);
             }
             _y += gh + 8;
         }
 
-        var effRow = Row("Сезонные эффекты (на любую тему)", "Гирлянда во всю ширину, снежинки со звёздочками или хэллоуинские тыквы и летучие мыши", 58, 340);
+        var effRow = Row(L.T("Сезонные эффекты (на любую тему)", "Seasonal effects (any theme)"),
+            L.T("Гирлянда во всю ширину, снежинки со звёздочками или хэллоуинские тыквы и летучие мыши", "Full-width string lights, snowflakes & stars, or Halloween pumpkins & bats"), 58, 340);
         if (Visible(effRow.Y, effRow.H))
         {
             float ex = effRow.Right - 14;
             for (int ei = SeasonalEffects.Length - 1; ei >= 0; ei--)
             {
-                var (ek, el) = SeasonalEffects[ei];
+                var (ek, eru, een) = SeasonalEffects[ei];
+                var el = L.T(eru, een);
                 var ew = UI.PillWidth(null, el);
                 ex -= ew;
                 bool on = s.SeasonalEffect == ek;
@@ -629,45 +719,84 @@ public sealed class SettingsPage : IPage
             }
         }
 
-        Section("Плеер");
-        ChoiceRow("pq", "Качество по умолчанию", s.PlayerQuality, AppSettings.Qualities.Where(q => q != "audio"), v => { s.PlayerQuality = v; Resolver.Instance.Invalidate(); });
-        var curAudioName = AudioLangs.FirstOrDefault(a => a.Code == s.AudioLanguage).Name ?? s.AudioLanguage;
-        var alr = Row("Язык озвучки по умолчанию", "Автоматически включает дубляж на выбранном языке, если он есть (субтитры не меняются)", 58, 260);
+        Section(L.T("Плеер", "Player"));
+        ChoiceRow("pq", L.T("Качество по умолчанию", "Default quality"), s.PlayerQuality, AppSettings.Qualities.Where(q => q != "audio"), v => { s.PlayerQuality = v; Resolver.Instance.Invalidate(); });
+        var curAudioTuple = AudioLangs.FirstOrDefault(a => a.Code == s.AudioLanguage);
+        var curAudioName = curAudioTuple.Ru != null ? L.T(curAudioTuple.Ru, curAudioTuple.En) : s.AudioLanguage;
+        var alr = Row(L.T("Язык озвучки по умолчанию", "Default audio language"),
+            L.T("Автоматически включает дубляж на выбранном языке, если он есть (субтитры не меняются)", "Automatically selects dubbed audio in your preferred language when available"), 58, 260);
         if (Visible(alr.Y, alr.H))
         {
             var alw = UI.PillWidth(null, curAudioName);
             if (UI.Pill(UI.Id("set:audiolang"), alr.Right - alw - 14, alr.Y + 12, 34, null, curAudioName, out _))
             {
-                Menus.Popup(AudioLangs.Select(a => new MenuItem(a.Name, () =>
+                Menus.Popup(AudioLangs.Select(a =>
                 {
-                    s.AudioLanguage = a.Code;
-                    Saved();
-                    QuickStream.Invalidate();
-                    Resolver.Instance.Invalidate();
-                    Shell.Toast("Озвучка по умолчанию: " + a.Name, Th.Good, 2400);
-                }, check: a.Code == s.AudioLanguage, icon: Th.Volume)).ToList());
+                    var label = L.T(a.Ru, a.En);
+                    return new MenuItem(label, () =>
+                    {
+                        s.AudioLanguage = a.Code;
+                        Saved();
+                        QuickStream.Invalidate();
+                        Resolver.Instance.Invalidate();
+                        Shell.Toast(L.T("Озвучка по умолчанию: ", "Default audio: ") + label, Th.Good, 2400);
+                    }, check: a.Code == s.AudioLanguage, icon: Th.Volume);
+                }).ToList());
             }
         }
-        var dspRow = Row("DSP Студия: Эквалайзер, Nightcore, Реверб, Бас",
-            $"10 полос EQ, Nightcore / Slowed+Reverb, многоступенчатый реверб, Exciter и лимитер (Ctrl+E). Сейчас: {AudioDsp.DisplayPresetName(s)}", 58, 220);
+        var dspRow = Row(L.T("DSP Студия: Эквалайзер, Nightcore, Реверб, Бас", "DSP Studio: EQ, Nightcore, Reverb, Bass"),
+            L.T($"10 полос EQ, Nightcore / Slowed+Reverb, многоступенчатый реверб, Exciter и лимитер (Ctrl+E). Сейчас: {AudioDsp.DisplayPresetName(s)}",
+                $"10-band EQ, Nightcore / Slowed+Reverb, studio reverb, Exciter & limiter (Ctrl+E). Active: {AudioDsp.DisplayPresetName(s)}"), 58, 220);
         if (Visible(dspRow.Y, dspRow.H))
         {
-            var dw = UI.PillWidth(Th.Headphones, "Открыть студию…");
-            if (UI.Pill(UI.Id("set:dsp"), dspRow.Right - dw - 14, dspRow.Y + 12, 34, Th.Headphones, "Открыть студию…", out _, accent: s.AudioFxEnabled))
+            var dLbl = L.T("Открыть студию…", "Open studio…");
+            var dw = UI.PillWidth(Th.Headphones, dLbl);
+            if (UI.Pill(UI.Id("set:dsp"), dspRow.Right - dw - 14, dspRow.Y + 12, 34, Th.Headphones, dLbl, out _, accent: s.AudioFxEnabled))
                 AudioStudioPanel.Show();
         }
-        ToggleRow("audio8d", "8D Аудио и реверберация в плеере", s.PlayerAudio8D, v => { s.PlayerAudio8D = v; BgPlayers.ApplyAudioDsp(); }, "Плавный 8D-эффект вращения звука и глубокая реверберация на видео и музыку (включается на лету)");
-        ToggleRow("audioonly", "Режим «Только звук» (волны вместо видео, 0% GPU)", s.AudioOnlyMode, v => { s.AudioOnlyMode = v; MpvPlayer.Instance.SetVideoEnabled(!v); }, "Полностью отключает декодирование видео и показывает живые аудиоволны поверх обложки");
-        ToggleRow("suspvid", "Не декодировать видео при сворачивании и в фоне", s.AutoSuspendVideoWhenHidden, v => s.AutoSuspendVideoWhenHidden = v, "Когда окно свёрнуто или открыта другая вкладка, видео не рендерится (0% GPU), звук продолжает играть");
-        ToggleRow("shov", "Подпись Shorts поверх видео при наведении", s.ShortsInfoOverlay, v => { s.ShortsInfoOverlay = v; Shell.PushPlayerState(); }, "Включено: когда панель Shorts скрыта, канал и название появляются поверх видео при наведении. Выключено: аккуратный блок текста сбоку.");
-        ToggleRow("sb", "SponsorBlock", s.SponsorBlock, v => s.SponsorBlock = v, "Пропускать рекламные вставки авторов (выделяются жирной зелёной полосой на таймлайне)");
-        var cr = Row("Что пропускать", null, 50, 560);
+        ToggleRow("wheelvol", L.T("Колёсико мыши меняет громкость на видео", "Mouse wheel adjusts volume over video"), s.WheelVolumeOnVideo, v => s.WheelVolumeOnVideo = v,
+            L.T("Выключено: прокрутка колёсика над видео просто скроллит страницу (а в Shorts листает ленту)", "Off: wheel over video scrolls the page normally (and switches Shorts in Shorts feed)"));
+        ToggleRow("shiftframe", L.T("Shift + колёсико: покадровая прокрутка видео", "Shift + wheel: frame-by-frame scrubbing"), s.ShiftWheelFrameStep, v => s.ShiftWheelFrameStep = v,
+            L.T("Зажмите Shift и крутите колёсико над плеером, чтобы точно листать видео по одному кадру (счётчик кадров и мс)", "Hold Shift and scroll over the player to step frame by frame with frame counter & exact timestamp"));
+
+        var sbAdsHint = ShortsAdBlocker.BlockedSessionCount > 0
+            ? L.T($"Рекламные слоты, платные промо, erid/«Реклама», SponsorBlock и казино/промокоды · Скрыто за сессию: {ShortsAdBlocker.BlockedSessionCount}",
+                  $"Ad slots, paid promos, SponsorBlock full-sponsor & affiliate spam · Blocked this session: {ShortsAdBlocker.BlockedSessionCount}")
+            : L.T("Скрывает и автопропускает рекламные Shorts, платные интеграции, erid-рекламу, SponsorBlock и промокоды",
+                  "Filters and auto-skips ad Shorts, paid promotions, SponsorBlock full sponsors, and promo spam");
+        var sabRow = Row(L.T("Блокировка рекламы в Shorts", "Shorts Ad Blocker"), sbAdsHint, 58, 320);
+        if (Visible(sabRow.Y, sabRow.H))
+        {
+            float sx = sabRow.Right - 14;
+            for (int si = ShortsAdModes.Length - 1; si >= 0; si--)
+            {
+                var (sk, sru, sen) = ShortsAdModes[si];
+                var sl = L.T(sru, sen);
+                var sw = UI.PillWidth(null, sl); sx -= sw;
+                bool on = s.ShortsAdBlock == sk;
+                if (UI.Pill(UI.Id("set:sab:" + sk), sx, sabRow.Y + 12, 34, null, sl, out _, accent: on))
+                {
+                    s.ShortsAdBlock = sk;
+                    Saved();
+                    App.Invalidate();
+                }
+                sx -= 8;
+            }
+        }
+
+        ToggleRow("audio8d", L.T("8D Аудио и реверберация в плеере", "8D Audio & Reverb in player"), s.PlayerAudio8D, v => { s.PlayerAudio8D = v; BgPlayers.ApplyAudioDsp(); }, L.T("Плавный 8D-эффект вращения звука и глубокая реверберация на видео и музыку (включается на лету)", "Smooth 8D spatial orbit and rich hall reverb on video & music (toggles live)"));
+        ToggleRow("audioonly", L.T("Режим «Только звук» (волны вместо видео, 0% GPU)", "Audio-only mode (visualizer, 0% GPU)"), s.AudioOnlyMode, v => { s.AudioOnlyMode = v; MpvPlayer.Instance.SetVideoEnabled(!v); }, L.T("Полностью отключает декодирование видео и показывает живые аудиоволны поверх обложки", "Disables video decoding completely and renders a live audio visualizer over cover art"));
+        ToggleRow("suspvid", L.T("Не декодировать видео при сворачивании и в фоне", "Suspend video decode when minimized/hidden"), s.AutoSuspendVideoWhenHidden, v => s.AutoSuspendVideoWhenHidden = v, L.T("Когда окно свёрнуто или открыта другая вкладка, видео не рендерится (0% GPU), звук продолжает играть", "Suspends video decoding (0% GPU) when minimized or on another tab while audio continues"));
+        ToggleRow("shov", L.T("Подпись Shorts поверх видео при наведении", "Shorts title overlay on hover"), s.ShortsInfoOverlay, v => { s.ShortsInfoOverlay = v; Shell.PushPlayerState(); }, L.T("Включено: когда панель Shorts скрыта, канал и название появляются поверх видео при наведении.", "On: when the Shorts side panel is hidden, channel & title appear over the video on hover."));
+        ToggleRow("sb", "SponsorBlock", s.SponsorBlock, v => s.SponsorBlock = v, L.T("Пропускать рекламные вставки авторов (выделяются жирной зелёной полосой на таймлайне)", "Auto-skip creator sponsor segments (highlighted in green on the timeline)"));
+        var cr = Row(L.T("Что пропускать", "Categories to skip"), null, 50, 560);
         if (Visible(cr.Y, cr.H))
         {
             float cx = cr.Right - 14;
             for (int ci = Cats.Length - 1; ci >= 0; ci--)
             {
-                var (key, name) = Cats[ci];
+                var (key, ru, en) = Cats[ci];
+                var name = L.T(ru, en);
                 var on = s.SponsorCategories.Contains(key);
                 cx -= UI.PillWidth(null, name);
                 if (UI.Pill(UI.Id("set:cat:" + key), cx, cr.Y + 9, 32, null, name, out _, on ? Gfx.Fade(Th.Brand, 0.85f) : Th.A(0.08f), on ? Th.OnBrand : Th.Sub))
@@ -678,43 +807,49 @@ public sealed class SettingsPage : IPage
                 cx -= 6;
             }
         }
-        ToggleRow("rmb", "Правая кнопка мыши ставит паузу", s.RightClickPause, v => { s.RightClickPause = v; Shell.PushPlayerState(); }, "Выключено: правая кнопка по видео открывает меню");
-        ToggleRow("rd", "Показывать дизлайки", s.ReturnDislikes, v => s.ReturnDislikes = v, "Return YouTube Dislike (в обычных видео и Shorts)");
-        ToggleRow("hs", "Скрывать Shorts в лентах", s.HideShorts, v => s.HideShorts = v);
-        ToggleRow("mw", "Отмечать просмотренное в истории YouTube", s.MarkWatched, v => s.MarkWatched = v, "Рекомендации учитывают ваши просмотры");
-        ToggleRow("ap", "Автовоспроизведение следующего", s.Autoplay, v => s.Autoplay = v);
-        ToggleRow("tabplay", "Автостарт видео при открытии вкладки", s.AutoPlayOpenedTabs, v => s.AutoPlayOpenedTabs = v, "Выключено: открытые в фоне и поставленные на паузу вкладки остаются на паузе при переключении");
+        ToggleRow("rmb", L.T("Правая кнопка мыши ставит паузу", "Right-click pauses video"), s.RightClickPause, v => { s.RightClickPause = v; Shell.PushPlayerState(); }, L.T("Выключено: правая кнопка по видео открывает меню", "Off: right-clicking the video opens the context menu"));
+        ToggleRow("rd", L.T("Показывать дизлайки", "Show dislikes"), s.ReturnDislikes, v => s.ReturnDislikes = v, L.T("Return YouTube Dislike (в обычных видео и Shorts)", "Return YouTube Dislike (in videos & Shorts)"));
+        ToggleRow("hs", L.T("Скрывать Shorts в лентах", "Hide Shorts in feeds"), s.HideShorts, v => s.HideShorts = v);
+        ToggleRow("mw", L.T("Отмечать просмотренное в истории YouTube", "Mark watched in YouTube history"), s.MarkWatched, v => s.MarkWatched = v, L.T("Рекомендации учитывают ваши просмотры", "Keeps YouTube recommendations synced with your watches"));
+        ToggleRow("ap", L.T("Автовоспроизведение следующего", "Autoplay next video"), s.Autoplay, v => s.Autoplay = v);
+        ToggleRow("tabplay", L.T("Автостарт видео при открытии вкладки", "Autoplay video when switching tabs"), s.AutoPlayOpenedTabs, v => s.AutoPlayOpenedTabs = v, L.T("Выключено: открытые в фоне и поставленные на паузу вкладки остаются на паузе при переключении", "Off: background or paused tabs stay paused when you switch to them"));
 
-        Section("Поиск");
-        ToggleRow("strict", "Только по теме", s.SearchStrict, v => s.SearchStrict = v, "В выдаче остаются видео, где слова запроса есть в названии или у канала");
-        var br = Row("Скрытые каналы", s.BlockedChannels.Length == 0 ? "Скрыть канал можно из меню любого видео (правый клик)" : $"Скрыто каналов: {s.BlockedChannels.Length}. Они не появляются в поиске и рекомендациях.", 58, 170);
+        Section(L.T("Поиск", "Search"));
+        ToggleRow("strict", L.T("Только по теме", "On-topic only"), s.SearchStrict, v => s.SearchStrict = v, L.T("В выдаче остаются видео, где слова запроса есть в названии или у канала", "Keeps only videos matching your query words in the title or channel name"));
+        var br = Row(L.T("Скрытые каналы", "Hidden channels"),
+            s.BlockedChannels.Length == 0 ? L.T("Скрыть канал можно из меню любого видео (правый клик)", "Hide any channel via right-click menu on a video")
+                                          : L.T($"Скрыто каналов: {s.BlockedChannels.Length}. Они не появляются в поиске и рекомендациях.", $"Hidden channels: {s.BlockedChannels.Length}. Excluded from search, feeds, and Shorts."), 58, 170);
         if (Visible(br.Y, br.H) && s.BlockedChannels.Length > 0)
         {
-            var bw = UI.PillWidth(null, "Вернуть все");
-            if (UI.Pill(UI.Id("set:unblock"), br.Right - bw - 14, br.Y + 12, 34, null, "Вернуть все", out _)) { s.BlockedChannels = []; Saved(); }
+            var ubLbl = L.T("Вернуть все", "Restore all");
+            var bw = UI.PillWidth(null, ubLbl);
+            if (UI.Pill(UI.Id("set:unblock"), br.Right - bw - 14, br.Y + 12, 34, null, ubLbl, out _)) { s.BlockedChannels = []; Saved(); }
         }
 
-        Section("Загрузки");
-        var dr = Row("Папка", s.DownloadDir, 58, 240);
+        Section(L.T("Загрузки", "Downloads"));
+        var dr = Row(L.T("Папка", "Folder"), s.DownloadDir, 58, 240);
         if (Visible(dr.Y, dr.H))
         {
             float bx = dr.Right - 14;
-            var ow = UI.PillWidth(null, "Открыть"); bx -= ow;
-            if (UI.Pill(UI.Id("set:odir"), bx, dr.Y + 12, 34, null, "Открыть", out _))
+            var openLbl = L.T("Открыть", "Open");
+            var ow = UI.PillWidth(null, openLbl); bx -= ow;
+            if (UI.Pill(UI.Id("set:odir"), bx, dr.Y + 12, 34, null, openLbl, out _))
             {
                 try { Directory.CreateDirectory(s.DownloadDir); W.Open(s.DownloadDir); }
-                catch (Exception e) { Shell.Toast("Не удалось открыть папку: " + e.Message, Th.Warn); }
+                catch (Exception e) { Shell.Toast(L.T("Не удалось открыть папку: ", "Could not open folder: ") + e.Message, Th.Warn); }
             }
-            var pw = UI.PillWidth(null, "Выбрать…"); bx -= pw + 8;
-            if (UI.Pill(UI.Id("set:pdir"), bx, dr.Y + 12, 34, null, "Выбрать…", out _))
-                App.Post(() => Dialogs.PickFolderAsync("Папка для загрузок", d => { s.DownloadDir = d; Saved(); }));
+            var pickLbl = L.T("Выбрать…", "Browse…");
+            var pw = UI.PillWidth(null, pickLbl); bx -= pw + 8;
+            if (UI.Pill(UI.Id("set:pdir"), bx, dr.Y + 12, 34, null, pickLbl, out _))
+                App.Post(() => Dialogs.PickFolderAsync(L.T("Папка для загрузок", "Downloads folder"), d => { s.DownloadDir = d; Saved(); }));
         }
-        ChoiceRow("dq", "Качество по умолчанию", s.DownloadQuality, AppSettings.Qualities, v => s.DownloadQuality = v);
-        ToggleRow("sbd", "Вырезать спонсорские вставки из скачанных файлов", s.SponsorBlockOnDownload, v => s.SponsorBlockOnDownload = v);
+        ChoiceRow("dq", L.T("Качество по умолчанию", "Default quality"), s.DownloadQuality, AppSettings.Qualities, v => s.DownloadQuality = v);
+        ToggleRow("sbd", L.T("Вырезать спонсорские вставки из скачанных файлов", "Remove SponsorBlock segments from downloads"), s.SponsorBlockOnDownload, v => s.SponsorBlockOnDownload = v);
 
-        Section("Кэш просмотренного");
+        Section(L.T("Кэш просмотренного", "Media Cache"));
         if (UI.Now - _cacheAt > 2000) { _cacheAt = UI.Now; ThreadPool.QueueUserWorkItem(_ => { _cacheBytes = MediaCache.TotalBytes(); App.WakeUi(); }); }
-        var lr = Row("Лимит на диске", "Часто включаемое (музыка) хранится долго; просмотренное один раз удаляется через неделю, а при переполнении уходит первым.", 58, 170);
+        var lr = Row(L.T("Лимит на диске", "Disk limit"),
+            L.T("Часто включаемое (музыка) хранится долго; просмотренное один раз удаляется через неделю, а при переполнении уходит первым.", "Frequently replayed media (music) stays cached; one-off watches expire after a week or when full."), 58, 170);
         if (Visible(lr.Y, lr.H))
         {
             var lim = CacheName(s.CacheLimitMb);
@@ -726,29 +861,33 @@ public sealed class SettingsPage : IPage
                     ThreadPool.QueueUserWorkItem(_ => { if (mb == 0) MediaCache.Clear(); else MediaCache.Enforce(); });
                 }, null, mb == s.CacheLimitMb)).ToList());
         }
-        var ur2 = Row("Сейчас занято", $"{Fmt.Size(_cacheBytes)} из {CacheName(s.CacheLimitMb)}. Потоки хранятся как их отдаёт YouTube (AV1/VP9 и Opus).", 58, 150);
+        var ur2 = Row(L.T("Сейчас занято", "Used space"),
+            L.T($"{Fmt.Size(_cacheBytes)} из {CacheName(s.CacheLimitMb)}. Потоки хранятся как их отдаёт YouTube (AV1/VP9 и Opus).",
+                $"{Fmt.Size(_cacheBytes)} of {CacheName(s.CacheLimitMb)}. Streams are stored directly as served by YouTube (AV1/VP9 & Opus)."), 58, 150);
         if (Visible(ur2.Y, ur2.H))
         {
-            var cw2 = UI.PillWidth(null, "Очистить");
-            if (UI.Pill(UI.Id("set:cclear"), ur2.Right - cw2 - 14, ur2.Y + 12, 34, null, "Очистить", out _))
+            var clrLbl = L.T("Очистить", "Clear");
+            var cw2 = UI.PillWidth(null, clrLbl);
+            if (UI.Pill(UI.Id("set:cclear"), ur2.Right - cw2 - 14, ur2.Y + 12, 34, null, clrLbl, out _))
                 ThreadPool.QueueUserWorkItem(_ => { MediaCache.Clear(); _cacheAt = 0; App.WakeUi(); });
         }
-        ToggleRow("qs", "Быстрый старт нового видео", s.QuickStart, v => s.QuickStart = v, "Прямой запрос потока без ожидания yt-dlp");
+        ToggleRow("qs", L.T("Быстрый старт нового видео", "Instant video quick-start"), s.QuickStart, v => s.QuickStart = v, L.T("Прямой запрос потока без ожидания yt-dlp", "Direct stream lookup without waiting for yt-dlp"));
 
-        Section("Сеть");
-        ToggleRow("imp", "Отпечаток Chrome при загрузке с других сайтов", s.Impersonate, v => s.Impersonate = v, "TLS и HTTP/2 как у настоящего браузера (curl_cffi)");
-        EditInRow(_proxy, Row("Прокси", "Пусто — использовать прокси Windows, если он включён", 58, 410), 380);
+        Section(L.T("Сеть", "Network"));
+        ToggleRow("imp", L.T("Отпечаток Chrome при загрузке с других сайтов", "Chrome fingerprint for external sites"), s.Impersonate, v => s.Impersonate = v, L.T("TLS и HTTP/2 как у настоящего браузера (curl_cffi)", "Browser-like TLS and HTTP/2 via curl_cffi"));
+        EditInRow(_proxy, Row(L.T("Прокси", "Proxy"), L.T("Пусто — использовать прокси Windows, если он включён", "Leave blank to use Windows system proxy when enabled"), 58, 410), 380);
         var route = string.IsNullOrWhiteSpace(s.Proxy)
-            ? YtDlp.EffectiveProxy is null ? "Напрямую" : "Системный прокси Windows"
-            : "Прокси FluxTube";
-        Row("Маршрут YouTube", route, 50, 410);
-        EditInRow(_hl, Row("Язык YouTube", null, 50, 160), 120);
-        EditInRow(_gl, Row("Регион", null, 50, 160), 120);
-        var ur = Row("Движок загрузки", _version, 58, 210);
+            ? YtDlp.EffectiveProxy is null ? L.T("Напрямую", "Direct") : L.T("Системный прокси Windows", "Windows system proxy")
+            : L.T("Прокси FluxTube", "FluxTube proxy");
+        Row(L.T("Маршрут YouTube", "YouTube route"), route, 50, 410);
+        EditInRow(_hl, Row(L.T("Язык YouTube", "YouTube language"), null, 50, 160), 120);
+        EditInRow(_gl, Row(L.T("Регион", "Region"), null, 50, 160), 120);
+        var ur = Row(L.T("Движок загрузки", "Download engine"), _version, 58, 210);
         if (Visible(ur.Y, ur.H))
         {
-            var uw = UI.PillWidth(null, _updating ? "Обновляю…" : "Обновить сейчас");
-            if (UI.Pill(UI.Id("set:upd"), ur.Right - uw - 14, ur.Y + 12, 34, null, _updating ? "Обновляю…" : "Обновить сейчас", out _) && !_updating)
+            var updLbl = _updating ? L.T("Обновляю…", "Updating…") : L.T("Обновить сейчас", "Update now");
+            var uw = UI.PillWidth(null, updLbl);
+            if (UI.Pill(UI.Id("set:upd"), ur.Right - uw - 14, ur.Y + 12, 34, null, updLbl, out _) && !_updating)
             {
                 _updating = true;
                 _ = Task.Run(async () =>
@@ -759,11 +898,11 @@ public sealed class SettingsPage : IPage
                         await YtDlp.UpdateIfStaleAsync();
                         await Resolver.ProvisionAsync();
                         await ShowVersionAsync();
-                        App.Post(() => Shell.Toast("yt-dlp обновлён", Th.Good));
+                        App.Post(() => Shell.Toast(L.T("yt-dlp обновлён", "yt-dlp updated"), Th.Good));
                     }
                     catch (Exception ex)
                     {
-                        App.Post(() => Shell.Toast("Ошибка обновления yt-dlp: " + ex.Message, Th.Warn));
+                        App.Post(() => Shell.Toast(L.T("Ошибка обновления yt-dlp: ", "yt-dlp update error: ") + ex.Message, Th.Warn));
                     }
                     finally
                     {
@@ -773,7 +912,7 @@ public sealed class SettingsPage : IPage
             }
         }
 
-        Section("Обновления");
+        Section(L.T("Обновления", "Updates"));
         var upr = Row($"FluxTube {Updater.CurrentVersion}", Updater.StatusText, Updater.Downloading ? 66 : 58, 320);
         if (Visible(upr.Y, upr.H))
         {
@@ -784,35 +923,39 @@ public sealed class SettingsPage : IPage
                 float bx = upr.Right - 14;
                 if (Updater.HasUpdate)
                 {
-                    var instLabel = $"Установить {Updater.AvailableVersion}";
+                    var instLabel = L.T($"Установить {Updater.AvailableVersion}", $"Install {Updater.AvailableVersion}");
                     var iw = UI.PillWidth(Th.Download, instLabel); bx -= iw;
                     if (UI.Pill(UI.Id("set:appupd:go"), bx, upr.Y + 12, 34, Th.Download, instLabel, out _, accent: true))
                         App.Post(Updater.DownloadAndInstall);
                     bx -= 8;
                 }
-                var chkLabel = Updater.Checking ? "Проверяю…" : "Проверить";
+                var chkLabel = Updater.Checking ? L.T("Проверяю…", "Checking…") : L.T("Проверить", "Check");
                 var cw3 = UI.PillWidth(Th.Refresh, chkLabel); bx -= cw3;
                 if (UI.Pill(UI.Id("set:appupd:chk"), bx, upr.Y + 12, 34, Th.Refresh, chkLabel, out _) && !Updater.Checking)
                     App.Post(() => Updater.Check(manual: true));
             }
         }
 
-        Section("Данные");
-        var da = Row("Папка данных и журнал", Paths.Data, 58, 280);
+        Section(L.T("Данные", "Data"));
+        var da = Row(L.T("Папка данных и журнал", "Data folder & log"), Paths.Data, 58, 280);
         if (Visible(da.Y, da.H))
         {
             float bx = da.Right - 14;
-            var l1 = UI.PillWidth(null, "Журнал"); bx -= l1;
-            if (UI.Pill(UI.Id("set:log"), bx, da.Y + 12, 34, null, "Журнал", out _)) W.Open(Path.Combine(Paths.Logs, "app.log"));
-            var l2 = UI.PillWidth(null, "Открыть папку"); bx -= l2 + 8;
-            if (UI.Pill(UI.Id("set:data"), bx, da.Y + 12, 34, null, "Открыть папку", out _)) W.Open(Paths.Data);
+            var logLbl = L.T("Журнал", "Log");
+            var l1 = UI.PillWidth(null, logLbl); bx -= l1;
+            if (UI.Pill(UI.Id("set:log"), bx, da.Y + 12, 34, null, logLbl, out _)) W.Open(Path.Combine(Paths.Logs, "app.log"));
+            var dirLbl = L.T("Открыть папку", "Open folder");
+            var l2 = UI.PillWidth(null, dirLbl); bx -= l2 + 8;
+            if (UI.Pill(UI.Id("set:data"), bx, da.Y + 12, 34, null, dirLbl, out _)) W.Open(Paths.Data);
         }
 
         if (UI.Now - _statsAt > 1000)
         {
             _statsAt = UI.Now;
             using var proc = Process.GetCurrentProcess();
-            _stats = $"Кадр {App.LastFrameMs:0.00} мс · память {proc.WorkingSet64 >> 20} МБ · превью на GPU {Images.GpuBytes >> 20} МБ";
+            _stats = L.T(
+                $"Кадр {App.LastFrameMs:0.00} мс · память {proc.WorkingSet64 >> 20} МБ · превью на GPU {Images.GpuBytes >> 20} МБ",
+                $"Frame {App.LastFrameMs:0.00} ms · RAM {proc.WorkingSet64 >> 20} MB · GPU thumbs {Images.GpuBytes >> 20} MB");
         }
         if (Visible(_y + 10, 20)) Gfx.Draw(_stats, _x, _y + 10, 12, Th.Dim);
         var needH = _y + 50 + scroll - r.Y;

@@ -93,6 +93,14 @@ public static unsafe class Gfx
     private static uint _backdropBg, _backdropBrand;
     private static bool _backdropLight, _backdropStrong;
     private static long _backdropBakedAt;
+    // Hardware-accelerated Direct2D DirectionalBlur resources (lazily allocated only when UI Motion Blur triggers)
+    private static ID2D1Bitmap1? _mbBmp;
+    private static ID2D1Effect? _mbEffect;
+    private static int _mbBmpW, _mbBmpH;
+    private static float _mbBmpScale;
+    private static int _mbDepth, _mbSavedClips;
+    private static R _mbRegion;
+    private static float _mbStdDev, _mbAngle;
     private sealed class RadialSlot
     {
         public ID2D1GradientStopCollection? Stops;
@@ -144,7 +152,7 @@ public static unsafe class Gfx
         var desc = new SwapChainDescription1
         {
             Width = (uint)PxW, Height = (uint)PxH, Format = Format.B8G8R8A8_UNorm,
-            SampleDescription = new SampleDescription(1, 0), BufferUsage = Usage.RenderTargetOutput, BufferCount = 2,
+            SampleDescription = new SampleDescription(1, 0), BufferUsage = Usage.RenderTargetOutput, BufferCount = 3,
             Scaling = Scaling.None, SwapEffect = SwapEffect.FlipDiscard, AlphaMode = Vortice.DXGI.AlphaMode.Ignore,
         };
         _swap = factory.CreateSwapChainForHwnd(_dev, _hwnd, desc);
@@ -431,6 +439,7 @@ public static unsafe class Gfx
         _backdropBmp?.Dispose();
         _backdropBmp = null;
         _backdropBg = 0;
+        DisposeMotionBlurResources();
         foreach (var s in _radials) s.Dispose();
         ClearTextCache();
         while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
@@ -451,6 +460,135 @@ public static unsafe class Gfx
         var hr = _swap.Present(0, PresentFlags.Test);
         Occluded = hr.Code == 0x087A0001; // DXGI_STATUS_OCCLUDED
         return Occluded;
+    }
+
+    private static void DisposeMotionBlurResources()
+    {
+        _mbEffect?.Dispose();
+        _mbEffect = null;
+        _mbBmp?.Dispose();
+        _mbBmp = null;
+        _mbBmpW = _mbBmpH = 0;
+        _mbBmpScale = 0;
+        _mbDepth = 0;
+    }
+
+    private static void EnsureMotionBlurResources()
+    {
+        if (PxW <= 0 || PxH <= 0) return;
+        if (_mbBmp == null || _mbBmpW != PxW || _mbBmpH != PxH || MathF.Abs(_mbBmpScale - Scale) > 0.001f)
+        {
+            _mbBmp?.Dispose();
+            _mbBmp = DC.CreateBitmap(new SizeI(PxW, PxH),
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96 * Scale, 96 * Scale, BitmapOptions.Target));
+            _mbBmpW = PxW;
+            _mbBmpH = PxH;
+            _mbBmpScale = Scale;
+        }
+        if (_mbEffect == null)
+        {
+            var ptr = DC.CreateEffect(EffectGuids.DirectionalBlur);
+            if (ptr != 0) _mbEffect = new ID2D1Effect(ptr);
+        }
+    }
+
+    /// <summary>
+    /// Redirects drawing inside <paramref name="region"/> to an offscreen GPU target and composites it back
+    /// through Direct2D's hardware DirectionalBlur shader oriented along the exact motion vector (vx, vy) in DIPs/sec.
+    /// Zero overhead when stationary or disabled (returns false without touching DC.Target).
+    /// </summary>
+    public static bool PushMotionBlur(R region, float vx, float vy)
+    {
+        var s = Services.AppSettings.Current;
+        if (!s.UiMotionBlur || _target == null || _mbDepth > 0 || region.W < 4 || region.H < 4)
+            return false;
+
+        float speed = MathF.Sqrt(vx * vx + vy * vy);
+        if (speed < 240f) return false;
+
+        float mult = s.UiMotionBlurStrength switch
+        {
+            "soft" => 0.00055f,
+            "cinema" => 0.00165f,
+            _ => 0.00095f, // "medium"
+        };
+        float maxDev = s.UiMotionBlurStrength switch
+        {
+            "soft" => 2.0f,
+            "cinema" => 6.2f,
+            _ => 3.6f,
+        };
+        float stdDev = Math.Clamp((speed - 240f) * mult, 0f, maxDev);
+        if (stdDev < 0.25f) return false;
+
+        var effRegion = Clip.Intersect(region);
+        if (effRegion.W < 4 || effRegion.H < 4) return false;
+
+        try
+        {
+            EnsureMotionBlurResources();
+            if (_mbBmp == null || _mbEffect == null) return false;
+
+            int savedClips = _clipDepth;
+            for (int i = savedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
+
+            DC.Target = _mbBmp;
+            float pad = MathF.Ceiling(stdDev * 3.2f) + 6f;
+            var clearR = new R(0, 0, W, H).Intersect(effRegion.Inset(-pad));
+            DC.PushAxisAlignedClip(Raw(clearR), AntialiasMode.Aliased);
+            DC.Clear(new Color4(0, 0, 0, 0));
+            DC.PopAxisAlignedClip();
+
+            for (int i = 0; i < savedClips; i++)
+                DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
+            DC.PushAxisAlignedClip(Raw(effRegion), AntialiasMode.Aliased);
+
+            _mbDepth = 1;
+            _mbSavedClips = savedClips;
+            _mbRegion = effRegion;
+            _mbStdDev = stdDev;
+            // Direct2D DirectionalBlur Angle expects [0, 360]; negative angles clamp to 0 (horizontal)!
+            float ang = (MathF.Atan2(vy, vx) * (180f / MathF.PI)) % 180f;
+            if (ang < 0f) ang += 180f;
+            _mbAngle = ang;
+            return true;
+        }
+        catch
+        {
+            _mbDepth = 0;
+            return false;
+        }
+    }
+
+    public static void PopMotionBlur(bool active)
+    {
+        if (!active || _mbDepth == 0) return;
+        _mbDepth = 0;
+        if (_target == null || _mbBmp == null || _mbEffect == null) return;
+
+        DC.PopAxisAlignedClip();
+        for (int i = _mbSavedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
+
+        DC.Target = _target;
+
+        for (int i = 0; i < _mbSavedClips; i++)
+            DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
+
+        _mbEffect.SetInput(0, _mbBmp, true);
+        float dev = _mbStdDev;
+        float ang = _mbAngle;
+        uint opt = (uint)DirectionalBlurOptimization.Balanced;
+        uint bm = (uint)BorderMode.Hard;
+        _mbEffect.SetValue((uint)DirectionalBlurProperties.StandardDeviation, PropertyType.Float, &dev, sizeof(float));
+        _mbEffect.SetValue((uint)DirectionalBlurProperties.Angle, PropertyType.Float, &ang, sizeof(float));
+        _mbEffect.SetValue((uint)DirectionalBlurProperties.Optimization, PropertyType.Enum, &opt, sizeof(uint));
+        _mbEffect.SetValue((uint)DirectionalBlurProperties.BorderMode, PropertyType.Enum, &bm, sizeof(uint));
+
+        DC.PushAxisAlignedClip(Raw(_mbRegion), AntialiasMode.Aliased);
+        using var outImg = _mbEffect.Output;
+        DC.DrawImage(outImg, new Vector2(_mbRegion.X, _mbRegion.Y), Raw(_mbRegion),
+            Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+        DC.PopAxisAlignedClip();
     }
 
     private static float TargetScale() => (Win.GetDpiForWindow(_hwnd) / 96f) * Math.Clamp(Services.AppSettings.Current.UiScale, 0.7f, 1.5f);
@@ -474,6 +612,8 @@ public static unsafe class Gfx
         DC.Target = null;
         _target?.Dispose();
         _target = null;
+        _mbBmp?.Dispose();
+        _mbBmp = null;
         ClearTextCache();
         CreateTarget();
         App.Invalidate();
@@ -490,6 +630,8 @@ public static unsafe class Gfx
         DC.Target = null;
         _target?.Dispose();
         _target = null;
+        _mbBmp?.Dispose();
+        _mbBmp = null;
         var hr = _swap.ResizeBuffers(0, (uint)w, (uint)h, Format.Unknown, SwapChainFlags.None);
         if (hr.Failure && IsDeviceLost(hr.Code))
         {
@@ -755,7 +897,7 @@ public static unsafe class Gfx
     private static (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH) FormatLocked(FKey k)
     {
         if (_formats.TryGetValue(k, out var f)) return f;
-        var fmt = _dw.CreateTextFormat(k.Lucide ? "lucide" : k.Icon ? IconFont : Font, k.Lucide ? _lucideFonts : null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, "ru-ru");
+        var fmt = _dw.CreateTextFormat(k.Lucide ? "lucide" : k.Icon ? IconFont : Font, k.Lucide ? _lucideFonts : null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, Services.L.En ? "en-us" : "ru-ru");
         using var probe = _dw.CreateTextLayout("Ag", fmt, 1000, 1000);
         return _formats[k] = (fmt, _dw.CreateEllipsisTrimmingSign(fmt), probe.Metrics.Height);
     }
@@ -880,7 +1022,7 @@ public static unsafe class Gfx
         _prev = new Dictionary<TKey, TextRun>();
     }
 
-    private static void ClearTextCache()
+    public static void ClearTextCache()
     {
         foreach (var r in _prev.Values) r.Layout?.Dispose();
         foreach (var r in _cur.Values) r.Layout?.Dispose();

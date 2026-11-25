@@ -4,25 +4,50 @@ using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
+using FluxTube.Models;
 using FluxTube.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.Win32;
 
 namespace FluxTube;
 
+public enum LoginPhase { Idle, Launching, WaitingForUser, Verifying, Success, Error }
+
 /// <summary>
-/// Account sign-in using the user's DEFAULT Windows browser (Chrome, Edge, Brave, Opera, Vivaldi, Yandex, etc.)
-/// via an isolated clean profile + local CDP WebSocket session, plus optional Netscape cookies.txt import fallback.
-/// Supports adding unlimited Google/YouTube accounts with 1-click swapping in AccountMenu.
+/// Unified, effortless YouTube sign-in engine:
+/// 1. Primary 1-click sign-in via an isolated Chromium --app popup window (Chrome / Edge / Brave / Yandex / Opera / Vivaldi)
+///    with live CDP cookie capture, brand-account / channel-switcher awareness, 2FA/Passkey support, and zero browser lock conflicts.
+/// 2. Zero-friction verification mode that pre-injects existing cookies so bot checks take 2 seconds without re-typing passwords.
+/// 3. Instant 1-click native SQLite import from Firefox / Zen / LibreWolf (works even while the browser is running).
+/// 4. Universal clipboard/file cookie importer supporting Netscape cookies.txt, JSON (Cookie-Editor/EditThisCookie), and raw Cookie headers.
 /// </summary>
 public static class BrowserLogin
 {
     private static int _authBusy;
-    private static int _importBusy;
+    private static CancellationTokenSource? _authCts;
+    private static Process? _authProc;
+    private static volatile bool _finishRequested;
     private static string? _cachedBrowserName;
     private static string? _cachedBrowserExe;
     private static bool _cachedChromium;
+    private static string? _chromiumExe;
+    private static string? _chromiumName;
+    private static bool _chromiumChecked;
+    private static (string Name, string DbPath)? _firefoxCache;
+    private static long _firefoxCheckedAt;
+
+    public static LoginPhase Phase { get; private set; } = LoginPhase.Idle;
+    public static string StatusText { get; private set; } = "";
+    public static string ErrorText { get; private set; } = "";
+    public static string ActiveEngineName { get; private set; } = "";
+    public static bool IsVerification { get; private set; }
+    public static bool HasCapturedCookies { get; private set; }
+    public static Account? SignedInAccount { get; private set; }
+    public static long SuccessAt { get; private set; }
+
+    public static bool IsBusy => Volatile.Read(ref _authBusy) != 0;
 
     private static readonly (string ExeStem, string Friendly, bool Chromium)[] KnownBrowsers =
     [
@@ -31,7 +56,7 @@ public static class BrowserLogin
         ("brave", "Brave", true),
         ("opera", "Opera", true),
         ("vivaldi", "Vivaldi", true),
-        ("browser", "Яндекс Браузер", true),
+        ("browser", "Yandex Browser", true),
         ("chromium", "Chromium", true),
         ("thorium", "Thorium", true),
         ("arc", "Arc", true),
@@ -42,12 +67,31 @@ public static class BrowserLogin
 
     public static string DefaultBrowserName
     {
-        get { EnsureDetected(); return _cachedBrowserName ?? "браузер"; }
+        get { EnsureDetected(); return _cachedBrowserName ?? L.T("браузер", "browser"); }
     }
 
-    public static bool IsDefaultBrowserChromium
+    public static string BestSignInEngineName
     {
-        get { EnsureDetected(); return _cachedChromium && !string.IsNullOrEmpty(_cachedBrowserExe); }
+        get
+        {
+            EnsureChromiumEngine();
+            if (!string.IsNullOrEmpty(_chromiumName)) return _chromiumName;
+            if (HasWebViewHelper) return "WebView2";
+            EnsureDetected();
+            return _cachedBrowserName ?? "Browser";
+        }
+    }
+
+    public static bool HasWebViewHelper => File.Exists(Path.Combine(AppContext.BaseDirectory, "web", "FluxTube.exe"));
+
+    public static void ResetUiState()
+    {
+        if (IsBusy) return;
+        Phase = LoginPhase.Idle;
+        StatusText = "";
+        ErrorText = "";
+        HasCapturedCookies = false;
+        SignedInAccount = null;
     }
 
     private static void EnsureDetected()
@@ -85,25 +129,57 @@ public static class BrowserLogin
         }
         catch (Exception e) { Paths.Log("default browser detect: " + e.Message); }
 
-        // Fallback probe if UserChoice was unreadable
-        string[] fallbacks =
-        [
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Google\Chrome\Application\chrome.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"Microsoft\Edge\Application\msedge.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Microsoft\Edge\Application\msedge.exe"),
-        ];
-        foreach (var f in fallbacks)
+        EnsureChromiumEngine();
+        if (_chromiumExe != null)
         {
-            if (File.Exists(f))
+            _cachedBrowserExe = _chromiumExe;
+            _cachedBrowserName = _chromiumName;
+            _cachedChromium = true;
+            return;
+        }
+        _cachedBrowserName = "Browser";
+        _cachedChromium = false;
+    }
+
+    /// <summary>Finds the best Chromium browser on Windows (default browser first if Chromium, otherwise Chrome -> Edge -> Brave -> Yandex -> Vivaldi -> Opera).</summary>
+    private static void EnsureChromiumEngine()
+    {
+        if (_chromiumChecked) return;
+        _chromiumChecked = true;
+        EnsureDetected();
+        if (_cachedChromium && !string.IsNullOrEmpty(_cachedBrowserExe) && File.Exists(_cachedBrowserExe))
+        {
+            _chromiumExe = _cachedBrowserExe;
+            _chromiumName = _cachedBrowserName;
+            return;
+        }
+
+        string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        (string Path, string Name)[] candidates =
+        [
+            (Path.Combine(pf, @"Google\Chrome\Application\chrome.exe"), "Google Chrome"),
+            (Path.Combine(pf86, @"Google\Chrome\Application\chrome.exe"), "Google Chrome"),
+            (Path.Combine(local, @"Google\Chrome\Application\chrome.exe"), "Google Chrome"),
+            (Path.Combine(pf86, @"Microsoft\Edge\Application\msedge.exe"), "Microsoft Edge"),
+            (Path.Combine(pf, @"Microsoft\Edge\Application\msedge.exe"), "Microsoft Edge"),
+            (Path.Combine(pf, @"BraveSoftware\Brave-Browser\Application\brave.exe"), "Brave"),
+            (Path.Combine(local, @"BraveSoftware\Brave-Browser\Application\brave.exe"), "Brave"),
+            (Path.Combine(local, @"Yandex\YandexBrowser\Application\browser.exe"), "Yandex Browser"),
+            (Path.Combine(local, @"Vivaldi\Application\vivaldi.exe"), "Vivaldi"),
+            (Path.Combine(local, @"Programs\Opera\opera.exe"), "Opera"),
+            (Path.Combine(local, @"Programs\Opera GX\opera.exe"), "Opera GX"),
+        ];
+        foreach (var (p, name) in candidates)
+        {
+            if (File.Exists(p))
             {
-                _cachedBrowserExe = f;
-                _cachedBrowserName = f.Contains("chrome", StringComparison.OrdinalIgnoreCase) ? "Google Chrome" : "Microsoft Edge";
-                _cachedChromium = true;
+                _chromiumExe = p;
+                _chromiumName = name;
                 return;
             }
         }
-        _cachedBrowserName = "браузер";
-        _cachedChromium = false;
     }
 
     private static string? ExtractExePath(string? cmd)
@@ -126,123 +202,226 @@ public static class BrowserLogin
         return ((IPEndPoint)l.LocalEndpoint).Port;
     }
 
-    /// <summary>Use the browser's normal profile, then import its existing YouTube session on the user's click.</summary>
-    public static void OpenExistingBrowserForLogin()
+    // ---------------- Firefox / Zen / LibreWolf instant 1-click native SQLite detector ----------------
+
+    public static (string Name, string DbPath)? DetectFirefoxSession()
     {
-        var chrome = new[]
-        {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"Google\Chrome\Application\chrome.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), @"Google\Chrome\Application\chrome.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Google\Chrome\Application\chrome.exe"),
-        }.FirstOrDefault(File.Exists);
-        EnsureDetected();
-        var browser = chrome != null ? "chrome" : _cachedBrowserExe != null && Path.GetFileNameWithoutExtension(_cachedBrowserExe).Equals("firefox", StringComparison.OrdinalIgnoreCase) ? "firefox" : null;
+        long now = Environment.TickCount64;
+        if (_firefoxCheckedAt > 0 && now - _firefoxCheckedAt < 15_000) return _firefoxCache;
+        _firefoxCheckedAt = now;
+        _firefoxCache = null;
         try
         {
-            if (chrome != null)
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            (string Name, string Dir)[] roots =
+            [
+                ("Firefox", Path.Combine(appData, @"Mozilla\Firefox\Profiles")),
+                ("Zen Browser", Path.Combine(appData, @"zen\Profiles")),
+                ("LibreWolf", Path.Combine(appData, @"librewolf\Profiles")),
+            ];
+            DateTime bestTime = DateTime.MinValue;
+            foreach (var (name, root) in roots)
             {
-                var psi = new ProcessStartInfo(chrome) { UseShellExecute = true };
-                psi.ArgumentList.Add("https://www.youtube.com/");
-                Process.Start(psi);
+                if (!Directory.Exists(root)) continue;
+                foreach (var prof in Directory.GetDirectories(root))
+                {
+                    var db = Path.Combine(prof, "cookies.sqlite");
+                    if (!File.Exists(db)) continue;
+                    var mt = File.GetLastWriteTimeUtc(db);
+                    if (mt > bestTime)
+                    {
+                        bestTime = mt;
+                        _firefoxCache = (name, db);
+                    }
+                }
             }
-            else W.Open("https://www.youtube.com/");
-            if (browser != null)
-                Shell.Toast($"Войдите в YouTube в обычном { (browser == "chrome" ? "Chrome" : "Firefox") } и пройдите проверку. Затем нажмите здесь, чтобы взять вход.", Th.Good, 120_000,
-                    () => ImportFromBrowser(browser));
-            else Shell.Toast("После входа импортируйте cookies.txt через меню аккаунта.", Th.Warn, 9000);
         }
-        catch (Exception e) { Shell.Toast("Не удалось открыть браузер: " + e.Message, Th.Warn, 7000); }
+        catch { }
+        return _firefoxCache;
     }
 
-    public static void ImportFromBrowser(string browser)
+    public static bool HasFirefox => DetectFirefoxSession() != null;
+
+    public static void ImportFromFirefox() => ImportFromFirefoxDirect();
+
+    /// <summary>Copies Firefox's cookies.sqlite (+ WAL/SHM) to temp and reads YouTube cookies natively in C# — works even while Firefox is open.</summary>
+    public static void ImportFromFirefoxDirect()
     {
-        if (browser is not ("chrome" or "firefox")) return;
-        if (Interlocked.CompareExchange(ref _importBusy, 1, 0) != 0) return;
-        Shell.Toast($"Получаю вход из {(browser == "chrome" ? "Chrome" : "Firefox")}…", Th.Sub, 3500);
+        var found = DetectFirefoxSession();
+        if (found == null)
+        {
+            Shell.Toast(L.T("Профиль Firefox не найден", "No Firefox profile found"), Th.Warn);
+            return;
+        }
+        var (name, dbPath) = found.Value;
+        Phase = LoginPhase.Verifying;
+        StatusText = L.T($"Читаю сессию {name}…", $"Reading {name} session…");
+        App.Invalidate();
+
         _ = Task.Run(async () =>
         {
-            var tempFile = Path.Combine(Paths.Data, "cookies-import-" + Guid.NewGuid().ToString("N") + ".txt");
+            var tmpDir = Path.Combine(Path.GetTempPath(), "fluxtube-ff-" + Guid.NewGuid().ToString("N")[..8]);
             try
             {
-                var script = Path.Combine(AppContext.BaseDirectory, "Assets", "browsercookies.py");
-                if (!File.Exists(Paths.PyExe) || !File.Exists(script)) throw new IOException("Модуль импорта cookies ещё не готов");
-                var psi = new ProcessStartInfo(Paths.PyExe)
+                Directory.CreateDirectory(tmpDir);
+                var tmpDb = Path.Combine(tmpDir, "cookies.sqlite");
+                CopyUnlocked(dbPath, tmpDb);
+                if (File.Exists(dbPath + "-wal")) CopyUnlocked(dbPath + "-wal", tmpDb + "-wal");
+                if (File.Exists(dbPath + "-shm")) CopyUnlocked(dbPath + "-shm", tmpDb + "-shm");
+
+                var cookies = ReadFirefoxCookies(tmpDb);
+                if (!HasAuthCookies(cookies))
                 {
-                    UseShellExecute = false, CreateNoWindow = true,
-                    RedirectStandardOutput = true, RedirectStandardError = true,
-                };
-                foreach (var arg in new[] { "-I", script, browser, tempFile }) psi.ArgumentList.Add(arg);
-                using var proc = Process.Start(psi)!;
-                var output = proc.StandardOutput.ReadToEndAsync();
-                var errors = proc.StandardError.ReadToEndAsync();
-                using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(25));
-                try { await proc.WaitForExitAsync(limit.Token); }
-                catch (OperationCanceledException) { proc.Kill(true); throw new IOException("Импорт cookies занял слишком много времени"); }
-                _ = await output;
-                var error = await errors;
-                if (proc.ExitCode != 0)
-                {
-                    Paths.Log("browser cookies import: " + error.Split('\n').LastOrDefault(l => l.Trim().Length > 0));
-                    throw new IOException(browser == "chrome" && error.Contains("Could not copy Chrome cookie database", StringComparison.OrdinalIgnoreCase)
-                        ? "Chrome держит файл cookies открытым. Закройте Chrome и повторите импорт через меню аккаунта."
-                        : "В браузере не найден действующий вход в YouTube");
+                    App.Post(() =>
+                    {
+                        Phase = LoginPhase.Error;
+                        ErrorText = L.T($"В {name} не найден активный вход в YouTube. Войдите через Google выше.",
+                                        $"No active YouTube sign-in found in {name}. Use Sign in with Google above.");
+                        App.Invalidate();
+                    });
+                    return;
                 }
-                App.Post(() =>
-                {
-                    try { ImportFromFile(tempFile); }
-                    finally { try { File.Delete(tempFile); } catch { } }
-                });
+                await FinalizeSignInAsync(cookies, name, isVerification: false);
             }
             catch (Exception e)
             {
-                Paths.Log("browser cookies import: " + e.Message);
-                App.Post(() => Shell.Toast(e.Message, Th.Warn, 9000));
-                try { if (File.Exists(tempFile)) File.Delete(tempFile); } catch { }
+                Paths.Log("firefox direct import: " + e.Message);
+                App.Post(() =>
+                {
+                    Phase = LoginPhase.Error;
+                    ErrorText = L.T($"Не удалось импортировать из {name}: ", $"Could not import from {name}: ") + e.Message;
+                    App.Invalidate();
+                });
             }
-            finally { Interlocked.Exchange(ref _importBusy, 0); }
+            finally
+            {
+                try { if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true); } catch { }
+            }
         });
     }
 
-    /// <summary>
-    /// Opens the user's real default browser (Chrome / Edge / Brave / Opera / Vivaldi / Yandex) in an isolated
-    /// sign-in window, waits for Google/YouTube login via local CDP WebSocket, imports cookies automatically,
-    /// saves to the multi-account vault, and closes the auth window. Falls back to built-in WebView2 if non-Chromium.
-    /// </summary>
-    public static void LoginWithDefaultBrowser(bool verification = false)
+    private static void CopyUnlocked(string src, string dst)
     {
-        EnsureDetected();
-        if (!_cachedChromium || string.IsNullOrEmpty(_cachedBrowserExe) || !File.Exists(_cachedBrowserExe))
+        using var input = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var output = new FileStream(dst, FileMode.Create, FileAccess.Write, FileShare.None);
+        input.CopyTo(output);
+    }
+
+    private static List<CookieStore.Cookie> ReadFirefoxCookies(string cookieDb)
+    {
+        var cookies = new List<CookieStore.Cookie>();
+        var cs = new SqliteConnectionStringBuilder { DataSource = cookieDb, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString();
+        using var db = new SqliteConnection(cs);
+        db.Open();
+        using var cmd = db.CreateCommand();
+        cmd.CommandText = "SELECT host, path, isSecure, expiry, name, value, isHttpOnly FROM moz_cookies WHERE originAttributes = ''";
+        using var rows = cmd.ExecuteReader();
+        while (rows.Read())
         {
-            if (verification && _cachedBrowserExe != null && File.Exists(_cachedBrowserExe)
-                && Path.GetFileNameWithoutExtension(_cachedBrowserExe).Equals("firefox", StringComparison.OrdinalIgnoreCase))
+            var domain = rows.GetString(0);
+            if (!IsGoogleOrYouTubeDomain(domain.TrimStart('.'))) continue;
+            cookies.Add(new CookieStore.Cookie(domain, domain.StartsWith('.'), rows.GetString(1), rows.GetInt64(2) != 0,
+                rows.GetInt64(3), rows.GetString(4), rows.GetString(5), rows.GetInt64(6) != 0));
+        }
+        return cookies;
+    }
+
+    // ---------------- Primary 1-Click Clean App-Mode Sign-In (Chromium CDP) ----------------
+
+    public static void FocusAuthWindow()
+    {
+        try
+        {
+            var p = _authProc;
+            if (p == null || p.HasExited) return;
+            p.Refresh();
+            var h = p.MainWindowHandle;
+            if (h != 0)
             {
-                VerifyWithFirefox(_cachedBrowserExe);
+                if (W.IsIconic(h)) W.ShowWindow(h, W.SW_SHOWNORMAL);
+                W.SetForegroundWindow(h);
             }
-            else if (verification)
+        }
+        catch { }
+    }
+
+    public static void RequestFinishNow() => _finishRequested = true;
+
+    public static void CancelAuth()
+    {
+        try { _authCts?.Cancel(); } catch { }
+        try
+        {
+            var p = _authProc;
+            if (p != null && !p.HasExited) p.Kill(true);
+        }
+        catch { }
+        Phase = LoginPhase.Idle;
+        StatusText = "";
+        ErrorText = "";
+        HasCapturedCookies = false;
+        App.Invalidate();
+    }
+
+    /// <summary>Opens the clean isolated app-mode Google sign-in window (no tabs, no Chrome locks, auto-closes when signed in).</summary>
+    public static void StartGoogleSignIn(bool verification = false, string? verifyVideoId = null)
+    {
+        EnsureChromiumEngine();
+        if (string.IsNullOrEmpty(_chromiumExe) || !File.Exists(_chromiumExe))
+        {
+            if (HasWebViewHelper)
             {
-                Process.Start(new ProcessStartInfo("https://www.youtube.com/") { UseShellExecute = true });
-                Shell.Toast("Пройдите проверку в браузере. Автоматическое сохранение входа не поддерживается этим браузером; импортируйте cookies.txt через меню аккаунта.", Th.Warn, 9000);
-            }
-            else
-            {
-                Shell.Toast($"Браузер {_cachedBrowserName ?? "по умолчанию"} не поддерживает авто-вход, открываю встроенное окно…", Th.Sub, 3500);
+                LoginModal.Close();
                 Shell.LoginWebView();
+                return;
             }
+            Phase = LoginPhase.Error;
+            ErrorText = L.T("Не найден Chrome/Edge для окна входа. Используйте импорт cookies ниже.",
+                            "No Chromium browser (Chrome/Edge) found for sign-in popup. Use cookie import below.");
+            App.Invalidate();
             return;
         }
 
         if (Interlocked.CompareExchange(ref _authBusy, 1, 0) != 0)
         {
-            Shell.Toast($"Окно входа в {_cachedBrowserName} уже открыто — завершите вход там", Th.Sub, 3000);
+            FocusAuthWindow();
             return;
         }
 
         AccountMenu.SaveActiveToVault();
-        var browserExe = _cachedBrowserExe!;
-        var browserName = _cachedBrowserName ?? "браузер";
-        Shell.Toast(verification
-            ? $"Открываю {browserName}: пройдите проверку, затем закройте окно браузера."
-            : $"Открываю {browserName} для входа в YouTube…", Th.Good, verification ? 9000 : 4000);
+        var browserExe = _chromiumExe;
+        var browserName = _chromiumName ?? "Browser";
+        ActiveEngineName = browserName;
+        IsVerification = verification;
+        HasCapturedCookies = false;
+        SignedInAccount = null;
+        ErrorText = "";
+        _finishRequested = false;
+        Phase = LoginPhase.Launching;
+        StatusText = L.T($"Запуск окна входа ({browserName})…", $"Opening sign-in window ({browserName})…");
+        App.Invalidate();
+
+        // Center the clean 540x760 app popup right over FluxTube
+        int popW = 540, popH = 760, popX = 160, popY = 90;
+        unsafe
+        {
+            W.RECT rc;
+            if (App.Hwnd != 0 && W.GetWindowRect(App.Hwnd, &rc))
+            {
+                popX = Math.Max(20, rc.L + ((rc.R - rc.L) - popW) / 2);
+                popY = Math.Max(20, rc.T + ((rc.B - rc.T) - popH) / 2);
+            }
+        }
+        bool darkMode = !Themes.Current.Light;
+        var hl = Uri.EscapeDataString(AppSettings.Current.Hl);
+        var existingCookies = verification && CookieStore.IsLoggedIn ? CookieStore.All().ToList() : null;
+        var targetUrl = verification && existingCookies is { Count: > 0 }
+            ? (!string.IsNullOrEmpty(verifyVideoId) ? $"https://www.youtube.com/watch?v={verifyVideoId}" : "https://www.youtube.com/")
+            : $"https://accounts.google.com/ServiceLogin?service=youtube&hl={hl}&continue=" +
+              Uri.EscapeDataString("https://www.youtube.com/signin?action_handle_signin=true&app=desktop&next=%2F");
+
+        var cts = new CancellationTokenSource(TimeSpan.FromMinutes(verification ? 15 : 8));
+        _authCts = cts;
 
         _ = Task.Run(async () =>
         {
@@ -252,140 +431,159 @@ public static class BrowserLogin
             {
                 Directory.CreateDirectory(profileDir);
                 int port = PickFreePort();
-                var loginUrl = "https://accounts.google.com/ServiceLogin?service=youtube&hl=" + Uri.EscapeDataString(AppSettings.Current.Hl) + "&continue=https%3A%2F%2Fwww.youtube.com%2F";
+                var startUrl = existingCookies is { Count: > 0 } ? "about:blank" : targetUrl;
+
                 var psi = new ProcessStartInfo(browserExe) { UseShellExecute = false };
                 psi.ArgumentList.Add($"--user-data-dir={profileDir}");
                 psi.ArgumentList.Add($"--remote-debugging-port={port}");
                 psi.ArgumentList.Add("--remote-allow-origins=*");
+                psi.ArgumentList.Add($"--app={startUrl}");
+                psi.ArgumentList.Add($"--window-size={popW},{popH}");
+                psi.ArgumentList.Add($"--window-position={popX},{popY}");
                 psi.ArgumentList.Add("--no-first-run");
                 psi.ArgumentList.Add("--no-default-browser-check");
-                psi.ArgumentList.Add("--window-size=560,740");
-                psi.ArgumentList.Add("--new-window");
-                psi.ArgumentList.Add(loginUrl);
+                psi.ArgumentList.Add("--disable-extensions");
+                psi.ArgumentList.Add("--disable-sync");
+                psi.ArgumentList.Add("--disable-default-apps");
+                psi.ArgumentList.Add("--disable-features=Translate");
+                if (darkMode) psi.ArgumentList.Add("--force-dark-mode");
 
                 proc = Process.Start(psi);
-                if (proc == null)
-                {
-                    App.Post(() =>
-                    {
-                        if (verification) Shell.Toast("Не удалось запустить браузер для проверки YouTube", Th.Warn);
-                        else { Shell.Toast("Не удалось запустить " + browserName + ", открываю встроенное окно…", Th.Warn); Shell.LoginWebView(); }
-                    });
-                    return;
-                }
+                _authProc = proc;
+                if (proc == null) throw new IOException($"Could not start {browserName}");
 
-                // 1. Wait up to 10s for CDP endpoint to come up
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
                 string? wsUrl = null;
                 var startAt = Environment.TickCount64;
-                while (Environment.TickCount64 - startAt < 10_000 && !proc.HasExited)
+                while (Environment.TickCount64 - startAt < 12_000 && !proc.HasExited && !cts.IsCancellationRequested)
                 {
                     try
                     {
-                        var verJson = await http.GetStringAsync($"http://127.0.0.1:{port}/json/version");
-                        var vNode = JsonNode.Parse(verJson);
-                        wsUrl = vNode?["webSocketDebuggerUrl"]?.GetValue<string>();
+                        var verJson = await http.GetStringAsync($"http://127.0.0.1:{port}/json/version", cts.Token);
+                        wsUrl = JsonNode.Parse(verJson)?["webSocketDebuggerUrl"]?.GetValue<string>();
                         if (!string.IsNullOrEmpty(wsUrl)) break;
                     }
                     catch { }
-                    await Task.Delay(220);
+                    await Task.Delay(180, cts.Token);
                 }
 
                 if (string.IsNullOrEmpty(wsUrl))
+                    throw new IOException(L.T($"Не удалось подключиться к {browserName}. Попробуйте ещё раз или выберите другой способ.",
+                                              $"Could not attach to {browserName}. Try again or pick another method."));
+
+                using var ws = new ClientWebSocket();
+                await ws.ConnectAsync(new Uri(wsUrl), cts.Token);
+                int msgId = 1;
+
+                // Verification with existing account: pre-seed cookies into the popup so user doesn't have to re-type password!
+                if (existingCookies is { Count: > 0 })
                 {
-                    Paths.Log($"default browser CDP unavailable for {browserName}, falling back to WebView2");
-                    try { if (!proc.HasExited) proc.Kill(true); } catch { }
+                    await SeedCookiesOverCdpAsync(ws, msgId++, existingCookies, cts.Token);
+                    await NavigatePageOverCdpAsync(http, port, targetUrl, cts.Token);
+                }
+
+                App.Post(() =>
+                {
+                    Phase = LoginPhase.WaitingForUser;
+                    StatusText = verification
+                        ? L.T("Пройдите проверку YouTube в открывшемся окне, затем нажмите «Готово» или закройте окно",
+                              "Complete YouTube verification in the popup window, then click Done or close it")
+                        : L.T("Войдите в аккаунт Google в открывшемся окне",
+                              "Sign in to Google in the popup window");
+                    App.Invalidate();
+                });
+
+                JsonArray? captured = null;
+                long homeLandedAt = 0;
+
+                while (!proc.HasExited && ws.State == WebSocketState.Open && !cts.IsCancellationRequested)
+                {
+                    JsonNode? resp;
+                    try { resp = await CdpCallAsync(ws, msgId++, "Storage.getCookies", null, cts.Token); }
+                    catch when (captured != null) { break; }
+
+                    var cookies = resp?["result"]?["cookies"] as JsonArray;
+                    if (cookies != null && HasYouTubeAuthCookies(cookies))
+                    {
+                        captured = cookies;
+                        if (!HasCapturedCookies)
+                        {
+                            HasCapturedCookies = true;
+                            App.Post(App.Invalidate);
+                        }
+
+                        if (_finishRequested)
+                            break;
+
+                        if (!verification)
+                        {
+                            // Wait until user finishes Google 2FA AND any YouTube channel/brand-account chooser!
+                            bool onYtHome = await IsActivePageOnYouTubeHomeAsync(http, port, cts.Token);
+                            if (onYtHome)
+                            {
+                                if (homeLandedAt == 0) homeLandedAt = Environment.TickCount64;
+                                if (Environment.TickCount64 - homeLandedAt >= 1100)
+                                {
+                                    // Final read so rotated __Secure-1PSIDTS / __Secure-3PSIDTS are captured
+                                    try
+                                    {
+                                        var fin = await CdpCallAsync(ws, msgId++, "Storage.getCookies", null, cts.Token);
+                                        captured = fin?["result"]?["cookies"] as JsonArray ?? captured;
+                                    }
+                                    catch { }
+                                    break;
+                                }
+                            }
+                            else homeLandedAt = 0;
+                        }
+                    }
+                    await Task.Delay(450, cts.Token);
+                }
+
+                if (cts.IsCancellationRequested)
+                {
+                    try { if (!proc.HasExited) _ = await CdpCallAsync(ws, msgId++, "Browser.close", null, new CancellationTokenSource(800).Token); } catch { }
+                    return;
+                }
+
+                if (captured == null)
+                {
                     App.Post(() =>
                     {
-                        if (verification) Shell.Toast($"Не удалось получить вход из {browserName}. Попробуйте войти через меню аккаунта.", Th.Warn, 7000);
-                        else { Shell.Toast($"Не удалось подключиться к {browserName}, открываю встроенное окно входа…", Th.Warn, 3500); Shell.LoginWebView(); }
+                        Phase = LoginPhase.Idle;
+                        StatusText = "";
+                        App.Invalidate();
                     });
                     return;
                 }
 
-                // 2. Connect CDP WebSocket & poll Storage.getCookies until YouTube SAPISID appears
-                using var ws = new ClientWebSocket();
-                using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(verification ? 15 : 6));
-                await ws.ConnectAsync(new Uri(wsUrl), cts.Token);
+                // Gracefully close popup window
+                try { if (!proc.HasExited) _ = await CdpCallAsync(ws, msgId++, "Browser.close", null, new CancellationTokenSource(1200).Token); } catch { }
 
-                int msgId = 1;
-                JsonArray? capturedCookies = null;
-                while (!proc.HasExited && ws.State == WebSocketState.Open && !cts.IsCancellationRequested)
-                {
-                    JsonNode? resp;
-                    try { resp = await CdpCallAsync(ws, msgId++, "Storage.getCookies", cts.Token); }
-                    catch when (verification && capturedCookies != null) { break; } // browser closed during the request
-                    var cookies = resp?["result"]?["cookies"] as JsonArray;
-                    if (cookies != null && HasYouTubeAuthCookies(cookies))
-                    {
-                        if (verification)
-                        {
-                            // Keep the browser open for any challenge; take the latest cookies when the user closes it.
-                            capturedCookies = cookies;
-                        }
-                        else
-                        {
-                            // Give YouTube ~900ms to finish writing final session cookies (__Secure-1PAPISID, LOGIN_INFO, etc.)
-                            await Task.Delay(900, cts.Token);
-                            var finalResp = await CdpCallAsync(ws, msgId++, "Storage.getCookies", cts.Token);
-                            capturedCookies = finalResp?["result"]?["cookies"] as JsonArray ?? cookies;
-                            break;
-                        }
-                    }
-                    await Task.Delay(650, cts.Token);
-                }
-
-                if (capturedCookies != null)
-                {
-                    var lines = FormatNetscapeCookies(capturedCookies);
-                    if (lines.Count > 1)
-                    {
-                        if (!verification)
-                        {
-                            // Gracefully close the temporary browser window via CDP.
-                            try { _ = await CdpCallAsync(ws, msgId++, "Browser.close", new CancellationTokenSource(1200).Token); } catch { }
-                        }
-
-                        App.Post(() =>
-                        {
-                            try
-                            {
-                                AccountMenu.SaveActiveToVault();
-                                var tmp = Paths.Cookies + ".tmp";
-                                File.WriteAllLines(tmp, lines);
-                                File.Move(tmp, Paths.Cookies, overwrite: true);
-                                Shell.SyncCookieStamp();
-                                Shell.OnAccountChanged();
-                                Shell.Toast(verification ? "Вход после проверки YouTube сохранён. Попробуйте открыть видео ещё раз." : $"Вы вошли в YouTube через {browserName}!", Th.Good, 5000);
-                                Shell.OpenRoot("home");
-                                W.SetForegroundWindow(App.Hwnd);
-                            }
-                            catch (Exception ex)
-                            {
-                                Paths.Log("default browser save cookies: " + ex.Message);
-                                Shell.Toast("Ошибка сохранения сессии: " + ex.Message, Th.Warn);
-                            }
-                        });
-                    }
-                }
+                var parsed = ConvertCdpCookies(captured);
+                await FinalizeSignInAsync(parsed, browserName, verification);
+            }
+            catch (OperationCanceledException)
+            {
+                App.Post(() => { Phase = LoginPhase.Idle; StatusText = ""; App.Invalidate(); });
             }
             catch (Exception e)
             {
-                Paths.Log("default browser login: " + e.Message);
+                Paths.Log("app-mode login: " + e.Message);
+                App.Post(() =>
+                {
+                    Phase = LoginPhase.Error;
+                    ErrorText = e.Message;
+                    App.Invalidate();
+                });
             }
             finally
             {
-                try
-                {
-                    if (proc != null && !proc.HasExited)
-                    {
-                        if (!proc.WaitForExit(1500)) proc.Kill(true);
-                    }
-                }
-                catch { }
+                _authProc = null;
+                _authCts = null;
+                try { if (proc is { HasExited: false } && !proc.WaitForExit(1200)) proc.Kill(true); } catch { }
                 proc?.Dispose();
                 Interlocked.Exchange(ref _authBusy, 0);
-                // Clean up temporary auth profile in background after browser releases locks
                 _ = Task.Run(async () =>
                 {
                     for (int attempt = 0; attempt < 5; attempt++)
@@ -398,86 +596,122 @@ public static class BrowserLogin
         });
     }
 
-    private static void VerifyWithFirefox(string firefoxExe)
+    private static async Task FinalizeSignInAsync(List<CookieStore.Cookie> cookies, string sourceName, bool isVerification)
     {
-        if (Interlocked.CompareExchange(ref _authBusy, 1, 0) != 0)
+        App.Post(() =>
         {
-            Shell.Toast("Окно проверки Firefox уже открыто", Th.Sub, 3000);
-            return;
-        }
-        AccountMenu.SaveActiveToVault();
-        Shell.Toast("Пройдите проверку в Firefox и закройте открывшееся окно — FluxTube сохранит вход.", Th.Good, 9000);
-        _ = Task.Run(async () =>
-        {
-            var profileDir = Path.Combine(Path.GetTempPath(), "fluxtube-auth-" + Guid.NewGuid().ToString("N")[..8]);
-            Process? proc = null;
-            try
-            {
-                Directory.CreateDirectory(profileDir);
-                var loginUrl = "https://accounts.google.com/ServiceLogin?service=youtube&hl=" + Uri.EscapeDataString(AppSettings.Current.Hl) + "&continue=https%3A%2F%2Fwww.youtube.com%2F";
-                var psi = new ProcessStartInfo(firefoxExe) { UseShellExecute = false };
-                psi.ArgumentList.Add("-no-remote");
-                psi.ArgumentList.Add("-profile");
-                psi.ArgumentList.Add(profileDir);
-                psi.ArgumentList.Add("-new-window");
-                psi.ArgumentList.Add(loginUrl);
-                proc = Process.Start(psi);
-                if (proc == null) throw new IOException("Firefox не запустился");
-                using var limit = new CancellationTokenSource(TimeSpan.FromMinutes(15));
-                await proc.WaitForExitAsync(limit.Token);
-
-                var cookieDb = Path.Combine(profileDir, "cookies.sqlite");
-                if (!File.Exists(cookieDb)) throw new IOException("Firefox не сохранил cookies");
-                var cookies = new List<CookieStore.Cookie>();
-                using (var db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = cookieDb, Mode = SqliteOpenMode.ReadOnly }.ToString()))
-                {
-                    db.Open();
-                    using var cmd = db.CreateCommand();
-                    cmd.CommandText = "SELECT host, path, isSecure, expiry, name, value, isHttpOnly FROM moz_cookies WHERE originAttributes = ''";
-                    using var rows = cmd.ExecuteReader();
-                    while (rows.Read())
-                    {
-                        var domain = rows.GetString(0);
-                        if (!IsGoogleOrYouTubeDomain(domain.TrimStart('.'))) continue;
-                        cookies.Add(new CookieStore.Cookie(domain, domain.StartsWith('.'), rows.GetString(1), rows.GetInt64(2) != 0,
-                            rows.GetInt64(3), rows.GetString(4), rows.GetString(5), rows.GetInt64(6) != 0));
-                    }
-                }
-                if (!cookies.Any(c => c.Domain.TrimStart('.').EndsWith("youtube.com", StringComparison.OrdinalIgnoreCase)
-                    && c.Name is "SAPISID" or "__Secure-3PAPISID"))
-                {
-                    App.Post(() => Shell.Toast("Вход в YouTube не завершён. Попробуйте пройти проверку ещё раз.", Th.Warn, 7000));
-                    return;
-                }
-                App.Post(() =>
-                {
-                    CookieStore.Save(cookies);
-                    Shell.SyncCookieStamp();
-                    Shell.OnAccountChanged();
-                    Shell.Toast("Вход из Firefox сохранён. Попробуйте открыть видео ещё раз.", Th.Good, 5000);
-                    Shell.OpenRoot("home");
-                });
-            }
-            catch (Exception e)
-            {
-                Paths.Log("Firefox verification: " + e.Message);
-                App.Post(() => Shell.Toast("Не удалось сохранить вход из Firefox: " + e.Message, Th.Warn, 7000));
-            }
-            finally
-            {
-                try { if (proc is { HasExited: false }) proc.Kill(true); } catch { }
-                proc?.Dispose();
-                Interlocked.Exchange(ref _authBusy, 0);
-                _ = Task.Run(async () =>
-                {
-                    for (int attempt = 0; attempt < 5; attempt++)
-                    {
-                        await Task.Delay(1200);
-                        try { DeleteTempProfile(profileDir); break; } catch { }
-                    }
-                });
-            }
+            Phase = LoginPhase.Verifying;
+            StatusText = L.T("Сохраняю сессию и загружаю профиль…", "Saving session & loading profile…");
+            App.Invalidate();
         });
+
+        AccountMenu.SaveActiveToVault();
+        CookieStore.Save(cookies);
+
+        Account? verifiedAcc = null;
+        try
+        {
+            InnerTube.Instance.ResetSession();
+            verifiedAcc = await InnerTube.Instance.AccountAsync();
+        }
+        catch (Exception e) { Paths.Log("account verify: " + e.Message); }
+
+        App.Post(() =>
+        {
+            Shell.SyncCookieStamp();
+            Shell.OnAccountChanged();
+            SignedInAccount = verifiedAcc;
+            SuccessAt = Environment.TickCount64;
+            Phase = LoginPhase.Success;
+            StatusText = verifiedAcc is { Name.Length: > 0 }
+                ? L.T($"Добро пожаловать, {verifiedAcc.Name}!", $"Welcome, {verifiedAcc.Name}!")
+                : (isVerification
+                    ? L.T("Проверка YouTube завершена!", "YouTube verification complete!")
+                    : L.T($"Вы вошли в YouTube ({sourceName})!", $"Signed in to YouTube ({sourceName})!"));
+            Shell.Toast(StatusText, Th.Good, 3600);
+            if (!isVerification) Shell.OpenRoot("home");
+            if (App.Hwnd != 0)
+            {
+                if (W.IsIconic(App.Hwnd)) W.ShowWindow(App.Hwnd, W.SW_SHOWNORMAL);
+                W.SetForegroundWindow(App.Hwnd);
+            }
+            App.Invalidate();
+            App.After(1150, () =>
+            {
+                if (Phase == LoginPhase.Success)
+                {
+                    LoginModal.Close();
+                    ResetUiState();
+                }
+            });
+        });
+    }
+
+    private static async Task<bool> IsActivePageOnYouTubeHomeAsync(HttpClient http, int port, CancellationToken ct)
+    {
+        try
+        {
+            var raw = await http.GetStringAsync($"http://127.0.0.1:{port}/json/list", ct);
+            if (JsonNode.Parse(raw) is not JsonArray targets) return false;
+            foreach (var t in targets)
+            {
+                if (t?["type"]?.GetValue<string>() != "page") continue;
+                var url = t["url"]?.GetValue<string>() ?? "";
+                if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) continue;
+                if (!u.Host.Equals("www.youtube.com", StringComparison.OrdinalIgnoreCase)
+                    && !u.Host.Equals("m.youtube.com", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var path = u.AbsolutePath.ToLowerInvariant();
+                if (path.StartsWith("/signin") || path.StartsWith("/channel_switcher")
+                    || path.StartsWith("/create_channel") || path.StartsWith("/oops"))
+                    continue;
+                return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private static async Task SeedCookiesOverCdpAsync(ClientWebSocket ws, int id, List<CookieStore.Cookie> cookies, CancellationToken ct)
+    {
+        try
+        {
+            var arr = new JsonArray();
+            foreach (var c in cookies)
+            {
+                var dom = c.Domain.TrimStart('.');
+                if (!IsGoogleOrYouTubeDomain(dom)) continue;
+                var o = new JsonObject
+                {
+                    ["name"] = c.Name,
+                    ["value"] = c.Value,
+                    ["domain"] = c.Domain,
+                    ["path"] = string.IsNullOrEmpty(c.Path) ? "/" : c.Path,
+                    ["secure"] = c.Secure,
+                    ["httpOnly"] = c.HttpOnly,
+                };
+                if (c.Expires > 0) o["expires"] = c.Expires;
+                arr.Add(o);
+            }
+            if (arr.Count > 0)
+                await CdpCallAsync(ws, id, "Storage.setCookies", new JsonObject { ["cookies"] = arr }, ct);
+        }
+        catch (Exception e) { Paths.Log("cdp seed cookies: " + e.Message); }
+    }
+
+    private static async Task NavigatePageOverCdpAsync(HttpClient http, int port, string url, CancellationToken ct)
+    {
+        try
+        {
+            var raw = await http.GetStringAsync($"http://127.0.0.1:{port}/json/list", ct);
+            var pageWs = (JsonNode.Parse(raw) as JsonArray)?
+                .FirstOrDefault(t => t?["type"]?.GetValue<string>() == "page")?["webSocketDebuggerUrl"]?.GetValue<string>();
+            if (string.IsNullOrEmpty(pageWs)) return;
+            using var pws = new ClientWebSocket();
+            await pws.ConnectAsync(new Uri(pageWs), ct);
+            await CdpCallAsync(pws, 1, "Page.navigate", new JsonObject { ["url"] = url }, ct);
+        }
+        catch (Exception e) { Paths.Log("cdp nav: " + e.Message); }
     }
 
     private static void DeleteTempProfile(string profileDir)
@@ -490,9 +724,11 @@ public static class BrowserLogin
         if (Directory.Exists(full)) Directory.Delete(full, recursive: true);
     }
 
-    private static async Task<JsonNode?> CdpCallAsync(ClientWebSocket ws, int id, string method, CancellationToken ct)
+    private static async Task<JsonNode?> CdpCallAsync(ClientWebSocket ws, int id, string method, JsonObject? prms, CancellationToken ct)
     {
-        var reqBytes = Encoding.UTF8.GetBytes($"{{\"id\":{id},\"method\":\"{method}\"}}");
+        var payload = new JsonObject { ["id"] = id, ["method"] = method };
+        if (prms != null) payload["params"] = prms;
+        var reqBytes = Encoding.UTF8.GetBytes(payload.ToJsonString());
         await ws.SendAsync(reqBytes, WebSocketMessageType.Text, true, ct);
         var buf = new byte[16384];
         while (!ct.IsCancellationRequested)
@@ -515,23 +751,27 @@ public static class BrowserLogin
 
     private static bool HasYouTubeAuthCookies(JsonArray cookies)
     {
-        bool hasYtDomain = false, hasSapisid = false;
+        bool hasSapisid = false, hasLogin = false;
         foreach (var c in cookies)
         {
             var dom = (c?["domain"]?.GetValue<string>() ?? "").TrimStart('.');
             var name = c?["name"]?.GetValue<string>() ?? "";
             if (dom.Equals("youtube.com", StringComparison.OrdinalIgnoreCase) || dom.EndsWith(".youtube.com", StringComparison.OrdinalIgnoreCase))
             {
-                hasYtDomain = true;
                 if (name is "SAPISID" or "__Secure-3PAPISID" or "__Secure-1PAPISID") hasSapisid = true;
+                if (name is "LOGIN_INFO" or "SID" or "__Secure-1PSID" or "__Secure-3PSID") hasLogin = true;
             }
         }
-        return hasYtDomain && hasSapisid;
+        return hasSapisid && hasLogin;
     }
 
-    private static List<string> FormatNetscapeCookies(JsonArray cookies)
+    private static bool HasAuthCookies(IEnumerable<CookieStore.Cookie> cookies)
+        => cookies.Any(c => c.Domain.TrimStart('.').EndsWith("youtube.com", StringComparison.OrdinalIgnoreCase)
+            && c.Name is "SAPISID" or "__Secure-3PAPISID" or "__Secure-1PAPISID");
+
+    private static List<CookieStore.Cookie> ConvertCdpCookies(JsonArray cookies)
     {
-        var lines = new List<string>(cookies.Count + 1) { "# Netscape HTTP Cookie File" };
+        var list = new List<CookieStore.Cookie>(cookies.Count);
         foreach (var c in cookies)
         {
             var rawDom = c?["domain"]?.GetValue<string>() ?? "";
@@ -546,12 +786,9 @@ public static class BrowserLogin
             double expD = 0;
             try { expD = c?["expires"]?.GetValue<double>() ?? 0; } catch { }
             long exp = expD > 0 ? (long)expD : DateTimeOffset.UtcNow.AddYears(1).ToUnixTimeSeconds();
-            bool includeSub = rawDom.StartsWith('.');
-            var domCol = (httpOnly ? "#HttpOnly_" : "") + rawDom;
-            lines.Add(string.Create(CultureInfo.InvariantCulture,
-                $"{domCol}\t{(includeSub ? "TRUE" : "FALSE")}\t{path}\t{(secure ? "TRUE" : "FALSE")}\t{exp}\t{name}\t{val}"));
+            list.Add(new CookieStore.Cookie(rawDom, rawDom.StartsWith('.'), path, secure, exp, name, val, httpOnly));
         }
-        return lines;
+        return list;
     }
 
     private static bool IsGoogleOrYouTubeDomain(string dom)
@@ -560,47 +797,114 @@ public static class BrowserLogin
         || dom.Equals("google.com", StringComparison.OrdinalIgnoreCase)
         || dom.EndsWith(".google.com", StringComparison.OrdinalIgnoreCase);
 
+    // ---------------- Universal Cookie Importer (Netscape cookies.txt / JSON / raw Cookie header) ----------------
+
     public static void ImportFromFile(string path)
     {
-        try
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
-            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            {
-                Shell.Toast("Файл cookies.txt не найден", Th.Warn);
-                return;
-            }
-            var keep = File.ReadAllLines(path).Where(l =>
-            {
-                var d = l.StartsWith("#HttpOnly_", StringComparison.Ordinal) ? l[10..] : l;
-                if (d.StartsWith('#') || d.Length == 0) return false;
-                var tab = d.IndexOf('\t');
-                if (tab <= 0) return false;
-                var dom = d[..tab].TrimStart('.');
-                return IsGoogleOrYouTubeDomain(dom);
-            }).ToList();
-
-            var hasAuth = keep.Any(l => l.Contains("\tSAPISID\t") || l.Contains("\t__Secure-3PAPISID\t") || l.Contains("\tSID\t"));
-            if (!hasAuth)
-            {
-                Shell.Toast("В выбранном файле нет активного входа в YouTube", Th.Warn);
-                return;
-            }
-
-            AccountMenu.SaveActiveToVault();
-
-            var tmp = Paths.Cookies + ".tmp";
-            File.WriteAllLines(tmp, new[] { "# Netscape HTTP Cookie File" }.Concat(keep));
-            File.Move(tmp, Paths.Cookies, overwrite: true);
-            Shell.SyncCookieStamp();
-            Shell.OnAccountChanged();
-            Shell.Toast(CookieStore.IsLoggedIn ? "Аккаунт импортирован из cookies.txt" : "В файле нет входа в YouTube",
-                CookieStore.IsLoggedIn ? Th.Good : Th.Warn);
-            if (CookieStore.IsLoggedIn) Shell.OpenRoot("home");
+            Shell.Toast(L.T("Файл cookies не найден", "Cookies file not found"), Th.Warn);
+            return;
         }
-        catch (Exception e)
+        try { ImportFromText(File.ReadAllText(path, Encoding.UTF8), Path.GetFileName(path)); }
+        catch (Exception e) { Shell.Toast(L.T("Ошибка чтения файла: ", "File read error: ") + e.Message, Th.Warn); }
+    }
+
+    public static void ImportFromClipboard()
+    {
+        var raw = W.GetClipboardText(App.Hwnd, 512 * 1024);
+        if (string.IsNullOrWhiteSpace(raw))
         {
-            Paths.Log("cookies import: " + e.Message);
-            Shell.Toast("Ошибка импорта cookies.txt: " + e.Message, Th.Warn);
+            Shell.Toast(L.T("Буфер обмена пуст — скопируйте cookies.txt, JSON или строку Cookie", "Clipboard is empty — copy cookies.txt, JSON, or Cookie header"), Th.Warn);
+            return;
         }
+        ImportFromText(raw, L.T("буфера обмена", "clipboard"));
+    }
+
+    public static void ImportFromText(string raw, string sourceLabel)
+    {
+        var cookies = ParseAnyCookies(raw);
+        if (!HasAuthCookies(cookies))
+        {
+            var msg = L.T("Не найдены YouTube-cookies входа (SAPISID). Проверьте файл или скопированные cookies.",
+                          "No YouTube sign-in cookies (SAPISID) found. Check the file or copied cookies.");
+            if (LoginModal.Open) { Phase = LoginPhase.Error; ErrorText = msg; App.Invalidate(); }
+            else Shell.Toast(msg, Th.Warn, 5000);
+            return;
+        }
+        _ = Task.Run(() => FinalizeSignInAsync(cookies, sourceLabel, isVerification: false));
+    }
+
+    private static List<CookieStore.Cookie> ParseAnyCookies(string raw)
+    {
+        var list = new List<CookieStore.Cookie>();
+        var trimmed = raw.Trim();
+        if (trimmed.Length == 0) return list;
+
+        // 1. JSON array (Cookie-Editor, EditThisCookie, J2TEAM, browser extensions)
+        if (trimmed.StartsWith('[') || trimmed.StartsWith('{'))
+        {
+            try
+            {
+                var node = JsonNode.Parse(trimmed);
+                var arr = node as JsonArray ?? node?["cookies"] as JsonArray;
+                if (arr != null)
+                {
+                    foreach (var c in arr)
+                    {
+                        var dom = c?["domain"]?.GetValue<string>() ?? "";
+                        if (!IsGoogleOrYouTubeDomain(dom.TrimStart('.'))) continue;
+                        var name = c?["name"]?.GetValue<string>() ?? "";
+                        var val = c?["value"]?.GetValue<string>() ?? "";
+                        if (string.IsNullOrEmpty(name)) continue;
+                        var path = c?["path"]?.GetValue<string>() ?? "/";
+                        bool sec = c?["secure"]?.GetValue<bool>() ?? true;
+                        bool http = c?["httpOnly"]?.GetValue<bool>() ?? false;
+                        long exp = DateTimeOffset.UtcNow.AddYears(1).ToUnixTimeSeconds();
+                        try
+                        {
+                            var ed = c?["expirationDate"]?.GetValue<double>() ?? c?["expires"]?.GetValue<double>() ?? 0;
+                            if (ed > 0) exp = (long)ed;
+                        }
+                        catch { }
+                        list.Add(new CookieStore.Cookie(dom, dom.StartsWith('.'), path, sec, exp, name, val, http));
+                    }
+                    if (list.Count > 0) return list;
+                }
+            }
+            catch { }
+        }
+
+        // 2. Netscape tab-separated cookies.txt
+        foreach (var rawLine in trimmed.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var line = rawLine.TrimEnd('\r');
+            bool httpOnly = false;
+            if (line.StartsWith("#HttpOnly_", StringComparison.Ordinal)) { httpOnly = true; line = line[10..]; }
+            else if (line.StartsWith('#') || line.Length == 0) continue;
+            var f = line.Split('\t');
+            if (f.Length < 7) continue;
+            var dom = f[0];
+            if (!IsGoogleOrYouTubeDomain(dom.TrimStart('.'))) continue;
+            long.TryParse(f[4], out var exp);
+            list.Add(new CookieStore.Cookie(dom, f[1].Equals("TRUE", StringComparison.OrdinalIgnoreCase), f[2],
+                f[3].Equals("TRUE", StringComparison.OrdinalIgnoreCase), exp, f[5], f[6], httpOnly));
+        }
+        if (list.Count > 0) return list;
+
+        // 3. Raw HTTP "Cookie: SAPISID=...; __Secure-3PAPISID=..." header string from DevTools
+        var hdr = trimmed;
+        if (hdr.StartsWith("cookie:", StringComparison.OrdinalIgnoreCase)) hdr = hdr[7..].Trim();
+        long expDefault = DateTimeOffset.UtcNow.AddYears(1).ToUnixTimeSeconds();
+        foreach (var pair in hdr.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = pair.IndexOf('=');
+            if (eq <= 0) continue;
+            var name = pair[..eq].Trim();
+            var val = pair[(eq + 1)..].Trim();
+            if (name.Length == 0 || val.Length == 0) continue;
+            list.Add(new CookieStore.Cookie(".youtube.com", true, "/", true, expDefault, name, val, false));
+        }
+        return list;
     }
 }

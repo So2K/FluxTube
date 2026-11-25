@@ -18,7 +18,7 @@ public static partial class Sfx
     private const int VolTiers = 11; // 0..10 amplitude tiers mapped to video playback volume
     private const uint SND_ASYNC = 0x0001, SND_NODEFAULT = 0x0002, SND_MEMORY = 0x0004;
 
-    public static readonly (string Key, string Label)[] Slots =
+    private static readonly (string Key, string Label)[] SlotsRu =
     [
         ("click", "Клик (кнопки, меню)"),
         ("video_open", "Открытие видео"),
@@ -30,8 +30,21 @@ public static partial class Sfx
         ("tab", "Вкладка"),
         ("back", "Назад / закрытие"),
     ];
+    private static readonly (string Key, string Label)[] SlotsEn =
+    [
+        ("click", "Click (buttons, menus)"),
+        ("video_open", "Open video"),
+        ("like", "Like / dislike"),
+        ("channel", "Open channel"),
+        ("volume", "Volume (player / tabs / sliders)"),
+        ("toggle_on", "Toggle (on)"),
+        ("toggle_off", "Toggle (off)"),
+        ("tab", "Tab"),
+        ("back", "Back / close"),
+    ];
+    public static (string Key, string Label)[] Slots => L.En ? SlotsEn : SlotsRu;
 
-    public const string NamingGuide =
+    public static string NamingGuide => L.T(
         "Файлы в .zip (WAV, MP3, OGG, FLAC, M4A):\n" +
         "• click.mp3 — клик по кнопкам\n" +
         "• video_open.mp3 — открытие видео\n" +
@@ -39,7 +52,15 @@ public static partial class Sfx
         "• channel.mp3 — переход на канал\n" +
         "• volume.mp3 — громкость (плеер / вкладка)\n" +
         "• toggle_on.mp3 / toggle_off.mp3 — тумблеры\n" +
-        "• tab.mp3 — вкладка   • back.mp3 — назад";
+        "• tab.mp3 — вкладка   • back.mp3 — назад",
+        "Files inside .zip (WAV, MP3, OGG, FLAC, M4A):\n" +
+        "• click.mp3 — button click\n" +
+        "• video_open.mp3 — open video\n" +
+        "• like.mp3 — like / dislike\n" +
+        "• channel.mp3 — open channel\n" +
+        "• volume.mp3 — volume tick (player / tab)\n" +
+        "• toggle_on.mp3 / toggle_off.mp3 — toggles\n" +
+        "• tab.mp3 — tab   • back.mp3 — back / close");
 
     private static readonly Dictionary<string, string> Aliases = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -560,16 +581,16 @@ public static partial class Sfx
                     if (applied.Count > 0)
                     {
                         Preview(applied[0].Slot);
-                        Shell.Toast($"Установлено звуков из архива: {applied.Count} из {Slots.Length}", Th.Good, 3500);
+                        Shell.Toast(L.T($"Установлено звуков из архива: {applied.Count} из {Slots.Length}", $"Installed {applied.Count} of {Slots.Length} sounds from ZIP"), Th.Good, 3500);
                     }
-                    else Shell.Toast("Не удалось конвертировать файлы из архива", Th.Warn);
+                    else Shell.Toast(L.T("Не удалось конвертировать файлы из архива", "Could not convert audio files from ZIP"), Th.Warn);
                     App.Invalidate();
                 });
             }
             catch (Exception e)
             {
                 Paths.Log("sfx zip: " + e.Message);
-                App.Post(() => Shell.Toast("Ошибка распаковки архива: " + e.Message, Th.Warn));
+                App.Post(() => Shell.Toast(L.T("Ошибка распаковки архива: ", "ZIP extract error: ") + e.Message, Th.Warn));
             }
             finally
             {
@@ -605,7 +626,7 @@ public static partial class Sfx
             try { var p = Path.Combine(SfxDir, key + ".wav"); if (File.Exists(p)) File.Delete(p); } catch { }
         AppSettings.Current.CustomSfx.Clear();
         AppSettings.Current.Save();
-        Shell.Toast("Все звуки сброшены на стандартные (SH / MGS)", Th.Good, 2200);
+        Shell.Toast(L.T("Все звуки сброшены на стандартные (SH / MGS)", "All UI sounds reset to defaults (SH / MGS)"), Th.Good, 2200);
         App.Invalidate();
     }
 

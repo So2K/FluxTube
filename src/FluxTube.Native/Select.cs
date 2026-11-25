@@ -26,6 +26,7 @@ public static partial class Sel
     public static bool Has => _id != 0 && _a != _b;
     public static string Selected => Has ? _text.Substring(Math.Min(_a, _b), Math.Abs(_a - _b)) : "";
     public static bool WantIBeam { get; private set; }
+    public static void RequestIBeam() => WantIBeam = true;
 
     public static void Clear() { _id = 0; _a = _b = 0; _dragging = false; }
 
@@ -42,7 +43,7 @@ public static partial class Sel
     {
         if (!Has) return false;
         W.SetClipboardText(App.Hwnd, Selected);
-        Shell.Toast("Скопировано", Th.Good, 1500);
+        Shell.Toast(Services.L.T("Скопировано", "Copied"), Th.Good, 1500);
         return true;
     }
 
@@ -54,7 +55,7 @@ public static partial class Sel
     {
         if (!Has) return;
         var s = Selected;
-        items.Insert(0, new("Копировать выделенное", () => { W.SetClipboardText(App.Hwnd, s); Shell.Toast("Скопировано", Th.Good, 1500); }, icon: Th.Copy, shortcut: "Ctrl+C"));
+        items.Insert(0, new(Services.L.T("Копировать выделенное", "Copy selection"), () => { W.SetClipboardText(App.Hwnd, s); Shell.Toast(Services.L.T("Скопировано", "Copied"), Th.Good, 1500); }, icon: Th.Copy, shortcut: "Ctrl+C"));
     }
 
     private static int PosAt(IDWriteTextLayout layout, float x, float y, int len)

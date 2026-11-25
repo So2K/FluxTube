@@ -53,8 +53,8 @@ public static class Cards
 
     public static string QualityName(string q) => q switch
     {
-        "best" => "Максимальное",
-        "audio" => "Только аудио (m4a)",
+        "best" => L.T("Максимальное", "Best"),
+        "audio" => L.T("Только аудио (m4a)", "Audio only (m4a)"),
         "2160" => "4K (2160p)",
         "1440" => "2K (1440p)",
         _ => q + "p",
@@ -63,62 +63,62 @@ public static class Cards
     public static void Download(VideoItem v, string? quality)
     {
         Downloader.Instance.Enqueue(v.Url, v.Title, v.Channel, v.VideoId, quality);
-        Shell.Toast("Скачивается: " + v.Title, Th.Good);
+        Shell.Toast(L.T("Скачивается: ", "Downloading: ") + v.Title, Th.Good);
     }
 
-    public static void CopyText(string text, string what = "Текст скопирован")
+    public static void CopyText(string text, string? what = null)
     {
         if (string.IsNullOrEmpty(text)) return;
         W.SetClipboardText(App.Hwnd, text);
-        Shell.Toast(what, Th.Good, 1800);
+        Shell.Toast(what ?? L.T("Текст скопирован", "Text copied"), Th.Good, 1800);
     }
 
     /// <summary>Right-click on a piece of text: a one-item menu that copies it.</summary>
-    public static void CopyMenu(R r, string text, string label = "Копировать текст")
+    public static void CopyMenu(R r, string text, string? label = null)
     {
-        if (text.Length > 0 && UI.RightClick(r)) Menus.Popup([new(label, () => CopyText(text), icon: Th.Copy, shortcut: "Ctrl+C")]);
+        if (text.Length > 0 && UI.RightClick(r)) Menus.Popup([new(label ?? L.T("Копировать текст", "Copy text"), () => CopyText(text), icon: Th.Copy, shortcut: "Ctrl+C")]);
     }
 
     public static void Copy(string text)
     {
         W.SetClipboardText(App.Hwnd, text);
-        Shell.Toast("Ссылка скопирована");
+        Shell.Toast(L.T("Ссылка скопирована", "Link copied"));
     }
 
     public static List<MenuItem> MenuFor(VideoItem v, Action? onRemove = null)
     {
         var items = new List<MenuItem>
         {
-            new("Открыть в новой вкладке", () => Shell.OpenVideoInNewTab(v), icon: Th.Tab, shortcut: "СКМ"),
-            new("Запустить в фоне (звук)", () => { Shell.OpenVideoInNewTab(v); BgPlayers.Play(v.VideoId); }, icon: Th.Headphones),
+            new(L.T("Открыть в новой вкладке", "Open in new tab"), () => Shell.OpenVideoInNewTab(v), icon: Th.Tab, shortcut: L.T("СКМ", "MMB")),
+            new(L.T("Запустить в фоне (звук)", "Play in background (audio)"), () => { Shell.OpenVideoInNewTab(v); BgPlayers.Play(v.VideoId); }, icon: Th.Headphones),
             MenuItem.Sep,
-            new("Скачать (" + QualityName(AppSettings.Current.DownloadQuality) + ")", () => Download(v, null), icon: Th.Download),
-            new("Скачать в качестве", null, AppSettings.Qualities.Select(q => new MenuItem(QualityName(q), () => Download(v, q), icon: Th.Quality)).ToList(), icon: Th.Quality),
+            new(L.T("Скачать (", "Download (") + QualityName(AppSettings.Current.DownloadQuality) + ")", () => Download(v, null), icon: Th.Download),
+            new(L.T("Скачать в качестве", "Download quality"), null, AppSettings.Qualities.Select(q => new MenuItem(QualityName(q), () => Download(v, q), icon: Th.Quality)).ToList(), icon: Th.Quality),
         };
         if (CookieStore.IsLoggedIn)
         {
             items.Add(MenuItem.Sep);
-            items.Add(new("Смотреть позже", () => SaveTo("WL", "Смотреть позже", v, true), icon: Th.Later));
-            items.Add(new("Сохранить в плейлист…", () => PlaylistMenu(v), icon: Th.Playlist));
+            items.Add(new(L.T("Смотреть позже", "Watch later"), () => SaveTo("WL", L.T("Смотреть позже", "Watch later"), v, true), icon: Th.Later));
+            items.Add(new(L.T("Сохранить в плейлист…", "Save to playlist…"), () => PlaylistMenu(v), icon: Th.Playlist));
         }
         items.Add(MenuItem.Sep);
         if (!string.IsNullOrEmpty(v.ChannelId))
-            items.Add(new("Открыть канал: " + v.Channel, () => Shell.OpenChannel(v.ChannelId!, v.Channel), icon: Th.Account));
-        items.Add(new("Копировать ссылку", () => Copy(v.Url), icon: Th.Link));
-        items.Add(new("Копировать название", () => CopyText(v.Title, "Название скопировано"), icon: Th.Copy));
-        items.Add(new("Открыть в браузере", () => W.Open(v.Url), icon: Th.Globe));
+            items.Add(new(L.T("Открыть канал: ", "Open channel: ") + v.Channel, () => Shell.OpenChannel(v.ChannelId!, v.Channel), icon: Th.Account));
+        items.Add(new(L.T("Копировать ссылку", "Copy link"), () => Copy(v.Url), icon: Th.Link));
+        items.Add(new(L.T("Копировать название", "Copy title"), () => CopyText(v.Title, L.T("Название скопировано", "Title copied")), icon: Th.Copy));
+        items.Add(new(L.T("Открыть в браузере", "Open in browser"), () => W.Open(v.Url), icon: Th.Globe));
         if (!string.IsNullOrEmpty(v.ChannelId))
         {
             items.Add(MenuItem.Sep);
-            items.Add(new("Не показывать канал: " + v.Channel, () =>
+            items.Add(new(L.T("Не показывать канал: ", "Don't show channel: ") + v.Channel, () =>
             {
                 var s = AppSettings.Current;
                 if (!s.BlockedChannels.Contains(v.ChannelId)) { s.BlockedChannels = [.. s.BlockedChannels, v.ChannelId!]; s.Save(); }
-                Shell.Toast($"Канал «{v.Channel}» скрыт из поиска и рекомендаций. Вернуть: Настройки, раздел «Поиск».", null, 6000);
+                Shell.Toast(L.T($"Канал «{v.Channel}» скрыт из поиска и рекомендаций. Вернуть: Настройки, раздел «Поиск».", $"Channel \"{v.Channel}\" hidden from search & recommendations. Undo in Settings -> Search."), null, 6000);
                 Shell.Current?.Refresh();
             }, icon: Th.Block, danger: true));
         }
-        if (onRemove != null) { items.Add(MenuItem.Sep); items.Add(new("Удалить из списка", onRemove, icon: Th.Delete, danger: true)); }
+        if (onRemove != null) { items.Add(MenuItem.Sep); items.Add(new(L.T("Удалить из списка", "Remove from list"), onRemove, icon: Th.Delete, danger: true)); }
         return items;
     }
 
@@ -181,7 +181,8 @@ public static class Cards
         }
 
         float tx = x, tw = cardW;
-        if (v.AvatarUrl != null) { Avatar(x, y + thumbH + 11, 34, v.AvatarUrl, v.Channel); tx += 44; tw -= 44; }
+        bool showAvatar = v.AvatarUrl != null || (channelLine && v.PlaylistId == null && v.Channel.Length > 0);
+        if (showAvatar) { Avatar(x, y + thumbH + 11, 34, v.AvatarUrl, v.Channel); tx += 44; tw -= 44; }
         var t = Gfx.Draw(v.Title, tx, y + thumbH + 9, 14, Th.Text, 600, tw, 2);
         var cy = y + thumbH + 12 + t.H;
         Gfx.Draw(channelLine ? v.ChannelMeta : v.Meta, tx, cy, 12.5f, Th.Sub, 400, tw, 2);
@@ -192,7 +193,7 @@ public static class Cards
             var chRect = new R(tx, cy, name.W, name.H);
             var avRect = new R(x, y + thumbH + 11, 34, 34);
             var overName = UI.Hover(chRect);
-            overChannel = overName || (v.AvatarUrl != null && UI.Hover(avRect));
+            overChannel = overName || (showAvatar && UI.Hover(avRect));
             if (overChannel)
             {
                 Gfx.Fill(new R(tx, cy + name.H - 1.5f, name.W, 1), Th.Text);
@@ -223,7 +224,7 @@ public static class Cards
             bool ok;
             try { ok = await InnerTube.Instance.PlaylistEditAsync(playlistId, v.VideoId, add); }
             catch (Exception e) { Paths.Log("playlist edit: " + e.Message); ok = false; }
-            App.Post(() => Shell.Toast(!ok ? "YouTube не принял изменение плейлиста" : add ? $"Добавлено в «{playlistTitle}»" : $"Убрано из «{playlistTitle}»", ok ? Th.Good : Th.Warn));
+            App.Post(() => Shell.Toast(!ok ? L.T("YouTube не принял изменение плейлиста", "YouTube rejected playlist update") : add ? L.T($"Добавлено в «{playlistTitle}»", $"Added to \"{playlistTitle}\"") : L.T($"Убрано из «{playlistTitle}»", $"Removed from \"{playlistTitle}\""), ok ? Th.Good : Th.Warn));
         });
     }
 
@@ -237,8 +238,8 @@ public static class Cards
             catch (Exception e) { Paths.Log("playlists: " + e.Message); lists = []; }
             App.Post(() =>
             {
-                if (lists.Count == 0) { Shell.Toast("Плейлисты не загрузились", Th.Warn); return; }
-                Menus.Popup(lists.Select(p => new MenuItem(p.Id == "WL" ? "Смотреть позже" : p.Title, () => SaveTo(p.Id, p.Id == "WL" ? "Смотреть позже" : p.Title, v, !p.Contains), null, p.Contains)).ToList());
+                if (lists.Count == 0) { Shell.Toast(L.T("Плейлисты не загрузились", "Could not load playlists"), Th.Warn); return; }
+                Menus.Popup(lists.Select(p => new MenuItem(p.Id == "WL" ? L.T("Смотреть позже", "Watch later") : p.Title, () => SaveTo(p.Id, p.Id == "WL" ? L.T("Смотреть позже", "Watch later") : p.Title, v, !p.Contains), null, p.Contains)).ToList());
             });
         });
     }
@@ -353,8 +354,14 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
 
     private string Header => kind switch
     {
-        "home" => "Главная", "subs" => "Подписки", "wl" => "Смотреть позже", "liked" => "Понравившиеся",
-        "search" => $"«{arg}»", "channel" => title ?? "Канал", "playlist" => title ?? "Плейлист", _ => kind,
+        "home" => L.T("Главная", "Home"),
+        "subs" => L.T("Подписки", "Subscriptions"),
+        "wl" => L.T("Смотреть позже", "Watch later"),
+        "liked" => L.T("Понравившиеся", "Liked videos"),
+        "search" => $"«{arg}»",
+        "channel" => title ?? L.T("Канал", "Channel"),
+        "playlist" => title ?? L.T("Плейлист", "Playlist"),
+        _ => kind,
     };
 
     public void Shown() { if (!_loaded) { _loaded = true; Load(); } }
@@ -386,7 +393,9 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     private int _hidden, _autoMore;
     private string[][]? _need; // per query word: the spellings that count as a match
 
-    private static readonly string[] SortNames = ["По релевантности", "По рейтингу", "Сначала новые", "По просмотрам", "Сначала старые"];
+    private static readonly string[] SortNamesRu = ["По релевантности", "По рейтингу", "Сначала новые", "По просмотрам", "Сначала старые"];
+    private static readonly string[] SortNamesEn = ["Relevance", "Rating", "Newest first", "View count", "Oldest first"];
+    private static string[] SortNames => L.En ? SortNamesEn : SortNamesRu;
 
     // ---- "oldest first": YouTube's search has no such order, so the dates are walked by hand ----
     // The earliest year that has anything is found with "before:" queries (a handful of requests), its results are
@@ -447,9 +456,15 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         }
         return new FeedPage_();
     }
-    private static readonly string[] DateNames = ["За всё время", "За час", "Сегодня", "За неделю", "За месяц", "За год"];
-    private static readonly string[] TypeNames = ["Всё", "Видео", "Каналы", "Плейлисты"];
-    private static readonly (int Code, string Name)[] DurNames = [(0, "Любая длина"), (1, "До 4 минут"), (3, "4–20 минут"), (2, "Больше 20 минут")];
+    private static readonly string[] DateNamesRu = ["За всё время", "За час", "Сегодня", "За неделю", "За месяц", "За год"];
+    private static readonly string[] DateNamesEn = ["Any time", "Last hour", "Today", "This week", "This month", "This year"];
+    private static string[] DateNames => L.En ? DateNamesEn : DateNamesRu;
+    private static readonly string[] TypeNamesRu = ["Всё", "Видео", "Каналы", "Плейлисты"];
+    private static readonly string[] TypeNamesEn = ["All", "Videos", "Channels", "Playlists"];
+    private static string[] TypeNames => L.En ? TypeNamesEn : TypeNamesRu;
+    private static readonly (int Code, string Ru, string En)[] DurSpecs =
+        [(0, "Любая длина", "Any duration"), (1, "До 4 минут", "Under 4 min"), (3, "4–20 минут", "4–20 min"), (2, "Больше 20 минут", "Over 20 min")];
+    private static string DurLabel(int idx) => L.T(DurSpecs[idx].Ru, DurSpecs[idx].En);
 
     private static readonly HashSet<string> Stop = ["как", "для", "это", "что", "или", "при", "про", "без", "под", "над", "the", "and", "how", "for", "with", "from", "you", "что", "чтобы", "can", "его", "все"];
     // words people type in one language while the videos are titled in another (or shortened)
@@ -511,13 +526,13 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     private float _chipScroll;
 
     // Curated Top-5 most popular & useful Home categories (mapped to real YouTube personalized filter tokens when available!)
-    private static readonly (string Title, string[] MatchKeys, string FallbackToken)[] Top5HomeSpecs =
+    private static readonly (string Ru, string En, string[] MatchKeys, string FallbackToken)[] Top5HomeSpecs =
     [
-        ("Рекомендации", ["все", "all", "рекомендац"], ""),
-        ("Музыка", ["музык", "music"], "search:музыка"),
-        ("Видеоигры", ["видеоигр", "игр", "gaming", "games"], "search:видеоигры"),
-        ("Новое для вас", ["новое для вас", "new to you", "недавно опубликован", "recently uploaded"], "search:новые видео"),
-        ("Подкасты", ["подкаст", "podcast", "прямой эфир", "live", "в тренде"], "search:подкасты"),
+        ("Рекомендации", "For you", ["все", "all", "рекомендац"], ""),
+        ("Музыка", "Music", ["музык", "music"], "search:music"),
+        ("Видеоигры", "Gaming", ["видеоигр", "игр", "gaming", "games"], "search:gaming"),
+        ("Новое для вас", "New to you", ["новое для вас", "new to you", "недавно опубликован", "recently uploaded"], "search:new videos"),
+        ("Подкасты", "Podcasts", ["подкаст", "podcast", "прямой эфир", "live", "в тренде"], "search:podcasts"),
     ];
 
     private static List<(string Title, string Token, bool Selected)> BuildTop5HomeChips(List<(string Title, string Token, bool Selected)> raw)
@@ -525,9 +540,9 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         var list = new List<(string Title, string Token, bool Selected)>(5);
         for (int s = 0; s < Top5HomeSpecs.Length; s++)
         {
-            var (title, keys, fallback) = Top5HomeSpecs[s];
+            var (ru, en, keys, fallback) = Top5HomeSpecs[s];
             string tok = fallback;
-            if (s == 0) tok = ""; // Рекомендации always loads the exact 1-to-1 personalized Home feed
+            if (s == 0) tok = ""; // For you always loads the exact 1-to-1 personalized Home feed
             else if (raw.Count > 0)
             {
                 foreach (var c in raw)
@@ -540,7 +555,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                     }
                 }
             }
-            list.Add((title, tok, s == 0));
+            list.Add((L.T(ru, en), tok, s == 0));
         }
         return list;
     }
@@ -610,13 +625,13 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                     _loading = false;
                     if (page.Items.Count > 0) _chipCache[idx] = page;
                     Replace(page, saveCache: idx == 0);
-                    if (_items.Count == 0) Say("По этой категории пока ничего не нашлось.", Th.Sub);
+                    if (_items.Count == 0) Say(L.T("По этой категории пока ничего не нашлось.", "Nothing found in this category yet."), Th.Sub);
                 });
             }
             catch (Exception e)
             {
                 Paths.Log($"home chip {chip.Title}: {e.Message}");
-                App.Post(() => { if (gen == _gen) { _loading = false; Say("Не удалось загрузить категорию: " + e.Message, Th.Brand); } });
+                App.Post(() => { if (gen == _gen) { _loading = false; Say(L.T("Не удалось загрузить категорию: ", "Failed to load category: ") + e.Message, Th.Brand); } });
             }
         });
     }
@@ -629,9 +644,11 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
 
         float totalW = 0;
         var widths = new float[_chips.Count];
+        var labels = new string[_chips.Count];
         for (int i = 0; i < _chips.Count; i++)
         {
-            widths[i] = Gfx.Text(_chips[i].Title, 13, 600).W + 26;
+            labels[i] = i < Top5HomeSpecs.Length ? L.T(Top5HomeSpecs[i].Ru, Top5HomeSpecs[i].En) : _chips[i].Title;
+            widths[i] = Gfx.Text(labels[i], 13, 600).W + 26;
             totalW += widths[i] + (i > 0 ? gap : 0);
         }
         float maxScroll = MathF.Max(0, totalW - w);
@@ -660,7 +677,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 bool over = !overChev && UI.Hover(r);
                 if (active) Gfx.Fill(r, Th.Text, 8);
                 else Gfx.Fill(r, Th.A(over ? 0.16f : 0.085f), 8);
-                var tr = Gfx.Text(_chips[i].Title, 13, active ? 600 : 500);
+                var tr = Gfx.Text(labels[i], 13, active ? 600 : 500);
                 Gfx.Draw(tr, Gfx.Snap(r.X + (r.W - tr.W) / 2), Gfx.Snap(r.Y + (r.H - tr.H) / 2), active ? Th.Bg : Th.Text);
                 if (!overChev && UI.Click(id, r)) SelectChip(i);
             }
@@ -700,7 +717,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         if (kind is "subs" or "wl" or "liked" && !CookieStore.IsLoggedIn)
         {
             _items = []; _ids.Clear(); _cont = null; _loading = false;
-            Say("Войдите в аккаунт YouTube (кнопка справа сверху), чтобы видеть этот раздел.", Th.Sub);
+            Say(L.T("Войдите в аккаунт YouTube (кнопка справа сверху), чтобы видеть этот раздел.", "Sign in to YouTube (top right button) to see this section."), Th.Sub);
             return;
         }
         if (kind == "home" && _chips.Count == 0)
@@ -736,8 +753,8 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 {
                     page = await ForYouAsync();
                     note = page.Items.Count == 0
-                        ? "YouTube не даёт рекомендации без входа и истории. Войдите в аккаунт или найдите что-нибудь через поиск."
-                        : "Вы не вошли: лента собрана из похожих на ваши последние просмотры.";
+                        ? L.T("YouTube не даёт рекомендации без входа и истории. Войдите в аккаунт или найдите что-нибудь через поиск.", "YouTube doesn't provide recommendations without sign-in or history. Sign in or search for something.")
+                        : L.T("Вы не вошли: лента собрана из похожих на ваши последние просмотры.", "Guest mode: feed built from videos related to your recent watches.");
                 }
                 Cards.WithProgress(page);
                 GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false); // the parsed JSON tree is garbage now
@@ -751,7 +768,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                     {
                         _fresh = page;
                         if (!_items.Take(8).Select(i => i.VideoId).SequenceEqual(page.Items.Take(8).Select(i => i.VideoId)))
-                            Say("Лента обновилась. Нажмите «Обновить», чтобы показать новую.", Th.Sub);
+                            Say(L.T("Лента обновилась. Нажмите «Обновить», чтобы показать новую.", "Feed updated. Click \"Refresh\" to show the latest."), Th.Sub);
                         return;
                     }
                     if (kind == "home")
@@ -762,13 +779,13 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                     }
                     Replace(page, saveCache: true);
                     if (note != null) Say(note, Th.Sub, inline: page.Items.Count > 0);
-                    else if (_items.Count == 0 && _cont == null) Say("Здесь пока пусто.", Th.Sub);
+                    else if (_items.Count == 0 && _cont == null) Say(L.T("Здесь пока пусто.", "Nothing here yet."), Th.Sub);
                 });
             }
             catch (Exception e)
             {
                 Paths.Log($"feed {kind}: {e}");
-                App.Post(() => { if (gen == _gen) { _loading = false; Say("Не удалось загрузить: " + e.Message, Th.Brand); } });
+                App.Post(() => { if (gen == _gen) { _loading = false; Say(L.T("Не удалось загрузить: ", "Failed to load: ") + e.Message, Th.Brand); } });
             }
         });
     }
@@ -813,11 +830,11 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         }
         Choice("type", TypeNames[_sType], TypeNames, _sType, i => _sType = i);
         if (_sSort != 4) Choice("date", DateNames[_sDate], DateNames, _sDate, i => _sDate = i);
-        var durIdx = Array.FindIndex(DurNames, d => d.Code == _sDur);
-        Choice("dur", DurNames[durIdx].Name, DurNames.Select(d => d.Name).ToArray(), durIdx, i => _sDur = DurNames[i].Code);
+        var durIdx = Array.FindIndex(DurSpecs, d => d.Code == _sDur);
+        Choice("dur", DurLabel(durIdx), Enumerable.Range(0, DurSpecs.Length).Select(DurLabel).ToArray(), durIdx, i => _sDur = DurSpecs[i].Code);
         Choice("sort", SortNames[_sSort], SortNames, _sSort, i => _sSort = i);
         // our own check on top of YouTube's answer
-        if (UI.Pill(UI.Id("sf:strict", _scroll), cx, y, 32, _strict ? Th.Check : null, "Только по теме", out var sw, _strict ? Gfx.Fade(Th.Brand, 0.85f) : Th.A(0.08f), _strict ? Th.OnBrand : Th.Text))
+        if (UI.Pill(UI.Id("sf:strict", _scroll), cx, y, 32, _strict ? Th.Check : null, L.T("Только по теме", "On-topic only"), out var sw, _strict ? Gfx.Fade(Th.Brand, 0.85f) : Th.A(0.08f), _strict ? Th.OnBrand : Th.Text))
         {
             _strict = !_strict;
             AppSettings.Current.SearchStrict = _strict;
@@ -825,7 +842,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
             Refilter();
         }
         cx += sw + 12;
-        if (_strict && _hidden > 0) Gfx.Draw($"скрыто не по теме: {_hidden}", cx, y + 8, 12.5f, Th.Dim);
+        if (_strict && _hidden > 0) Gfx.Draw(L.T($"скрыто не по теме: {_hidden}", $"off-topic hidden: {_hidden}"), cx, y + 8, 12.5f, Th.Dim);
         return 44;
     }
 
@@ -850,7 +867,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                     if (gen != _gen) return;
                     Append(page);
                     _loadingMore = false;
-                    if (_items.Count == 0 && _cont == null) Say(kind == "search" && _strict ? "По теме ничего не нашлось. Выключите «Только по теме», чтобы увидеть всё, что отдал YouTube." : "Здесь пока пусто.", Th.Sub);
+                    if (_items.Count == 0 && _cont == null) Say(kind == "search" && _strict ? L.T("По теме ничего не нашлось. Выключите «Только по теме», чтобы увидеть всё, что отдал YouTube.", "No exact matches. Turn off \"On-topic only\" to see all YouTube results.") : L.T("Здесь пока пусто.", "Nothing here yet."), Th.Sub);
                 });
             }
             catch (Exception e)
@@ -883,21 +900,22 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     {
         float x0 = r.X + 16;
         var headRun = Gfx.Draw(Header, x0, r.Y + 8, 22, Th.Text, 600, r.W - 260);
-        var rw = UI.PillWidth(Th.Refresh, "Обновить");
+        var refreshLbl = L.T("Обновить", "Refresh");
+        var rw = UI.PillWidth(Th.Refresh, refreshLbl);
         float rightBtnX = r.Right - rw - 16;
-        if (UI.Pill(UI.Id("refresh", _scroll), rightBtnX, r.Y + 8, 32, Th.Refresh, "Обновить", out _, Th.A(0.08f))) App.Post(Refresh);
+        if (UI.Pill(UI.Id("refresh", _scroll), rightBtnX, r.Y + 8, 32, Th.Refresh, refreshLbl, out _, Th.A(0.08f))) App.Post(Refresh);
         if (_loading && _items.Count > 0) UI.Spinner(rightBtnX - 24, r.Y + 24, 8, Th.Sub);
 
         // Compact inline notice chip right in the header row (saves an entire 52px banner row!)
         if (_message != null && _messageInline && !_messageDismissed)
         {
-            var shortText = !CookieStore.IsLoggedIn && kind == "home" ? "Гостевая лента по вашим просмотрам" : _message;
+            var shortText = !CookieStore.IsLoggedIn && kind == "home" ? L.T("Гостевая лента по вашим просмотрам", "Guest feed from your recent watches") : _message;
             float chipX = x0 + headRun.W + 16;
             float maxChipW = rightBtnX - (_loading ? 42 : 14) - chipX;
             if (maxChipW > 180)
             {
                 bool showLogin = !CookieStore.IsLoggedIn && kind == "home";
-                var loginRun = showLogin ? Gfx.Text("Войти", 12, 600) : null;
+                var loginRun = showLogin ? Gfx.Text(L.T("Войти", "Sign in"), 12, 600) : null;
                 float extraW = (loginRun != null ? loginRun.W + 18 : 0) + 26;
                 var msgRun = Gfx.Text(shortText, 12, 400, MathF.Max(60, maxChipW - 32 - extraW));
                 float chipW = 28 + msgRun.W + extraW;
@@ -921,12 +939,12 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         if (kind == "search") top += DrawSearchBar(x0, top, r.W - 32);
         if (kind == "playlist" && _items.Count > 0 && arg is { Length: > 2 })
         {
-            if (UI.Pill(UI.Id("pl:play", _scroll), x0, top, 36, Th.Play, "Воспроизвести все", out var pw, accent: true))
+            if (UI.Pill(UI.Id("pl:play", _scroll), x0, top, 36, Th.Play, L.T("Воспроизвести все", "Play all"), out var pw, accent: true))
             {
                 var firstV = _items[0]; var pid = arg[2..];
                 App.Post(() => Shell.OpenVideo(firstV, "playlist:" + pid, pid));
             }
-            Gfx.Draw($"{_items.Count}{(_cont != null ? "+" : "")} видео", x0 + pw + 14, top + 9, 13, Th.Sub);
+            Gfx.Draw($"{_items.Count}{(_cont != null ? "+" : "")} " + L.T("видео", "videos"), x0 + pw + 14, top + 9, 13, Th.Sub);
             top += 48;
         }
         if (_message != null && !_messageInline && !_messageDismissed)
@@ -1079,7 +1097,7 @@ public sealed class WatchPage : IPage
     /// <summary>Like or dislike; pressing the active one takes the mark back. Plays dedicated Like SFX.</summary>
     private void Rate(bool like)
     {
-        if (!CookieStore.IsLoggedIn) { Shell.Toast("Чтобы ставить оценки, войдите в аккаунт YouTube", Th.Warn); return; }
+        if (!CookieStore.IsLoggedIn) { Shell.Toast(L.T("Чтобы ставить оценки, войдите в аккаунт YouTube", "Sign in to YouTube to rate videos"), Th.Warn); return; }
         Sfx.Like();
         var want = like ? "LIKE" : "DISLIKE";
         var before = _rating;
@@ -1093,8 +1111,8 @@ public sealed class WatchPage : IPage
             catch (Exception e) { Paths.Log("rate: " + e.Message); ok = false; }
             App.Post(() =>
             {
-                if (!ok) { _rating = before; Shell.Toast("YouTube не принял оценку, попробуйте позже", Th.Warn); }
-                else Shell.Toast(action switch { "like" => "Вам понравилось это видео", "dislike" => "Вам не понравилось это видео", _ => "Оценка снята" }, Th.Good, 2000);
+                if (!ok) { _rating = before; Shell.Toast(L.T("YouTube не принял оценку, попробуйте позже", "YouTube rejected the rating, try later"), Th.Warn); }
+                else Shell.Toast(action switch { "like" => L.T("Вам понравилось это видео", "Liked video"), "dislike" => L.T("Вам не понравилось это видео", "Disliked video"), _ => L.T("Оценка снята", "Rating removed") }, Th.Good, 2000);
                 App.Invalidate();
             });
         });
@@ -1253,7 +1271,7 @@ public sealed class WatchPage : IPage
             catch (Exception e)
             {
                 Paths.Log("watch info: " + e);
-                App.Post(() => { if (gen != _infoGen) return; _infoLoading = false; _note = "Описание и похожие не загрузились: " + e.Message; App.Invalidate(); });
+                App.Post(() => { if (gen != _infoGen) return; _infoLoading = false; _note = L.T("Описание и похожие не загрузились: ", "Failed to load description & related: ") + e.Message; App.Invalidate(); });
             }
         });
     }
@@ -1312,11 +1330,11 @@ public sealed class WatchPage : IPage
         if (_postingComment || _commentEdit == null) return;
         var text = _commentEdit.Text.Trim();
         if (text.Length == 0) return;
-        if (!CookieStore.IsLoggedIn) { Shell.Toast("Войдите в аккаунт YouTube, чтобы оставлять комментарии", Th.Warn); return; }
+        if (!CookieStore.IsLoggedIn) { Shell.Toast(L.T("Войдите в аккаунт YouTube, чтобы оставлять комментарии", "Sign in to YouTube to post comments"), Th.Warn); return; }
         var createParams = _createCommentParams ?? _info?.CreateCommentParams;
         if (string.IsNullOrEmpty(createParams))
         {
-            Shell.Toast("Токен отправки ещё загружается — подождите секунду и попробуйте снова", Th.Warn);
+            Shell.Toast(L.T("Токен отправки ещё загружается — подождите секунду и попробуйте снова", "Comment token still loading — wait a second and try again"), Th.Warn);
             if (!_commentsStarted) LoadComments();
             return;
         }
@@ -1329,7 +1347,7 @@ public sealed class WatchPage : IPage
             App.Post(() =>
             {
                 _postingComment = false;
-                if (!ok) { Shell.Toast("Не удалось отправить комментарий: " + (err ?? "ошибка YouTube"), Th.Warn, 5000); App.Invalidate(); return; }
+                if (!ok) { Shell.Toast(L.T("Не удалось отправить комментарий: ", "Failed to post comment: ") + (err ?? L.T("ошибка YouTube", "YouTube error")), Th.Warn, 5000); App.Invalidate(); return; }
                 if (_commentEdit != null) _commentEdit.Text = "";
                 Sfx.Like();
                 if (gen == _commentGen)
@@ -1340,15 +1358,15 @@ public sealed class WatchPage : IPage
                         RowId = ++_nextRowId,
                         C = new Comment
                         {
-                            Author = acc?.Handle is { Length: > 0 } h ? h : (acc?.Name is { Length: > 0 } nm ? nm : "Вы"),
+                            Author = acc?.Handle is { Length: > 0 } h ? h : (acc?.Name is { Length: > 0 } nm ? nm : L.T("Вы", "You")),
                             Avatar = acc?.Photo,
                             Text = text,
-                            When = "только что",
+                            When = L.T("только что", "just now"),
                             Likes = "0",
                         },
                     });
                 }
-                Shell.Toast("Комментарий опубликован", Th.Good, 2400);
+                Shell.Toast(L.T("Комментарий опубликован", "Comment posted"), Th.Good, 2400);
                 App.Invalidate();
             });
         });
@@ -1426,10 +1444,10 @@ public sealed class WatchPage : IPage
         if (_info.CommentsToken == null)
         {
             _commentEdit?.Hide();
-            Gfx.Draw("Комментарии отключены", x0, y, 14, Th.Sub);
+            Gfx.Draw(L.T("Комментарии отключены", "Comments are turned off"), x0, y, 14, Th.Sub);
             return y + 40;
         }
-        var head = count is { Length: > 0 } ? (count.Any(char.IsLetter) ? count : "Комментарии: " + count) : "Комментарии";
+        var head = count is { Length: > 0 } ? (count.Any(char.IsLetter) ? count : L.T("Комментарии: ", "Comments: ") + count) : L.T("Комментарии", "Comments");
         var hr = Gfx.Draw(head, x0, y, 18, Th.Text, 700);
         if (_info.CommentSorts.Count > 1)
         {
@@ -1447,12 +1465,13 @@ public sealed class WatchPage : IPage
             {
                 if (_commentEdit == null)
                 {
-                    _commentEdit = new Edit("Введите комментарий…") { Bg = () => Th.Field };
+                    _commentEdit = new Edit(L.T("Введите комментарий…", "Add a comment…")) { Bg = () => Th.Field };
                     _commentEdit.Enter = SubmitComment;
                 }
+                else _commentEdit.SetPlaceholder(L.T("Введите комментарий…", "Add a comment…"));
                 var acc = AccountMenu.Current;
                 Cards.Avatar(x0, y + 2, 36, acc?.Photo, acc?.Name is { Length: > 0 } nm ? nm : "?");
-                var sendLbl = _postingComment ? "Отправка…" : "Отправить";
+                var sendLbl = _postingComment ? L.T("Отправка…", "Posting…") : L.T("Отправить", "Comment");
                 var sendW = UI.PillWidth(null, sendLbl);
                 var boxR = new R(x0 + 48, y + 1, MathF.Max(120, w - 48 - sendW - 10), 38);
                 Gfx.Fill(boxR, Th.Field, 10);
@@ -1472,16 +1491,17 @@ public sealed class WatchPage : IPage
             if (hintR.Bottom >= view.Y && hintR.Y <= view.Bottom)
             {
                 Gfx.Fill(hintR, Th.A(0.055f), 10);
-                Gfx.Draw("Войдите в аккаунт YouTube, чтобы оставлять комментарии", x0 + 14, y + 10, 13, Th.Sub, 400, w - 120);
-                var lw = UI.PillWidth(Th.Account, "Войти");
-                if (UI.Pill(UI.Id("clogin", _infoScroll), hintR.Right - lw - 8, y + 4, 30, Th.Account, "Войти", out _, accent: true))
-                    App.Post(Shell.LoginNewAccount);
+                Gfx.Draw(L.T("Войдите в аккаунт YouTube, чтобы оставлять комментарии", "Sign in to YouTube to post comments"), x0 + 14, y + 10, 13, Th.Sub, 400, w - 120);
+                var loginTxt = L.T("Войти", "Sign in");
+                var lw = UI.PillWidth(Th.Account, loginTxt);
+                if (UI.Pill(UI.Id("clogin", _infoScroll), hintR.Right - lw - 8, y + 4, 30, Th.Account, loginTxt, out _, accent: true))
+                    App.Post(LoginModal.Show);
             }
             y += 48;
         }
 
         if (!_commentsStarted && y < view.Bottom + 600) LoadComments();
-        if (_commentsOff) { Gfx.Draw("Не удалось загрузить комментарии.", x0, y, 13.5f, Th.Sub); return y + 34; }
+        if (_commentsOff) { Gfx.Draw(L.T("Не удалось загрузить комментарии.", "Could not load comments."), x0, y, 13.5f, Th.Sub); return y + 34; }
 
         foreach (var row in _comments)
         {
@@ -1491,7 +1511,7 @@ public sealed class WatchPage : IPage
             if (row.Loading) { UI.Spinner(x0 + 56 + 12, y + 12, 7, Th.Sub); y += 34; }
             else if (row.More != null)
             {
-                if (y > view.Y - 40 && y < view.Bottom + 40 && UI.Pill(UI.Id(_infoScroll, 60000 + row.RowId), x0 + 56, y, 30, null, "Ещё ответы", out _, Th.A(0.08f))) LoadReplies(row);
+                if (y > view.Y - 40 && y < view.Bottom + 40 && UI.Pill(UI.Id(_infoScroll, 60000 + row.RowId), x0 + 56, y, 30, null, L.T("Ещё ответы", "More replies"), out _, Th.A(0.08f))) LoadReplies(row);
                 y += 40;
             }
         }
@@ -1521,22 +1541,22 @@ public sealed class WatchPage : IPage
 
         Cards.Avatar(x0, y, avatar, c.Avatar, c.Author.TrimStart('@'));
         if (UI.RightClick(new R(x0, y, w, h - 8)))
-            Sel.Popup([new("Копировать комментарий", () => Cards.CopyText(c.Text, "Комментарий скопирован"), icon: Th.Copy),
-                       new("Копировать с автором", () => Cards.CopyText(c.Author + ": " + c.Text, "Комментарий скопирован"), icon: Th.Comment),
-                       new("Копировать ник", () => Cards.CopyText(c.Author, "Ник скопирован"), icon: Th.Account)]);
+            Sel.Popup([new(L.T("Копировать комментарий", "Copy comment"), () => Cards.CopyText(c.Text, L.T("Комментарий скопирован", "Comment copied")), icon: Th.Copy),
+                       new(L.T("Копировать с автором", "Copy with author"), () => Cards.CopyText(c.Author + ": " + c.Text, L.T("Комментарий скопирован", "Comment copied")), icon: Th.Comment),
+                       new(L.T("Копировать ник", "Copy handle"), () => Cards.CopyText(c.Author, L.T("Ник скопирован", "Handle copied")), icon: Th.Account)]);
         float tx = x0 + avatar + 16;
         var au = Gfx.Text(c.Author, 13, 600);
         if (c.ByOwner) { var b = new R(tx - 6, y - 2, au.W + 12, au.H + 4); Gfx.Fill(b, Th.A(0.16f), b.H / 2); }
         Gfx.Draw(au, tx, y, Th.Text);
         var wx = tx + au.W + 10;
-        if (c.Pinned) { Gfx.Draw("закреплён", wx, y + 1, 12, Th.Sub); wx += Gfx.Text("закреплён", 12).W + 8; }
+        if (c.Pinned) { var pinLbl = L.T("закреплён", "pinned"); Gfx.Draw(pinLbl, wx, y + 1, 12, Th.Sub); wx += Gfx.Text(pinLbl, 12).W + 8; }
         Gfx.Draw(c.When, wx, y + 1, 12, Th.Dim);
         var ty = y + 22;
         Sel.Text(UI.Id(_infoScroll, 20000 + i), c.Text, tx, ty, 14, Th.Text, 400, tw, row.Open ? 0 : 5, links: true, onLink: OnLink);
         ty += text.H;
         if (longText)
         {
-            var more = Gfx.Text(row.Open ? "Свернуть" : "Читать дальше", 13, 600);
+            var more = Gfx.Text(row.Open ? L.T("Свернуть", "Show less") : L.T("Читать дальше", "Read more"), 13, 600);
             var mr = new R(tx, ty + 4, more.W, more.H);
             Gfx.Draw(more, mr.X, mr.Y, UI.Hover(mr) ? Th.Text : Th.Sub);
             if (UI.Click(UI.Id(_infoScroll, 40000 + i), mr)) row.Open = !row.Open;
@@ -1547,11 +1567,12 @@ public sealed class WatchPage : IPage
         var likes = Gfx.Draw(c.Likes, tx + 22, ty + 3, 12, Th.Sub);
         if (hasReplies)
         {
-            var pr = new R(tx + 22 + likes.W + 14, ty - 4, UI.PillWidth(null, "Ответы: " + c.Replies) + 22, 30);
+            var repTxt = c.Replies is { Length: > 0 } r2 && r2 != "0" ? L.T("Ответы: ", "Replies: ") + r2 : L.T("Ответы", "Replies");
+            var pr = new R(tx + 22 + likes.W + 14, ty - 4, UI.PillWidth(null, repTxt) + 22, 30);
             var pid = UI.Id(_infoScroll, 50000 + i);
             UI.Glow(pid, pr, 15, UI.Hover(pr));
             Gfx.Icon(row.Shown ? "\uE70E" : "\uE70D", new R(pr.X + 8, pr.Y, 18, 30), 10, Sel.LinkColor);
-            Gfx.Draw(c.Replies is { Length: > 0 } r2 && r2 != "0" ? "Ответы: " + r2 : "Ответы", pr.X + 30, pr.Y + 6, 13, Sel.LinkColor, 600);
+            Gfx.Draw(repTxt, pr.X + 30, pr.Y + 6, 13, Sel.LinkColor, 600);
             if (UI.Click(pid, pr)) { row.Shown = !row.Shown; if (row.Shown && !row.RepliesLoaded) LoadReplies(row); }
         }
         return y + h;
@@ -1632,10 +1653,11 @@ public sealed class WatchPage : IPage
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
                 if (img != null) { Gfx.Image(img.Bmp!, pr, 0.25f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
-                var msg = Gfx.Text("Видео в отдельном окне", 18, 600);
+                var msg = Gfx.Text(L.T("Видео в отдельном окне", "Playing in Picture-in-Picture"), 18, 600);
                 Gfx.Draw(msg, video.X + (video.W - msg.W) / 2, video.Y + video.H / 2 - 40, 0xFFFFFFFF);
-                var bw = UI.PillWidth(Th.Mini, "Вернуть сюда");
-                if (UI.Pill(UI.Id("pipback", _infoScroll), video.X + (video.W - bw) / 2, video.Y + video.H / 2, 38, Th.Mini, "Вернуть сюда", out _, accent: true)) App.Post(Pip.Exit);
+                var retLbl = L.T("Вернуть сюда", "Return here");
+                var bw = UI.PillWidth(Th.Mini, retLbl);
+                if (UI.Pill(UI.Id("pipback", _infoScroll), video.X + (video.W - bw) / 2, video.Y + video.H / 2, 38, Th.Mini, retLbl, out _, accent: true)) App.Post(Pip.Exit);
             }
             else if (Pip.Active)
             {
@@ -1644,16 +1666,18 @@ public sealed class WatchPage : IPage
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
                 if (img != null) { Gfx.Image(img.Bmp!, pr, 0.38f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
-                var msg = Gfx.Text("В окне поверх всех играет другое видео", 17, 600);
+                var msg = Gfx.Text(L.T("В окне поверх всех играет другое видео", "Another video is playing in Picture-in-Picture"), 17, 600);
                 Gfx.Draw(msg, video.X + (video.W - msg.W) / 2, video.Y + video.H / 2 - 48, 0xFFFFFFFF);
-                var b1w = UI.PillWidth(Th.Play, "Смотреть здесь");
-                var b2w = UI.PillWidth(Th.Mini, "Заменить в мини-окне");
+                var b1Lbl = L.T("Смотреть здесь", "Watch here");
+                var b2Lbl = L.T("Заменить в мини-окне", "Replace in PiP");
+                var b1w = UI.PillWidth(Th.Play, b1Lbl);
+                var b2w = UI.PillWidth(Th.Mini, b2Lbl);
                 float totalW = b1w + 10 + b2w;
                 float bx0 = video.X + (video.W - totalW) / 2;
                 float by0 = video.Y + video.H / 2 - 6;
-                if (UI.Pill(UI.Id("piphere", _infoScroll), bx0, by0, 38, Th.Play, "Смотреть здесь", out _, accent: true))
+                if (UI.Pill(UI.Id("piphere", _infoScroll), bx0, by0, 38, Th.Play, b1Lbl, out _, accent: true))
                     App.Post(() => { Pip.Exit(); Shell.Play(Video, _source, startPaused: false, forceReplacePip: true); });
-                if (UI.Pill(UI.Id("pipswap", _infoScroll), bx0 + b1w + 10, by0, 38, Th.Mini, "Заменить в мини-окне", out _, Gfx.Fade(0xFF1E1E26, 0.90f), 0xFFFFFFFF))
+                if (UI.Pill(UI.Id("pipswap", _infoScroll), bx0 + b1w + 10, by0, 38, Th.Mini, b2Lbl, out _, Gfx.Fade(0xFF1E1E26, 0.90f), 0xFFFFFFFF))
                     App.Post(() => Shell.Play(Video, _source, startPaused: false, forceReplacePip: true));
             }
             else if (audioStage)
@@ -1693,8 +1717,8 @@ public sealed class WatchPage : IPage
 
             // Top status badge ("Только звук · 0% GPU" + active DSP preset)
             var chipTxt = sOpt.AudioFxEnabled
-                ? $"Только звук · GPU 0%  ·  FX: {AudioDsp.DisplayPresetName(sOpt)}"
-                : "Только звук · Видео отключено (GPU 0%)";
+                ? L.T($"Только звук · GPU 0%  ·  FX: {AudioDsp.DisplayPresetName(sOpt)}", $"Audio only · GPU 0%  ·  FX: {AudioDsp.DisplayPresetName(sOpt)}")
+                : L.T("Только звук · Видео отключено (GPU 0%)", "Audio only · Video disabled (GPU 0%)");
             var cr = Gfx.Text(chipTxt, 11.5f, 600);
             var cb = new R(video.X + 16, video.Y + 14, cr.W + 22, 26);
             Gfx.FillFrosted(cb, Th.Card, 13, opacity: 0.78f, border: true);
@@ -1702,9 +1726,10 @@ public sealed class WatchPage : IPage
 
             // Top-right quick buttons: EQ Studio + Return Video
             float topRx = video.Right - 16;
-            var showVidW = UI.PillWidth(Th.Play, "Показать видео");
+            var showVidLbl = L.T("Показать видео", "Show video");
+            var showVidW = UI.PillWidth(Th.Play, showVidLbl);
             topRx -= showVidW;
-            if (UI.Pill(UI.Id("ms:vid", _infoScroll), topRx, video.Y + 12, 30, Th.Play, "Показать видео", out _))
+            if (UI.Pill(UI.Id("ms:vid", _infoScroll), topRx, video.Y + 12, 30, Th.Play, showVidLbl, out _))
                 App.Post(Shell.ToggleAudioOnlyMode);
             topRx -= 8;
             var eqW = UI.PillWidth(Th.Headphones, "EQ / FX");
@@ -1762,8 +1787,13 @@ public sealed class WatchPage : IPage
         var canToggle = desc.Length > 280 || desc.Count(c => c == '\n') > 3;
         float descBoxH = 14 + 20 + (descRun != null ? descRun.H + 6 : 0) + (canToggle ? 24 : 0) + 12;
         var listInline = _list != null;
-        int relatedCols = mainW >= 1440 ? 3 : mainW >= 900 ? 2 : 1;
-        float relatedH = 52 + (int)Math.Ceiling(_related.Count / (double)relatedCols) * 112 + (_relCont != null ? 54 : 16);
+        const float relGap = 14;
+        int relatedCols = Math.Max(1, (int)((mainW + relGap) / (270 + relGap)));
+        float relatedCardW = MathF.Floor((mainW - relGap * (relatedCols - 1)) / relatedCols);
+        float relatedThumbH = MathF.Round(relatedCardW * 9f / 16f);
+        float relatedRowH = relatedThumbH + 96f;
+        int relatedRows = (_related.Count + relatedCols - 1) / relatedCols;
+        float relatedH = 44 + relatedRows * relatedRowH + (_relCont != null ? 54 : 16);
         float infoContentH = 14 + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + relatedH + 30 + _commentsH + (listInline ? _listInlineH : 0);
 
         var view = new R(x0, r.Y, mainW + 12, r.H);
@@ -1772,7 +1802,7 @@ public sealed class WatchPage : IPage
         DrawVideoBox(video, view);
         float y = video.Bottom + 16;
         if (Title.Length > 0) Sel.Text(UI.Id(_infoScroll, 8001), Title, x0, y, 20, Th.Text, 600, mainW, 3);
-        Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, "Копировать название");
+        Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, L.T("Копировать название", "Copy title"));
         y += titleRun.H + 14;
 
         // channel + upgraded Like/Dislike pill + actions (wraps cleanly onto 2 rows if narrow so Like/Dislike NEVER vanishes!)
@@ -1792,15 +1822,16 @@ public sealed class WatchPage : IPage
         var eqLbl = s.AudioFxEnabled ? AudioDsp.DisplayPresetName(s) : "EQ";
         bx -= UI.PillWidth(null, eqLbl) + 8;
         if (UI.Pill(UI.Id("eq", _infoScroll), bx, by, ph, null, eqLbl, out _, accent: s.AudioFxEnabled)) App.Post(AudioStudioPanel.Toggle);
-        bx -= UI.PillWidth(Th.Share, "Поделиться") + 8;
-        if (UI.Pill(UI.Id("share", _infoScroll), bx, by, ph, Th.Share, "Поделиться", out _)) OpenShare();
+        var shareLbl = L.T("Поделиться", "Share");
+        bx -= UI.PillWidth(Th.Share, shareLbl) + 8;
+        if (UI.Pill(UI.Id("share", _infoScroll), bx, by, ph, Th.Share, shareLbl, out _)) OpenShare();
         var ql = Cards.QualityName(s.PlayerQuality);
         bx -= UI.PillWidth(null, ql) + 8;
         if (UI.Pill(UI.Id("q", _infoScroll), bx, by, ph, null, ql, out _)) QualityMenu();
         bx -= UI.PillWidth(null, _speed) + 8;
         if (UI.Pill(UI.Id("sp", _infoScroll), bx, by, ph, null, _speed, out _)) SpeedMenu();
         if (UI.Now - _dlCheckedAt > 1000) { _dlCheckedAt = UI.Now; _isDownloaded = Downloader.Instance.IsDownloaded(id, out _); }
-        var dl = _isDownloaded ? "Скачано" : "Скачать";
+        var dl = _isDownloaded ? L.T("Скачано", "Saved") : L.T("Скачать", "Download");
         bx -= UI.PillWidth(Th.Download, dl) + 8;
         if (UI.Pill(UI.Id("dl", _infoScroll), bx, by, ph, Th.Download, dl, out _)) DownloadMenu();
 
@@ -1822,7 +1853,7 @@ public sealed class WatchPage : IPage
         var nameRun = Gfx.Text(chName, 15, 600, chMaxW);
         var nameRect = new R(x0 + 54, y + 2, nameRun.W, nameRun.H);
         Gfx.Draw(nameRun, nameRect.X, nameRect.Y, UI.Hover(nameRect) && (_info?.ChannelId ?? Video.ChannelId) != null ? Th.Brand : Th.Text);
-        Cards.CopyMenu(nameRect, chName, "Копировать название канала");
+        Cards.CopyMenu(nameRect, chName, L.T("Копировать название канала", "Copy channel name"));
         if (subText.Length > 0) Gfx.Draw(subText, x0 + 54, y + 24, 12, Th.Sub, 400, chMaxW);
         var chId = _info?.ChannelId ?? Video.ChannelId;
         if (chId != null && (UI.Click(UI.Id("ch", _infoScroll), nameRect, playSfx: false) || UI.Click(UI.Id("chav", _infoScroll), new R(x0, y + 1, 42, 42), playSfx: false)))
@@ -1852,10 +1883,10 @@ public sealed class WatchPage : IPage
         if (desc.Length > 0 && UI.RightClick(box))
         {
             var url = Video.Url; var full = Title + "\n" + url + "\n\n" + desc;
-            Sel.Popup([new("Копировать описание", () => Cards.CopyText(desc, "Описание скопировано"), icon: Th.Copy),
-                       new("Копировать название, ссылку и описание", () => Cards.CopyText(full), icon: Th.Link)]);
+            Sel.Popup([new(L.T("Копировать описание", "Copy description"), () => Cards.CopyText(desc, L.T("Описание скопировано", "Description copied")), icon: Th.Copy),
+                       new(L.T("Копировать название, ссылку и описание", "Copy title, link & description"), () => Cards.CopyText(full), icon: Th.Link)]);
         }
-        var stats = _info == null ? (_infoLoading ? "Загрузка…" : "") : string.Join("  ·  ", new[] { _info.Views, _info.Date }.Where(t => !string.IsNullOrEmpty(t)));
+        var stats = _info == null ? (_infoLoading ? L.T("Загрузка…", "Loading…") : "") : string.Join("  ·  ", new[] { _info.Views, _info.Date }.Where(t => !string.IsNullOrEmpty(t)));
         Gfx.Draw(stats, x0 + 16, y + 12, 13, Th.Text, 600, mainW - 32);
         float dy = y + 14 + 20;
         if (descRun != null)
@@ -1865,7 +1896,7 @@ public sealed class WatchPage : IPage
         }
         if (canToggle)
         {
-            var tr = Gfx.Text(_descOpen ? "Свернуть" : "Ещё", 13, 600);
+            var tr = Gfx.Text(_descOpen ? L.T("Свернуть", "Show less") : L.T("Ещё", "Show more"), 13, 600);
             var hit = new R(x0 + 16, dy, tr.W, tr.H + 4);
             Gfx.Draw(tr, hit.X, hit.Y, UI.Hover(hit) ? Th.Text : Th.Brand);
             if (UI.Click(UI.Id("desc", _infoScroll), hit)) _descOpen = !_descOpen;
@@ -1905,7 +1936,7 @@ public sealed class WatchPage : IPage
         Gfx.Fill(box, tint, 12);
         Gfx.Stroke(box, Th.Line, 12);
         Gfx.Draw(_list.Title, box.X + 14, box.Y + 10, 15, Th.Text, 700, box.W - 110);
-        var sub = (cur >= 0 ? $"{cur + 1} из {items.Count}" : $"{items.Count} видео") + (_list.IsMix ? "  ·  микс YouTube" : "");
+        var sub = (cur >= 0 ? L.T($"{cur + 1} из {items.Count}", $"{cur + 1} / {items.Count}") : L.T($"{items.Count} видео", $"{items.Count} videos")) + (_list.IsMix ? L.T("  ·  микс YouTube", "  ·  YouTube Mix") : "");
         Gfx.Draw(sub, box.X + 14, box.Y + 32, 12, Th.Sub, 400, box.W - 110);
         // previous / next in the list
         if (UI.IconButton(UI.Id("pl:prev", _listScroll), new R(box.Right - 84, box.Y + 11, 34, 34), "\uE892", 14, null, cur > 0)) OpenInList(items[cur - 1]);
@@ -1985,45 +2016,48 @@ public sealed class WatchPage : IPage
 
     private float DrawRelatedInline(float x, float y, float width, R view)
     {
-        Gfx.Draw("Похожие видео", x, y + 4, 18, Th.Text, 700);
+        Gfx.Draw(L.T("Похожие видео", "Related videos"), x, y + 4, 18, Th.Text, 700);
         var settings = AppSettings.Current;
-        var label = Gfx.Text("Автовоспроизведение", 12.5f);
-        var toggle = new R(x + width - label.W - 60, y, label.W + 60, 30);
+        var label = Gfx.Text(L.T("Автовоспроизведение", "Autoplay"), 12.5f);
+        var toggle = new R(x + width - label.W - 60 - 6, y, label.W + 60, 30);
         Gfx.Draw(label, toggle.X, toggle.Y + (30 - label.H) / 2, Th.Sub);
         if (UI.Toggle(UI.Id("auto", _relScroll), toggle, settings.Autoplay))
         {
             settings.Autoplay = !settings.Autoplay;
             settings.Save();
         }
-        y += 40;
-        int cols = width >= 1440 ? 3 : width >= 900 ? 2 : 1;
-        const float gap = 14, rowH = 112, thumbW = 168, thumbH = 94;
-        float cardW = (width - gap * (cols - 1)) / cols;
+        y += 44;
+
+        // Exact same big 16:9 Home-style GridCard layout (big 720p thumbs, avatars, live HD hover previews)
+        const float gap = 14;
+        int cols = Math.Max(1, (int)((width + gap) / (270 + gap)));
+        float cardW = MathF.Floor((width - gap * (cols - 1)) / cols);
+        float thumbH = MathF.Round(cardW * 9f / 16f);
+        float rowH = thumbH + 96f;
+        int rows = (_related.Count + cols - 1) / cols;
+
         for (int i = 0; i < _related.Count; i++)
         {
             var v = _related[i];
-            var row = new R(x + (i % cols) * (cardW + gap), y + (i / cols) * rowH, cardW, rowH - 8);
-            if (row.Bottom < view.Y - 30 || row.Y > view.Bottom + 30) continue;
-            var id = UI.Id(_relScroll, i);
-            var over = UI.Hover(row);
-            var glow = UI.Glow(id, row.Inset(-4), 9, over);
-            Cards.Thumb(new R(row.X, row.Y + 2, thumbW, thumbH), v, false, 8, behind: UI.GlowOn(Th.Bg, glow));
-            float tx = row.X + thumbW + 12, textW = row.W - thumbW - 12;
-            var title = Gfx.Draw(v.Title, tx, row.Y + 2, 13.5f, Th.Text, 600, textW, 2);
-            Gfx.Draw(v.Channel, tx, row.Y + title.H + 5, 12, Th.Sub, 400, textW, 1);
-            Gfx.Draw(v.Meta, tx, row.Y + title.H + 25, 12, Th.Sub, 400, textW, 1);
-            if (over) _hover.Over(v);
-            if (UI.MiddleClick(row)) Shell.OpenVideoInNewTab(v);
-            else if (UI.Click(id, row, playSfx: false)) OpenRelated(v);
-            else if (UI.RightClick(row)) Menus.Popup(Cards.MenuFor(v));
+            float cx = x + (i % cols) * (cardW + gap);
+            float cy = y + (i / cols) * rowH;
+            var card = new R(cx, cy, cardW, rowH - 10);
+            if (card.Bottom < view.Y - 40 || card.Y > view.Bottom + 40)
+            {
+                // Prewarm upcoming row thumbnails while scrolling toward them
+                if (card.Y >= view.Bottom + 40 && card.Y <= view.Bottom + rowH * 2.5f && v.VideoId.Length == 11)
+                    Images.Get(v.Thumb720, cardW, thumbH);
+                continue;
+            }
+            Cards.GridCard(card, thumbH, v, UI.Id(_relScroll, i), _hover, RelSource);
             if (_seen.Add(v.VideoId)) LogSeen(v);
         }
-        y += (int)Math.Ceiling(_related.Count / (double)cols) * rowH;
+        y += rows * rowH;
         if (_related.Count == 0 && _infoLoading) UI.Spinner(x + width / 2, y + 12, 9, Th.Sub);
         if (_relCont != null)
         {
-            if (y < view.Bottom + 30 && UI.Pill(UI.Id("rel:more", _relScroll), x, y + 6, 34, Th.More, "Ещё похожие", out _)) LoadMoreRelated();
-            if (_relLoadingMore) UI.Spinner(x + 160, y + 23, 8, Th.Sub);
+            if (y < view.Bottom + 30 && UI.Pill(UI.Id("rel:more", _relScroll), x, y + 6, 34, Th.More, L.T("Ещё похожие", "More related"), out _)) LoadMoreRelated();
+            if (_relLoadingMore) UI.Spinner(x + 170, y + 23, 8, Th.Sub);
             y += 54;
         }
         else y += 16;
@@ -2032,9 +2066,9 @@ public sealed class WatchPage : IPage
 
     private void DrawRelated(R r)
     {
-        Gfx.Draw("Похожие", r.X, r.Y + 6, 16, Th.Text, 600);
+        Gfx.Draw(L.T("Похожие", "Related"), r.X, r.Y + 6, 16, Th.Text, 600);
         var s = AppSettings.Current;
-        var lab = Gfx.Text("Автовоспроизведение", 12.5f);
+        var lab = Gfx.Text(L.T("Автовоспроизведение", "Autoplay"), 12.5f);
         var tog = new R(r.Right - 14 - 46 - lab.W - 8, r.Y + 2, lab.W + 8 + 46, 30);
         Gfx.Draw(lab, tog.X, tog.Y + (30 - lab.H) / 2, Th.Sub);
         if (UI.Toggle(UI.Id("auto", _relScroll), tog, s.Autoplay)) { s.Autoplay = !s.Autoplay; s.Save(); }
@@ -2100,14 +2134,14 @@ public sealed class WatchPage : IPage
     private void DownloadMenu()
     {
         var v = Full;
-        var items = new List<MenuItem> { new("Скачать (" + Cards.QualityName(AppSettings.Current.DownloadQuality) + ")", () => Cards.Download(v, null), icon: Th.Download), MenuItem.Sep };
+        var items = new List<MenuItem> { new(L.T("Скачать (", "Download (") + Cards.QualityName(AppSettings.Current.DownloadQuality) + ")", () => Cards.Download(v, null), icon: Th.Download), MenuItem.Sep };
         items.AddRange(AppSettings.Qualities.Select(q => new MenuItem(Cards.QualityName(q), () => Cards.Download(v, q), icon: Th.Quality)));
         Menus.Popup(items);
     }
 
     public void SpeedMenu()
     {
-        var items = new List<MenuItem> { MenuItem.Title("Скорость воспроизведения") };
+        var items = new List<MenuItem> { MenuItem.Title(L.T("Скорость воспроизведения", "Playback speed")) };
         foreach (var sp in new[] { 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0 })
         {
             var label = sp.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "×";
@@ -2119,7 +2153,7 @@ public sealed class WatchPage : IPage
     public void QualityMenu()
     {
         var s = AppSettings.Current;
-        var items = new List<MenuItem> { MenuItem.Title("Качество видео") };
+        var items = new List<MenuItem> { MenuItem.Title(L.T("Качество видео", "Video quality")) };
         items.AddRange(AppSettings.Qualities.Where(q => q != "audio").Select(q => new MenuItem(Cards.QualityName(q), () =>
         {
             s.PlayerQuality = q;
@@ -2139,22 +2173,22 @@ public sealed class WatchPage : IPage
     private int _subGen;
     public bool SubsOn => _subKey.Length > 0 && PlaybackTracker.Instance.Current?.VideoId == Video.VideoId;
 
-    private static readonly (string Code, string Name)[] TranslateTo = [("ru", "русский"), ("en", "английский"), ("uk", "украинский")];
+    private static readonly (string Code, string Ru, string En)[] TranslateTo = [("ru", "русский", "Russian"), ("en", "английский", "English"), ("uk", "украинский", "Ukrainian")];
 
     /// <summary>The CC button: subtitle languages, YouTube's machine translation, and the dubbed audio tracks.</summary>
     public void TracksMenu()
     {
         var id = Video.VideoId;
-        if (PlaybackTracker.Instance.IsLocal) { Shell.Toast("У скачанного файла дорожки те, что в нём сохранены"); return; }
+        if (PlaybackTracker.Instance.IsLocal) { Shell.Toast(L.T("У скачанного файла дорожки те, что в нём сохранены", "Local file uses its embedded tracks")); return; }
         var x = QuickStream.ExtrasOf(id);
         if (x == null)
         {
-            Shell.Toast("Загружаю список дорожек…", null, 1500);
+            Shell.Toast(L.T("Загружаю список дорожек…", "Loading track list…"), null, 1500);
             _ = QuickStream.EnsureSpecAsync(id).ContinueWith(_ => App.Post(() =>
             {
                 if (Shell.Current != this) return;
                 if (QuickStream.ExtrasOf(id) != null) TracksMenu();
-                else Shell.Toast("Список субтитров не загрузился", Th.Warn);
+                else Shell.Toast(L.T("Список субтитров не загрузился", "Could not load subtitles list"), Th.Warn);
             }));
             return;
         }
@@ -2173,23 +2207,23 @@ public sealed class WatchPage : IPage
     private List<MenuItem> TrackItems(QuickStream.Extras x)
     {
         var items = new List<MenuItem>();
-        if (x.Captions.Count == 0) items.Add(new("У этого видео нет субтитров"));
+        if (x.Captions.Count == 0) items.Add(new(L.T("У этого видео нет субтитров", "No subtitles available")));
         else
         {
-            items.Add(new("Субтитры выключены", () => SetSubs(x, null, null), null, _subKey.Length == 0));
+            items.Add(new(L.T("Субтитры выключены", "Subtitles off"), () => SetSubs(x, null, null), null, _subKey.Length == 0));
             var hl = AppSettings.Current.Hl;
             foreach (var t in x.Captions.OrderByDescending(t => t.Lang.StartsWith(hl)).ThenBy(t => t.Auto).Take(14))
                 items.Add(new(t.Name, () => SetSubs(x, t, null), null, _subKey == t.Lang + (t.Auto ? "*" : "")));
             if (x.Captions.Count > 14)
-                items.Add(new("Другие языки", null, x.Captions.OrderBy(t => t.Name).Select(t => new MenuItem(t.Name, () => SetSubs(x, t, null), null, _subKey == t.Lang + (t.Auto ? "*" : ""))).ToList()));
+                items.Add(new(L.T("Другие языки", "Other languages"), null, x.Captions.OrderBy(t => t.Name).Select(t => new MenuItem(t.Name, () => SetSubs(x, t, null), null, _subKey == t.Lang + (t.Auto ? "*" : ""))).ToList()));
             var from = x.Captions.FirstOrDefault(t => !t.Auto) ?? x.Captions[0];
-            items.Add(new("Автоперевод", null, TranslateTo.Where(l => !from.Lang.StartsWith(l.Code))
-                .Select(l => new MenuItem("На " + l.Name, () => SetSubs(x, from, l.Code), null, _subKey == from.Lang + (from.Auto ? "*" : "") + ">" + l.Code)).ToList()));
+            items.Add(new(L.T("Автоперевод", "Auto-translate"), null, TranslateTo.Where(l => !from.Lang.StartsWith(l.Code))
+                .Select(l => new MenuItem(L.T("На " + l.Ru, "To " + l.En), () => SetSubs(x, from, l.Code), null, _subKey == from.Lang + (from.Auto ? "*" : "") + ">" + l.Code)).ToList()));
         }
         if (x.Audio.Count > 1)
         {
             items.Add(MenuItem.Sep);
-            items.Add(new("Язык озвучки", null, x.Audio.Select(a => new MenuItem(a.Name, () => SetAudio(x, a), null, IsAudioSelected(x, a))).ToList()));
+            items.Add(new(L.T("Язык озвучки", "Audio track"), null, x.Audio.Select(a => new MenuItem(a.Name, () => SetAudio(x, a), null, IsAudioSelected(x, a))).ToList()));
         }
         return items;
     }
@@ -2223,9 +2257,10 @@ public sealed class WatchPage : IPage
             App.Post(() =>
             {
                 if (sgen != _subGen || PlaybackTracker.Instance.Current?.VideoId != id) return;
-                if (file == null) { Shell.Toast(translateTo != null ? "Перевод субтитров не получился, попробуйте ещё раз" : "Субтитры не загрузились", Th.Warn); return; }
+                if (file == null) { Shell.Toast(translateTo != null ? L.T("Перевод субтитров не получился, попробуйте ещё раз", "Subtitle translation failed, try again") : L.T("Субтитры не загрузились", "Failed to load subtitles"), Th.Warn); return; }
                 _subKey = key;
-                p.Command("sub-add", file.Replace('\\', '/'), "cached", translateTo != null ? "Перевод: " + TranslateTo.First(l => l.Code == translateTo).Name : t.Name, translateTo ?? t.Lang);
+                var trName = translateTo != null ? TranslateTo.First(l => l.Code == translateTo) : default;
+                p.Command("sub-add", file.Replace('\\', '/'), "cached", translateTo != null ? L.T("Перевод: " + trName.Ru, "Translated: " + trName.En) : t.Name, translateTo ?? t.Lang);
                 Shell.PushPlayerState();
             });
         });
@@ -2236,7 +2271,7 @@ public sealed class WatchPage : IPage
         var p = MpvPlayer.Instance;
         _audioId = a.Id;
         p.Command("audio-add", QuickStream.AudioUrl(x, a), "cached", a.Name, a.Lang);
-        Shell.Toast("Озвучка: " + a.Name, null, 2000);
+        Shell.Toast(L.T("Озвучка: ", "Audio track: ") + a.Name, null, 2000);
     }
 
     /// <summary>Scripted check: "sub:en", "sub:en>ru", "audio:ru", joined with commas.</summary>
@@ -2274,13 +2309,13 @@ public sealed class WatchPage : IPage
         var items = Cards.MenuFor(Full);
         var top = new List<MenuItem>
         {
-            new("Поделиться…", OpenShare, icon: Th.Share),
-            new("Копировать ссылку с текущего момента", () => Cards.Copy(SharePanel.LinkFor(Video.VideoId, MpvPlayer.Instance.TimePos)), icon: Th.Link, shortcut: "Ctrl+Shift+C"),
-            new("Начать сначала", () => MpvPlayer.Instance.SeekAbsolute(0), icon: Th.Restart),
+            new(L.T("Поделиться…", "Share…"), OpenShare, icon: Th.Share),
+            new(L.T("Копировать ссылку с текущего момента", "Copy link at current time"), () => Cards.Copy(SharePanel.LinkFor(Video.VideoId, MpvPlayer.Instance.TimePos)), icon: Th.Link, shortcut: "Ctrl+Shift+C"),
+            new(L.T("Начать сначала", "Restart from beginning"), () => MpvPlayer.Instance.SeekAbsolute(0), icon: Th.Restart),
         };
         if (!PlaybackTracker.Instance.IsLocal && QuickStream.ExtrasOf(Video.VideoId) is { } tracks)
-            top.Add(new("Субтитры и озвучка", null, TrackItems(tracks), icon: Th.Subtitle));
-        else top.Add(new("Субтитры и озвучка…", TracksMenu, icon: Th.Subtitle));
+            top.Add(new(L.T("Субтитры и озвучка", "Subtitles & audio"), null, TrackItems(tracks), icon: Th.Subtitle));
+        else top.Add(new(L.T("Субтитры и озвучка…", "Subtitles & audio…"), TracksMenu, icon: Th.Subtitle));
         top.Add(MenuItem.Sep);
         items.InsertRange(0, top);
         Menus.Popup(items);

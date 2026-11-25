@@ -45,11 +45,11 @@ public sealed class DownloadItem : INotifyPropertyChanged
 
     public string StatusText => Status switch
     {
-        "queued" => "В очереди",
+        "queued" => L.T("В очереди", "Queued"),
         "downloading" => $"{Progress:0.0}% · {Speed}",
         "done" => $"{Fmt.Size(SizeBytes)} · {Fmt.Time(DurationS)} · {Quality}",
-        "error" => "Ошибка: " + Error,
-        "canceled" => "Отменено",
+        "error" => L.T("Ошибка: ", "Error: ") + Error,
+        "canceled" => L.T("Отменено", "Canceled"),
         _ => Status,
     };
 

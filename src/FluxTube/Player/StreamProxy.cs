@@ -44,6 +44,7 @@ public sealed class StreamProxy
         public bool StarterDead;
         public DateTime Touched = DateTime.UtcNow;
         public DateTime RefreshedAt;
+        public int AuthFails;
     }
 
     private readonly ConcurrentDictionary<string, Entry> _entries = new();
@@ -280,10 +281,10 @@ public sealed class StreamProxy
     /// The link stopped working or stalled in the middle of a video: ask for a fresh link for the same
     /// formats (QuickStream first, yt-dlp Resolver fallback). The answer lands in the same entries, so the stream carries on seamlessly.
     /// </summary>
-    private static async Task<bool> RefreshLinkAsync(Entry e, bool force = false)
+    private static async Task<bool> RefreshLinkAsync(Entry e, bool force = false, bool preferResolver = false)
     {
         var dot = e.Key.IndexOf('.');
-        var cooldown = force ? TimeSpan.FromSeconds(15) : TimeSpan.FromSeconds(30);
+        var cooldown = force ? TimeSpan.FromSeconds(8) : TimeSpan.FromSeconds(25);
         if (dot != 11 || DateTime.UtcNow - e.RefreshedAt < cooldown) return false;
         e.RefreshedAt = DateTime.UtcNow;
         var id = e.Key[..dot];
@@ -293,8 +294,11 @@ public sealed class StreamProxy
         {
             QuickStream.Forget(id);
             StreamInfo? s = null;
-            try { s = await QuickStream.GetExactAsync(id, known.Vitag, known.Aitag).WaitAsync(TimeSpan.FromSeconds(10)); }
-            catch { }
+            if (!preferResolver && e.AuthFails < 2)
+            {
+                try { s = await QuickStream.GetExactAsync(id, known.Vitag, known.Aitag).WaitAsync(TimeSpan.FromSeconds(10)); }
+                catch { }
+            }
             if (s == null || e.Url == old)
             {
                 try { s = await Resolver.Instance.GetExactAsync(id, known.Vitag, known.Aitag).WaitAsync(TimeSpan.FromSeconds(18)); }
@@ -332,15 +336,16 @@ public sealed class StreamProxy
             req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(from, to);
             if (forceNewConnection || attempt > 0) req.Headers.ConnectionClose = true;
             var resp = await SendAsync(req, ct);
-            if (resp.IsSuccessStatusCode) return resp;
+            if (resp.IsSuccessStatusCode) { e.AuthFails = 0; return resp; }
             var code = (int)resp.StatusCode;
             resp.Dispose();
-            if (e.Fragile || attempt >= e.Retries || code is not (403 or 404 or 410 or 429 or 500 or 502 or 503))
+            if (code is 401 or 403) e.AuthFails++;
+            if (e.Fragile || attempt >= e.Retries || code is not (401 or 403 or 404 or 410 or 429 or 500 or 502 or 503))
             {
-                if (code is (403 or 404 or 410 or 429 or 503) && mayRefresh && !e.Fragile && await RefreshLinkAsync(e)) { attempt = -1; continue; }
+                if (code is (401 or 403 or 404 or 410 or 429 or 503) && mayRefresh && !e.Fragile && await RefreshLinkAsync(e, force: code == 401, preferResolver: code == 401 && e.AuthFails >= 2)) { attempt = -1; continue; }
                 throw new HttpRequestException($"googlevideo {code}");
             }
-            if (code is (403 or 410) && mayRefresh && !e.Fragile && attempt == 1 && await RefreshLinkAsync(e)) { attempt = -1; continue; }
+            if (code is (401 or 403 or 410) && mayRefresh && !e.Fragile && (code == 401 || attempt == 1) && await RefreshLinkAsync(e, force: code == 401, preferResolver: code == 401 && e.AuthFails >= 2)) { attempt = -1; continue; }
             await Task.Delay(300 * (attempt + 1), ct);
         }
     }

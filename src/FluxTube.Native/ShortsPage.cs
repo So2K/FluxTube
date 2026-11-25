@@ -38,6 +38,7 @@ public sealed class ShortsPage : IPage
     private int _slideFrom;
     private long _slideAt;
     private string? _prevVideoId;
+    private int _consecutiveAdSkips;
     private bool _loop = true;
     private bool _dragVol, _dragSeek;
     private double _dragSeekTarget = -1;
@@ -158,7 +159,7 @@ public sealed class ShortsPage : IPage
         if (vol > 0 && p.Muted) p.Command("set", "mute", "no");
         if (smooth) p.SetVolumeSmooth(vol);
         else p.Command("set", "volume", vol.ToString());
-        p.ShowText($"Громкость: {vol}%", 900);
+        p.ShowText($"{L.T("Громкость", "Volume")}: {vol}%", 900);
         _volSaveAt = Environment.TickCount64 + 400;
         App.Invalidate();
     }
@@ -226,10 +227,10 @@ public sealed class ShortsPage : IPage
         if (_postingComment || _commentEdit == null || Cur is not { } v) return;
         var text = _commentEdit.Text.Trim();
         if (text.Length == 0) return;
-        if (!CookieStore.IsLoggedIn) { Shell.Toast("Войдите в аккаунт YouTube, чтобы оставлять комментарии", Th.Warn); return; }
+        if (!CookieStore.IsLoggedIn) { Shell.Toast(L.T("Войдите в аккаунт YouTube, чтобы оставлять комментарии", "Sign in to YouTube to post comments"), Th.Warn); return; }
         if (string.IsNullOrEmpty(_createCommentParams))
         {
-            Shell.Toast("Токен комментариев ещё загружается — подождите секунду", Th.Warn);
+            Shell.Toast(L.T("Токен комментариев ещё загружается — подождите секунду", "Comment token still loading — wait a second"), Th.Warn);
             if (!_commentsLoading) StartComments(v.VideoId);
             return;
         }
@@ -243,7 +244,7 @@ public sealed class ShortsPage : IPage
             App.Post(() =>
             {
                 _postingComment = false;
-                if (!ok) { Shell.Toast("Не удалось отправить комментарий: " + (err ?? "ошибка YouTube"), Th.Warn, 5000); App.Invalidate(); return; }
+                if (!ok) { Shell.Toast(L.T("Не удалось отправить комментарий: ", "Failed to post comment: ") + (err ?? L.T("ошибка YouTube", "YouTube error")), Th.Warn, 5000); App.Invalidate(); return; }
                 if (_commentEdit != null) _commentEdit.Text = "";
                 Sfx.Like();
                 if (gen == _commentGen)
@@ -253,15 +254,15 @@ public sealed class ShortsPage : IPage
                     {
                         C = new Comment
                         {
-                            Author = acc?.Handle is { Length: > 0 } h ? h : (acc?.Name is { Length: > 0 } nm ? nm : "Вы"),
+                            Author = acc?.Handle is { Length: > 0 } h ? h : (acc?.Name is { Length: > 0 } nm ? nm : L.T("Вы", "You")),
                             Avatar = acc?.Photo,
                             Text = text,
-                            When = "только что",
+                            When = L.T("только что", "just now"),
                             Likes = "0",
                         },
                     });
                 }
-                Shell.Toast("Комментарий опубликован", Th.Good, 2400);
+                Shell.Toast(L.T("Комментарий опубликован", "Comment posted"), Th.Good, 2400);
                 App.Invalidate();
             });
         });
@@ -354,6 +355,46 @@ public sealed class ShortsPage : IPage
         Images.Get($"https://i.ytimg.com/vi/{item.VideoId}/oar2.jpg", _videoW, _videoH);
     }
 
+    private void SkipAdShort(string id, string reason)
+    {
+        var at = _items.FindIndex(x => x.VideoId == id);
+        if (at < 0) return;
+        ShortsAdBlocker.RecordBlocked();
+        Paths.Log($"shorts-adblock: removed {id} ({reason})");
+
+        if (at != _i)
+        {
+            _items.RemoveAt(at);
+            if (at < _i) _i--;
+            if (_feed && _items.Count - _i <= 5 && _next != null) LoadMore();
+            App.Invalidate();
+            return;
+        }
+
+        // Currently playing Short is an ad/sponsored video -> auto-skip cleanly!
+        _items.RemoveAt(at);
+        if (_consecutiveAdSkips >= 15)
+        {
+            _consecutiveAdSkips = 0;
+            return;
+        }
+        _consecutiveAdSkips++;
+        Shell.Toast(L.T($"Рекламный Short пропущен ({reason})", $"Ad Short skipped ({reason})"), Th.Good, 2100);
+        if (_i >= _items.Count)
+        {
+            if (_feed && _next != null) { _pendingAdvance = true; LoadMore(); }
+            else _i = Math.Max(0, _items.Count - 1);
+        }
+        if (_i >= 0 && _i < _items.Count)
+        {
+            _prevVideoId = id;
+            _slideFrom = 1;
+            _slideAt = UI.Now;
+            PlayCurrent();
+        }
+        App.Invalidate();
+    }
+
     private void NeedInfo(VideoItem v)
     {
         if ((v.Title.Length > 0 && v.Channel.Length > 0 && _dislikes.ContainsKey(v.VideoId)) || !_asked.Add(v.VideoId)) return;
@@ -361,29 +402,71 @@ public sealed class ShortsPage : IPage
         var gen = _feedGen;
         _ = Task.Run(async () =>
         {
-            try
-            {
-                var full = await InnerTube.Instance.ShortInfoAsync(id);
-                if (full != null)
-                {
-                    App.Post(() =>
-                    {
-                        if (gen != _feedGen) return;
-                        var at = _items.FindIndex(x => x.VideoId == id);
-                        if (at < 0) return;
-                        _items[at] = full;
-                        if (PlaybackTracker.Instance.Current?.VideoId == id)
-                        {
-                            PlaybackTracker.Instance.UpdateMeta(full.Title, full.Channel);
-                            Shell.PushPlayerState();
-                        }
-                        App.Invalidate();
-                    });
-                }
-            }
+            VideoItem? full = null;
+            WatchInfo? watchInfo = null;
+            List<Extras.Segment>? sponsorSegs = null;
+
+            try { full = await InnerTube.Instance.ShortInfoAsync(id); }
             catch (Exception e) { Paths.Log("short info: " + e.Message); }
 
-            // Fetch dislike count via Return YouTube Dislike + comment count in parallel for the YouTube circular rail!
+            // Fetch full watch metadata (comments count + full description + paidPromotion) and SponsorBlock in parallel!
+            var watchTask = Task.Run(async () =>
+            {
+                try { return await InnerTube.Instance.WatchCachedAsync(id); }
+                catch { return null; }
+            });
+            var sbTask = ShortsAdBlocker.Enabled
+                ? Task.Run(async () =>
+                {
+                    try { return await Extras.ShortsSponsorSegmentsAsync(id); }
+                    catch { return new List<Extras.Segment>(); }
+                })
+                : Task.FromResult(new List<Extras.Segment>());
+
+            // Early fast-reject right after ShortInfoAsync if YouTube ad/paid/erid already detected!
+            if (_feed && full != null && ShortsAdBlocker.Check(full, null, null) is { } earlyReason)
+            {
+                App.Post(() => { if (gen == _feedGen) SkipAdShort(id, earlyReason); });
+                return;
+            }
+
+            if (full != null)
+            {
+                App.Post(() =>
+                {
+                    if (gen != _feedGen) return;
+                    var at = _items.FindIndex(x => x.VideoId == id);
+                    if (at < 0) return;
+                    _items[at] = full;
+                    if (PlaybackTracker.Instance.Current?.VideoId == id)
+                    {
+                        PlaybackTracker.Instance.UpdateMeta(full.Title, full.Channel);
+                        Shell.PushPlayerState();
+                    }
+                    App.Invalidate();
+                });
+            }
+
+            watchInfo = await watchTask;
+            sponsorSegs = await sbTask;
+
+            // Full max-power ad / sponsored check combining ShortInfo + Watch description + SponsorBlock!
+            if (_feed)
+            {
+                double dur = PlaybackTracker.Instance.Current?.VideoId == id ? MpvPlayer.Instance.Duration : 0;
+                if (ShortsAdBlocker.Check(full ?? v, watchInfo, sponsorSegs, dur) is { } fullReason)
+                {
+                    App.Post(() => { if (gen == _feedGen) SkipAdShort(id, fullReason); });
+                    return;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(watchInfo?.CommentsCount))
+            {
+                var cc = watchInfo.CommentsCount;
+                App.Post(() => { if (gen == _feedGen) { _commCounts[id] = cc; App.Invalidate(); } });
+            }
+
             if (AppSettings.Current.ReturnDislikes)
             {
                 try
@@ -396,16 +479,6 @@ public sealed class ShortsPage : IPage
                 }
                 catch { }
             }
-            try
-            {
-                var w = await InnerTube.Instance.WatchCachedAsync(id);
-                if (!string.IsNullOrEmpty(w.CommentsCount))
-                {
-                    var cc = w.CommentsCount;
-                    App.Post(() => { if (gen == _feedGen) { _commCounts[id] = cc; App.Invalidate(); } });
-                }
-            }
-            catch { }
         });
     }
 
@@ -420,6 +493,7 @@ public sealed class ShortsPage : IPage
             return;
         }
         _pendingAdvance = false;
+        _consecutiveAdSkips = 0;
         _lastStep = UI.Now;
         _prevVideoId = Cur?.VideoId;
         _i = to;
@@ -431,7 +505,7 @@ public sealed class ShortsPage : IPage
 
     private void Rate(VideoItem v, bool like)
     {
-        if (!CookieStore.IsLoggedIn) { Shell.Toast("Чтобы ставить оценки, войдите в аккаунт YouTube", Th.Warn); return; }
+        if (!CookieStore.IsLoggedIn) { Shell.Toast(L.T("Чтобы ставить оценки, войдите в аккаунт YouTube", "Sign in to YouTube to rate videos"), Th.Warn); return; }
         Sfx.Like();
         var want = like ? "LIKE" : "DISLIKE";
         var before = _rating.GetValueOrDefault(v.VideoId, "");
@@ -442,7 +516,7 @@ public sealed class ShortsPage : IPage
         {
             bool ok;
             try { ok = await InnerTube.Instance.RateAsync(id, action); } catch { ok = false; }
-            if (!ok) App.Post(() => { _rating[id] = before; Shell.Toast("YouTube не принял оценку", Th.Warn); App.Invalidate(); });
+            if (!ok) App.Post(() => { _rating[id] = before; Shell.Toast(L.T("YouTube не принял оценку", "YouTube rejected the rating"), Th.Warn); App.Invalidate(); });
         });
     }
 
@@ -452,22 +526,41 @@ public sealed class ShortsPage : IPage
         var muted = p.Muted;
         var items = new List<MenuItem>
         {
-            new(p.Paused ? "Продолжить" : "Пауза", p.TogglePause, icon: p.Paused ? Th.Play : Th.Pause, shortcut: "Space"),
-            new(muted ? "Включить звук" : "Выключить звук", ToggleMute, icon: muted ? Th.Volume : Th.Mute, shortcut: "M"),
-            new("Повтор Shorts", ToggleLoop, check: _loop, icon: Th.Repeat),
-            new(AppSettings.Current.ShortsPanelHidden ? "Показать боковую панель" : "Скрыть боковую панель", TogglePanel, icon: Th.Theater),
-            new("Подпись поверх видео (при наведении)", ToggleInfoOverlay, check: AppSettings.Current.ShortsInfoOverlay, icon: Th.Info),
+            new(p.Paused ? L.T("Продолжить", "Resume") : L.T("Пауза", "Pause"), p.TogglePause, icon: p.Paused ? Th.Play : Th.Pause, shortcut: "Space"),
+            new(muted ? L.T("Включить звук", "Unmute") : L.T("Выключить звук", "Mute"), ToggleMute, icon: muted ? Th.Volume : Th.Mute, shortcut: "M"),
+            new(L.T("Повтор Shorts", "Loop Short"), ToggleLoop, check: _loop, icon: Th.Repeat),
+            new(AppSettings.Current.ShortsPanelHidden ? L.T("Показать боковую панель", "Show side panel") : L.T("Скрыть боковую панель", "Hide side panel"), TogglePanel, icon: Th.Theater),
+            new(L.T("Подпись поверх видео (при наведении)", "Title overlay on hover"), ToggleInfoOverlay, check: AppSettings.Current.ShortsInfoOverlay, icon: Th.Info),
+            new(L.T("Блокировка рекламы в Shorts", "Shorts Ad Blocker"), null,
+            [
+                new(L.T("Максимум (реклама + erid + промо + SponsorBlock)", "Maximum (ads + paid promo + SponsorBlock)"), () => SetShortsAdBlock("max"), check: AppSettings.Current.ShortsAdBlock == "max"),
+                new(L.T("Стандарт (реклама + erid + SponsorBlock)", "Standard (ads + paid promo + SponsorBlock)"), () => SetShortsAdBlock("standard"), check: AppSettings.Current.ShortsAdBlock == "standard"),
+                new(L.T("Выключено", "Off"), () => SetShortsAdBlock("off"), check: AppSettings.Current.ShortsAdBlock == "off"),
+            ], icon: Th.Block),
             MenuItem.Sep,
-            new("Открыть как обычное видео", () => Shell.OpenVideo(new VideoItem { VideoId = v.VideoId, Title = v.Title, Channel = v.Channel, ChannelId = v.ChannelId }, "shorts-open"), icon: Th.Expand),
-            new("Открыть в новой вкладке", () => Shell.OpenVideoInNewTab(v), icon: Th.Add),
-            new("Скачать (" + Cards.QualityName(AppSettings.Current.DownloadQuality) + ")", () => Cards.Download(v, null), icon: Th.Download),
+            new(L.T("Открыть как обычное видео", "Open as regular video"), () => Shell.OpenVideo(new VideoItem { VideoId = v.VideoId, Title = v.Title, Channel = v.Channel, ChannelId = v.ChannelId }, "shorts-open"), icon: Th.Expand),
+            new(L.T("Открыть в новой вкладке", "Open in new tab"), () => Shell.OpenVideoInNewTab(v), icon: Th.Add),
+            new(L.T("Скачать", "Download") + " (" + Cards.QualityName(AppSettings.Current.DownloadQuality) + ")", () => Cards.Download(v, null), icon: Th.Download),
             MenuItem.Sep,
-            new("Копировать ссылку на Shorts", () => Cards.Copy("https://youtube.com/shorts/" + v.VideoId), icon: Th.Link),
-            new("Открыть в браузере", () => W.Open("https://youtube.com/shorts/" + v.VideoId), icon: Th.Globe),
+            new(L.T("Копировать ссылку на Shorts", "Copy Short link"), () => Cards.Copy("https://youtube.com/shorts/" + v.VideoId), icon: Th.Link),
+            new(L.T("Открыть в браузере", "Open in browser"), () => W.Open("https://youtube.com/shorts/" + v.VideoId), icon: Th.Globe),
         };
         if (v.ChannelId != null)
-            items.Insert(5, new("Открыть канал: " + v.Channel, () => Shell.OpenChannel(v.ChannelId, v.Channel), icon: Th.Account));
+            items.Insert(6, new(L.T("Открыть канал: ", "Open channel: ") + v.Channel, () => Shell.OpenChannel(v.ChannelId, v.Channel), icon: Th.Account));
         Menus.Popup(items);
+    }
+
+    private static void SetShortsAdBlock(string mode)
+    {
+        AppSettings.Current.ShortsAdBlock = mode;
+        AppSettings.Current.Save();
+        Shell.Toast(L.T("Блокировка рекламы в Shorts: ", "Shorts Ad Blocker: ") + mode switch
+        {
+            "max" => L.T("Максимум", "Maximum"),
+            "standard" => L.T("Стандарт", "Standard"),
+            _ => L.T("Выкл", "Off"),
+        }, Th.Good, 2200);
+        App.Invalidate();
     }
 
     private void ToggleMute()
@@ -523,9 +616,9 @@ public sealed class ShortsPage : IPage
             if (_loading) UI.Spinner(r.X + r.W / 2, r.Y + r.H / 2, 16, Th.Sub);
             else
             {
-                var msg = _failed ? "Shorts не загрузились." : "Здесь пока пусто.";
+                var msg = _failed ? L.T("Shorts не загрузились.", "Could not load Shorts.") : L.T("Здесь пока пусто.", "Nothing here yet.");
                 Gfx.Draw(msg, r.X + r.W / 2 - 90, r.Y + r.H / 2 - 30, 15, Th.Sub);
-                if (_feed && UI.Pill(UI.Id("shorts:retry"), r.X + r.W / 2 - 60, r.Y + r.H / 2 + 4, 36, Th.Refresh, "Повторить", out _)) App.Post(Refresh);
+                if (_feed && UI.Pill(UI.Id("shorts:retry"), r.X + r.W / 2 - 60, r.Y + r.H / 2 + 4, 36, Th.Refresh, L.T("Повторить", "Retry"), out _)) App.Post(Refresh);
             }
             return;
         }
@@ -575,7 +668,10 @@ public sealed class ShortsPage : IPage
             }
         }
 
-        Gfx.PushClip(new R(video.X - 2, r.Y, video.W + 4, r.H));
+        var stackClip = new R(video.X - 2, r.Y, video.W + 4, r.H);
+        float swipeVelY = sliding ? -3f * (1f - slideT) * (1f - slideT) * stride * _slideFrom / 0.25f : 0f;
+        bool swipeMb = Gfx.PushMotionBlur(stackClip, 0f, swipeVelY);
+        Gfx.PushClip(stackClip);
         if (sliding && _prevVideoId != null)
         {
             var outR = new R(video.X, curY - stride * _slideFrom, video.W, video.H);
@@ -613,6 +709,7 @@ public sealed class ShortsPage : IPage
             }
         }
         Gfx.PopClip();
+        Gfx.PopMotionBlur(swipeMb);
         if (UI.RightClick(video)) ContextMenuFor(v);
 
         // ---- ALWAYS-VISIBLE YOUTUBE-STYLE VERTICAL CIRCULAR ACTION RAIL (bottom-right of the Short!) ----
@@ -622,10 +719,10 @@ public sealed class ShortsPage : IPage
         float railItemsH = itemStep * 5 + avSize + 6;
         float ry = MathF.Max(video.Y + 4, video.Bottom - railItemsH - 4);
         var mine = _rating.GetValueOrDefault(v.VideoId, "");
-        var likeLbl = v.Meta.Length > 0 ? v.Meta : "Лайк";
-        var disLbl = _dislikes.TryGetValue(v.VideoId, out var dlCnt) && dlCnt.Length > 0 ? dlCnt : "Не нрав.";
+        var likeLbl = v.Meta.Length > 0 ? v.Meta : L.T("Лайк", "Like");
+        var disLbl = _dislikes.TryGetValue(v.VideoId, out var dlCnt) && dlCnt.Length > 0 ? dlCnt : L.T("Не нрав.", "Dislike");
         var commLbl = _commentsFor == v.VideoId && _commentCount is { Length: > 0 } cc0 ? cc0
-                    : (_commCounts.TryGetValue(v.VideoId, out var cc1) ? cc1 : "Комм.");
+                    : (_commCounts.TryGetValue(v.VideoId, out var cc1) ? cc1 : L.T("Комм.", "Chat"));
 
         if (RailCircleButton(UI.Id("shorts:rlike"), rcx, ry, Th.Like, likeLbl, mine == "LIKE", playSfx: false)) Rate(v, true);
         ry += itemStep;
@@ -633,9 +730,9 @@ public sealed class ShortsPage : IPage
         ry += itemStep;
         if (RailCircleButton(UI.Id("shorts:rcomm"), rcx, ry, Th.Comment, commLbl, _showComments && !hidden)) ToggleComments();
         ry += itemStep;
-        if (RailCircleButton(UI.Id("shorts:rshare"), rcx, ry, Th.Share, "Поделиться", false)) Cards.Copy("https://youtube.com/shorts/" + v.VideoId);
+        if (RailCircleButton(UI.Id("shorts:rshare"), rcx, ry, Th.Share, L.T("Поделиться", "Share"), false)) Cards.Copy("https://youtube.com/shorts/" + v.VideoId);
         ry += itemStep;
-        if (RailCircleButton(UI.Id("shorts:rpanel"), rcx, ry, hidden ? Th.Theater : Th.More, hidden ? "Панель" : "Скрыть", !hidden)) TogglePanel();
+        if (RailCircleButton(UI.Id("shorts:rpanel"), rcx, ry, hidden ? Th.Theater : Th.More, hidden ? L.T("Панель", "Panel") : L.T("Скрыть", "Hide"), !hidden)) TogglePanel();
         ry += itemStep + 4;
 
         // Rounded-square Channel Avatar at the bottom of the YouTube action rail!
@@ -691,13 +788,19 @@ public sealed class ShortsPage : IPage
                     {
                         var tr0 = Sel.Text(UI.Id("shorts:ctitle"), v.Title, tx, ty + cnr.H + 10, 14, Th.Sub, 500, tw, 6, links: true,
                             onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
-                        Cards.CopyMenu(new R(tx, ty + cnr.H + 10, tr0.W, tr0.H), v.Title, "Копировать название");
+                        Cards.CopyMenu(new R(tx, ty + cnr.H + 10, tr0.W, tr0.H), v.Title, L.T("Копировать название", "Copy title"));
                     }
                 }
             }
             if (UI.Wheel != 0)
             {
-                if (UI.Hover(video)) { AdjustVolume(UI.Wheel > 0 ? 5 : -5); UI.Wheel = 0; }
+                if (UI.Hover(video))
+                {
+                    if (W.KeyDown(W.VK_SHIFT) && AppSettings.Current.ShiftWheelFrameStep) Shell.StepVideoFrame(UI.Wheel);
+                    else if (AppSettings.Current.WheelVolumeOnVideo) AdjustVolume(UI.Wheel > 0 ? 5 : -5);
+                    else Step(UI.Wheel > 0 ? -1 : 1);
+                    UI.Wheel = 0;
+                }
                 else if (UI.Hover(r)) { Step(UI.Wheel > 0 ? -1 : 1); UI.Wheel = 0; }
             }
             return;
@@ -728,7 +831,8 @@ public sealed class ShortsPage : IPage
         var hideBtn = new R(panelR.Right - pad - 28, y + 6, 28, 28);
         if (UI.IconButton(UI.Id("shorts:hidepanel"), hideBtn, Th.ChevronRight, 11, Th.Sub)) TogglePanel();
 
-        var badge = _feed ? $"Shorts #{_i + 1}" : $"{_i + 1} / {_items.Count}";
+        var badge = (_feed ? $"Shorts #{_i + 1}" : $"{_i + 1} / {_items.Count}")
+            + (ShortsAdBlocker.BlockedSessionCount > 0 ? $" · -{ShortsAdBlocker.BlockedSessionCount} ad" : "");
         var br = Gfx.Text(badge, 11.5f, 600);
         var badgeR = new R(hideBtn.X - 6 - br.W - 14, y + 8, br.W + 14, 24);
         Gfx.Fill(badgeR, Th.A(0.08f), 12);
@@ -737,7 +841,7 @@ public sealed class ShortsPage : IPage
         var nr = Gfx.Text(name, 14.5f, 600, w - 50 - badgeR.W - 40);
         var nameR = new R(x + 50, y + 3, nr.W, nr.H);
         Gfx.Draw(nr, nameR.X, nameR.Y, UI.Hover(nameR) && v.ChannelId != null ? Th.Brand : Th.Text);
-        Gfx.Draw(v.ChannelId != null ? "Перейти на канал" : "YouTube Shorts", x + 50, y + 22, 11.5f, Th.Dim);
+        Gfx.Draw(v.ChannelId != null ? L.T("Перейти на канал", "Open channel") : "YouTube Shorts", x + 50, y + 22, 11.5f, Th.Dim);
         if (v.ChannelId != null && (UI.Click(UI.Id("shorts:ch"), new R(x + 50, y + 2, nr.W + 20, 36), playSfx: false) || UI.Click(UI.Id("shorts:av"), avR, playSfx: false)))
         {
             var cid = v.ChannelId; var cn = name;
@@ -749,7 +853,7 @@ public sealed class ShortsPage : IPage
         {
             var tr = Sel.Text(UI.Id("shorts:title"), v.Title, x, y, 15, Th.Text, 600, w, _showComments ? 2 : 4, links: true,
                 onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
-            Cards.CopyMenu(new R(x, y, tr.W, tr.H), v.Title, "Копировать название");
+            Cards.CopyMenu(new R(x, y, tr.W, tr.H), v.Title, L.T("Копировать название", "Copy title"));
             y += tr.H + 14;
         }
         else { Gfx.Fill(new R(x, y, w * 0.78f, 15), UI.Pulse(Th.Thumb), 5); y += 28; }
@@ -840,14 +944,14 @@ public sealed class ShortsPage : IPage
 
         // 3. QUICK ACTIONS GRID: 4 crisp tiles
         float tileGap = 8, tileW = (w - tileGap * 3) / 4, tileH = 48;
-        ActionTile(new R(x, y, tileW, tileH), UI.Id("shorts:dl"), Th.Download, "Скачать", () => Cards.Download(v, null));
-        ActionTile(new R(x + (tileW + tileGap), y, tileW, tileH), UI.Id("shorts:commt"), Th.Comment, "Комм.", ToggleComments);
-        ActionTile(new R(x + (tileW + tileGap) * 2, y, tileW, tileH), UI.Id("shorts:open"), Th.Expand, "Плеер", () =>
+        ActionTile(new R(x, y, tileW, tileH), UI.Id("shorts:dl"), Th.Download, L.T("Скачать", "Save"), () => Cards.Download(v, null));
+        ActionTile(new R(x + (tileW + tileGap), y, tileW, tileH), UI.Id("shorts:commt"), Th.Comment, L.T("Комм.", "Chat"), ToggleComments);
+        ActionTile(new R(x + (tileW + tileGap) * 2, y, tileW, tileH), UI.Id("shorts:open"), Th.Expand, L.T("Плеер", "Player"), () =>
         {
             var vv = v;
             App.Post(() => Shell.OpenVideo(new VideoItem { VideoId = vv.VideoId, Title = vv.Title, Channel = vv.Channel, ChannelId = vv.ChannelId }, "shorts-open"));
         });
-        ActionTile(new R(x + (tileW + tileGap) * 3, y, tileW, tileH), UI.Id("shorts:tab"), Th.Add, "Вкладка", () => Shell.OpenVideoInNewTab(v));
+        ActionTile(new R(x + (tileW + tileGap) * 3, y, tileW, tileH), UI.Id("shorts:tab"), Th.Add, L.T("Вкладка", "Tab"), () => Shell.OpenVideoInNewTab(v));
         y += tileH + 12;
 
         float footerY = panelR.Bottom - 54;
@@ -858,8 +962,8 @@ public sealed class ShortsPage : IPage
             Gfx.Fill(new R(x, y, w, 1), Th.Line);
             y += 8;
             var chTitle = _commentCount is { Length: > 0 }
-                ? (_commentCount.Any(char.IsLetter) ? _commentCount : $"Комментарии · {_commentCount}")
-                : "Комментарии";
+                ? (_commentCount.Any(char.IsLetter) ? _commentCount : L.T($"Комментарии · {_commentCount}", $"Comments · {_commentCount}"))
+                : L.T("Комментарии", "Comments");
             Gfx.Draw(chTitle, x, y + 3, 13.5f, Th.Text, 600);
             if (UI.IconButton(UI.Id("shorts:commclose"), new R(x + w - 24, y, 24, 24), Th.Close, 10, Th.Sub))
             {
@@ -873,9 +977,10 @@ public sealed class ShortsPage : IPage
             {
                 if (_commentEdit == null)
                 {
-                    _commentEdit = new Edit("Написать комментарий…") { Bg = () => Th.Field };
+                    _commentEdit = new Edit(L.T("Написать комментарий…", "Add a comment…")) { Bg = () => Th.Field };
                     _commentEdit.Enter = SubmitComment;
                 }
+                else _commentEdit.SetPlaceholder(L.T("Написать комментарий…", "Add a comment…"));
                 const float sendSize = 32;
                 var boxR = new R(x, y, MathF.Max(100, w - sendSize - 6), 34);
                 Gfx.Fill(boxR, Th.Field, 9);
@@ -902,7 +1007,7 @@ public sealed class ShortsPage : IPage
                 y += 12;
                 if (NextItem is { } nxt)
                 {
-                    Gfx.Draw("Далее в ленте", x, y, 12, Th.Dim, 600);
+                    Gfx.Draw(L.T("Далее в ленте", "Up next"), x, y, 12, Th.Dim, 600);
                     y += 20;
                     var upNext = new R(x, y, w, 68);
                     Gfx.Fill(upNext, Th.Card, 10);
@@ -910,7 +1015,7 @@ public sealed class ShortsPage : IPage
                     var thR = new R(upNext.X + 8, upNext.Y + 8, 36, 52);
                     Cards.ThumbUrl(thR, $"https://i.ytimg.com/vi/{nxt.VideoId}/oar2.jpg", 6, UI.GlowOn(Th.Card, glow));
                     float ntx = thR.Right + 12, ntw = upNext.Right - 12 - ntx;
-                    var ntTitle = nxt.Title.Length > 0 ? nxt.Title : "Следующий Shorts…";
+                    var ntTitle = nxt.Title.Length > 0 ? nxt.Title : L.T("Следующий Shorts…", "Next Short…");
                     var ntRun = Gfx.Draw(ntTitle, ntx, upNext.Y + 12, 13, Th.Text, 600, ntw, 2);
                     if (nxt.Channel.Length > 0) Gfx.Draw(nxt.Channel, ntx, upNext.Y + 14 + ntRun.H, 11.5f, Th.Sub, 400, ntw);
                     if (UI.Click(UI.Id("shorts:nextcard"), upNext)) Step(1);
@@ -918,7 +1023,7 @@ public sealed class ShortsPage : IPage
 
                 float hy = footerY - 28;
                 if (hy > y + 74)
-                    Gfx.Draw("Колесо / ↑↓ — лента · Колесо по видео — громкость · Space — пауза", x, hy, 11.5f, Th.Dim, 400, w);
+                    Gfx.Draw(L.T("Колесо / ↑↓ — лента · Shift+колесо — по кадрам · Space — пауза", "Wheel / ↑↓ — feed · Shift+wheel — frame step · Space — pause"), x, hy, 11.5f, Th.Dim, 400, w);
             }
         }
 
@@ -930,7 +1035,7 @@ public sealed class ShortsPage : IPage
 
         Gfx.Fill(prevBtn, Th.A(canPrev ? 0.08f : 0.03f), 10);
         if (canPrev) UI.Glow(UI.Id("shorts:up"), prevBtn, 10, UI.Hover(prevBtn));
-        var pt = Gfx.Text("Предыдущий", 13, 600);
+        var pt = Gfx.Text(L.T("Предыдущий", "Previous"), 13, 600);
         float px = prevBtn.X + (prevBtn.W - (18 + 6 + pt.W)) / 2;
         Gfx.Icon(Th.ChevronUp, new R(px, prevBtn.Y, 18, prevBtn.H), 12, canPrev ? Th.Text : Th.Dim);
         Gfx.Draw(pt, px + 24, prevBtn.Y + (prevBtn.H - pt.H) / 2, canPrev ? Th.Text : Th.Dim);
@@ -938,7 +1043,7 @@ public sealed class ShortsPage : IPage
 
         Gfx.Fill(nextBtn, canNext ? Gfx.Fade(Th.Brand, 0.16f) : Th.A(0.03f), 10);
         if (canNext) UI.Glow(UI.Id("shorts:down"), nextBtn, 10, UI.Hover(nextBtn));
-        var nt = Gfx.Text("Следующий", 13, 600);
+        var nt = Gfx.Text(L.T("Следующий", "Next"), 13, 600);
         float nx = nextBtn.X + (nextBtn.W - (18 + 6 + nt.W)) / 2;
         Gfx.Draw(nt, nx, nextBtn.Y + (nextBtn.H - nt.H) / 2, canNext ? Th.Text : Th.Dim);
         Gfx.Icon(Th.ChevronDown, new R(nx + nt.W + 6, nextBtn.Y, 18, nextBtn.H), 12, canNext ? Th.Brand : Th.Dim);
@@ -951,7 +1056,9 @@ public sealed class ShortsPage : IPage
         {
             if (UI.Hover(video))
             {
-                AdjustVolume(UI.Wheel > 0 ? 5 : -5);
+                if (W.KeyDown(W.VK_SHIFT) && AppSettings.Current.ShiftWheelFrameStep) Shell.StepVideoFrame(UI.Wheel);
+                else if (AppSettings.Current.WheelVolumeOnVideo) AdjustVolume(UI.Wheel > 0 ? 5 : -5);
+                else Step(UI.Wheel > 0 ? -1 : 1);
                 UI.Wheel = 0;
             }
             else if (UI.Hover(r) && !(_showComments && UI.Hover(panelR)))
@@ -982,12 +1089,12 @@ public sealed class ShortsPage : IPage
         }
         if (_commentsOff)
         {
-            Gfx.Draw("Комментарии отключены или недоступны.", view.X, view.Y + 8, 13, Th.Sub, 400, view.W - 12);
+            Gfx.Draw(L.T("Комментарии отключены или недоступны.", "Comments are turned off or unavailable."), view.X, view.Y + 8, 13, Th.Sub, 400, view.W - 12);
             return;
         }
         if (_comments.Count == 0)
         {
-            Gfx.Draw("Пока нет комментариев.", view.X, view.Y + 8, 13, Th.Sub);
+            Gfx.Draw(L.T("Пока нет комментариев.", "No comments yet."), view.X, view.Y + 8, 13, Th.Sub);
             return;
         }
 
@@ -1025,8 +1132,8 @@ public sealed class ShortsPage : IPage
                 Gfx.Draw(c.Likes, tx + 16, cy + 22 + tr.H, 11.5f, Th.Dim);
                 if (UI.RightClick(new R(view.X, cy, view.W - 10, rh)))
                     Menus.Popup([
-                        new("Копировать комментарий", () => Cards.CopyText(c.Text, "Комментарий скопирован"), icon: Th.Copy),
-                        new("Копировать ник", () => Cards.CopyText(c.Author, "Ник скопирован"), icon: Th.Account),
+                        new(L.T("Копировать комментарий", "Copy comment"), () => Cards.CopyText(c.Text, L.T("Комментарий скопирован", "Comment copied")), icon: Th.Copy),
+                        new(L.T("Копировать ник", "Copy handle"), () => Cards.CopyText(c.Author, L.T("Ник скопирован", "Handle copied")), icon: Th.Account),
                     ]);
             }
             cy += rh;

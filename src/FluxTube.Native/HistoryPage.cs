@@ -22,6 +22,7 @@ public sealed class HistoryPage : IPage
     private int _gen;
     private float _contentH = 1200;
     private readonly Dictionary<int, int> _shelfPage = new();
+    private readonly Dictionary<int, float> _shelfPrevShift = new();
     private readonly Cards.HoverPrefetch _hover = new();
     private readonly int _scroll = UI.Id("history:yt");
 
@@ -124,8 +125,8 @@ public sealed class HistoryPage : IPage
     {
         // which history: the account's or this app's
         float x0 = r.X + 24, y0 = r.Y + 10;
-        Gfx.Draw("История", x0, y0, 24, Th.Text, 600);
-        float px = x0 + 130;
+        var hRun = Gfx.Draw(L.T("История", "History"), x0, y0, 24, Th.Text, 600);
+        float px = x0 + MathF.Max(110, hRun.W + 22);
         if (CookieStore.IsLoggedIn)
         {
             if (UI.Pill(UI.Id("hist:yt"), px, y0 + 2, 32, null, "YouTube", out var w1, _youtube ? Th.Text : Th.A(0.08f), _youtube ? Th.Bg : Th.Text) && !_youtube)
@@ -133,7 +134,7 @@ public sealed class HistoryPage : IPage
                 _youtube = true; _local.Hidden(); Shown();
             }
             px += w1 + 8;
-            if (UI.Pill(UI.Id("hist:local"), px, y0 + 2, 32, null, "FluxTube, подробно", out var w2, !_youtube ? Th.Text : Th.A(0.08f), !_youtube ? Th.Bg : Th.Text) && _youtube)
+            if (UI.Pill(UI.Id("hist:local"), px, y0 + 2, 32, null, L.T("FluxTube, подробно", "FluxTube detailed"), out var w2, !_youtube ? Th.Text : Th.A(0.08f), !_youtube ? Th.Bg : Th.Text) && _youtube)
             {
                 _youtube = false; _local.Shown();
             }
@@ -144,7 +145,7 @@ public sealed class HistoryPage : IPage
             _local.Draw(new R(r.X, r.Y + 44, r.W, r.H - 44));
             return;
         }
-        string[] names = ["Все", "Видео", "Shorts"];
+        string[] names = [L.T("Все", "All"), L.T("Видео", "Videos"), "Shorts"];
         for (int i = 0; i < names.Length; i++)
         {
             if (UI.Pill(UI.Id("hist:f", i), px, y0 + 2, 32, null, names[i], out var fw, _filter == i ? Gfx.Fade(Th.Brand, 0.85f) : Th.A(0.08f), _filter == i ? Th.OnBrand : Th.Text) && _filter != i)
@@ -154,8 +155,9 @@ public sealed class HistoryPage : IPage
             }
             px += fw + 8;
         }
-        var rw = UI.PillWidth(Th.Refresh, "Обновить");
-        if (UI.Pill(UI.Id("hist:refresh"), r.Right - rw - 22, y0 + 2, 32, Th.Refresh, "Обновить", out _, Th.A(0.08f))) App.Post(Load);
+        var refLbl = L.T("Обновить", "Refresh");
+        var rw = UI.PillWidth(Th.Refresh, refLbl);
+        if (UI.Pill(UI.Id("hist:refresh"), r.Right - rw - 22, y0 + 2, 32, Th.Refresh, refLbl, out _, Th.A(0.08f))) App.Post(Load);
         if (_loading && _days.Count > 0) UI.Spinner(r.Right - rw - 46, y0 + 18, 8, Th.Sub);
 
         var view = new R(r.X, r.Y + 54, r.W - 4, r.H - 54);
@@ -164,8 +166,8 @@ public sealed class HistoryPage : IPage
             if (_loading) UI.Spinner(view.X + view.W / 2, view.Y + 80, 14, Th.Sub);
             else
             {
-                Gfx.Draw(_failed ? "История YouTube не загрузилась." : "В истории YouTube пусто (или её запись приостановлена в аккаунте).", x0, view.Y + 20, 14, Th.Sub);
-                if (UI.Pill(UI.Id("hist:retry"), x0, view.Y + 52, 34, Th.Refresh, "Повторить", out _)) App.Post(Load);
+                Gfx.Draw(_failed ? L.T("История YouTube не загрузилась.", "Could not load YouTube history.") : L.T("В истории YouTube пусто (или её запись приостановлена в аккаунте).", "YouTube watch history is empty (or paused in your account)."), x0, view.Y + 20, 14, Th.Sub);
+                if (UI.Pill(UI.Id("hist:retry"), x0, view.Y + 52, 34, Th.Refresh, L.T("Повторить", "Retry"), out _)) App.Post(Load);
             }
             return;
         }
@@ -197,7 +199,7 @@ public sealed class HistoryPage : IPage
         }
         if (shownDays == 0 && !_loadingMore)
         {
-            Gfx.Draw(_filter == 2 ? "В загруженной истории Shorts не найдены." : "По этому фильтру ничего нет.", x0, y + 10, 14, Th.Sub);
+            Gfx.Draw(_filter == 2 ? L.T("В загруженной истории Shorts не найдены.", "No Shorts found in loaded history.") : L.T("По этому фильтру ничего нет.", "No items match this filter."), x0, y + 10, 14, Th.Sub);
             y += 44;
         }
         if (_loadingMore) UI.Spinner(x0 + w / 2, y + 16, 10, Th.Sub);
@@ -270,6 +272,10 @@ public sealed class HistoryPage : IPage
         if (clip.Bottom > view.Y && clip.Y < view.Bottom)
         {
             var shift = UI.Smooth(UI.Id("hist:shift", di), page * (cardW + gap) * cols, 16);
+            float prevShift = _shelfPrevShift.TryGetValue(di, out var ps) ? ps : shift;
+            _shelfPrevShift[di] = shift;
+            float shelfVelX = (shift - prevShift) / MathF.Max(0.004f, (float)UI.Dt);
+            bool shMb = Gfx.PushMotionBlur(clip, -shelfVelX, 0f);
             Gfx.PushClip(clip);
             for (int i = 0; i < d.Shorts.Count; i++)
             {
@@ -290,6 +296,7 @@ public sealed class HistoryPage : IPage
                 }
             }
             Gfx.PopClip();
+            Gfx.PopMotionBlur(shMb);
         }
         y += rowH + 6;
         Gfx.Fill(new R(x0, y, w, 1), Th.Line);

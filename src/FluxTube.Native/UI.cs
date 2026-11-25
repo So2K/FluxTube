@@ -237,8 +237,9 @@ public static class UI
 
     // ---------------- scrolling ----------------
 
-    private sealed class Scroll { public float Pos, Target, Max; public long LastTouch; public float DragOffset; }
+    private sealed class Scroll { public float Pos, Target, Max, VelY; public long LastTouch; public float DragOffset; }
     private static readonly Dictionary<int, Scroll> _scrolls = new();
+    private static readonly bool[] _mbActiveStack = new bool[8];
     private static int _dragScroll;
 
     // Browser-style middle-click autoscroll (click MMB on empty area, or hold MMB and move up/down)
@@ -264,6 +265,7 @@ public static class UI
     public static float ScrollTarget(int id) => _scrolls.TryGetValue(id, out var s) ? s.Target : 0;
     public static float ScrollMax(int id) => _scrolls.TryGetValue(id, out var s) ? s.Max : 0;
     public static void ScrollBy(int id, float d) { if (_scrolls.TryGetValue(id, out var s)) { s.Target = Math.Clamp(s.Target + d, 0, s.Max); Animate(); } }
+    public static void ScrollJump(int id, float d) { if (_scrolls.TryGetValue(id, out var s)) { s.Target = s.Pos = Math.Clamp(s.Pos + d, 0, s.Max); s.VelY = 0; Animate(); } }
     public static void ScrollReset(int id) { if (_scrolls.TryGetValue(id, out var s)) s.Pos = s.Target = 0; }
     public static bool ScrollMoving(int id) => _scrolls.TryGetValue(id, out var s) && (MathF.Abs(s.Target - s.Pos) > 0.5f || _dragScroll == id || _autoScrollId == id);
     /// <summary>The scroll container currently open on the clip stack (0 when outside any BeginScroll/EndScroll).</summary>
@@ -274,6 +276,7 @@ public static class UI
     {
         if (!_scrolls.TryGetValue(id, out var s)) _scrolls[id] = s = new Scroll();
         s.Max = MathF.Max(0, contentH - view.H);
+        float posBefore = s.Pos;
         if (s.Max > 0)
         {
             if (_autoScrollId == id)
@@ -337,17 +340,32 @@ public static class UI
 
         // critically damped approach: quick, no overshoot, frame-rate independent
         var diff = s.Target - s.Pos;
-        if (MathF.Abs(diff) > 0.4f)
+        bool moving = MathF.Abs(diff) > 0.4f;
+        if (moving)
         {
-            s.Pos += diff * (1 - MathF.Exp(-(float)Dt * 22));
+            s.Pos += diff * (1 - MathF.Exp(-(float)Dt * 24f));
             s.LastTouch = Now;
             Animate();
         }
         else s.Pos = s.Target;
 
+        // Track smoothed vertical scroll velocity (DIPs/sec) for hardware GPU DirectionalBlur
+        if (!moving && _dragScroll != id && _autoScrollId != id)
+        {
+            s.VelY = 0f;
+        }
+        else
+        {
+            float instVel = (s.Pos - posBefore) / MathF.Max(0.002f, (float)Dt);
+            s.VelY += (instVel - s.VelY) * (1f - MathF.Exp(-(float)Dt * 34f));
+            if (MathF.Abs(s.VelY) < 25f) s.VelY = 0f;
+        }
+
+        _mbActiveStack[_scrollDepth] = Gfx.PushMotionBlur(view, 0f, -s.VelY);
         _scrollDepth++;
         Gfx.PushClip(view);
-        return Gfx.Snap(s.Pos);
+        // Sub-pixel smooth scroll while moving (silky at 120-240Hz); snap to crisp physical pixel when settled
+        return moving || MathF.Abs(s.VelY) > 15f ? s.Pos : Gfx.Snap(s.Pos);
     }
 
     private static readonly (int Id, R View)[] _scrollCandStack = new (int, R)[8];
@@ -360,6 +378,8 @@ public static class UI
         Gfx.PopClip();
         if (_scrollDepth <= 0) return;
         _scrollDepth--;
+        Gfx.PopMotionBlur(_mbActiveStack[_scrollDepth]);
+        _mbActiveStack[_scrollDepth] = false;
         var cand = _scrollCandStack[_scrollDepth];
         var bar = _pendingBarStack[_scrollDepth];
         _scrollCandStack[_scrollDepth] = default;
