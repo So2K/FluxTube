@@ -89,9 +89,24 @@ public static class Paths
         foreach (var d in Directory.GetDirectories(from)) CopyDir(d, Path.Combine(to, Path.GetFileName(d)));
     }
 
+    private static readonly object _logLock = new();
+    private static int _logWrites;
+
     public static void Log(string msg)
     {
-        try { File.AppendAllText(Path.Combine(Logs, "app.log"), $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {msg}{Environment.NewLine}"); }
+        try
+        {
+            var path = Path.Combine(Logs, "app.log");
+            lock (_logLock)
+            {
+                if ((++_logWrites & 0xFF) == 1 && File.Exists(path) && new FileInfo(path).Length > 5L * 1024 * 1024)
+                {
+                    var old = Path.Combine(Logs, "app.old.log");
+                    try { File.Move(path, old, overwrite: true); } catch { }
+                }
+                File.AppendAllText(path, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {msg}{Environment.NewLine}");
+            }
+        }
         catch { }
     }
 }

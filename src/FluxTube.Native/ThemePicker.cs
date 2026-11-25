@@ -44,7 +44,7 @@ public static class ThemePicker
 
         if (Swatch(UI.Id("acc:own"), sx, y, Themes.Current.Brand, cur == null, true, () => Themes.Apply(accent: "")))
         {
-            tipName = L.T("Как в теме", "Theme default"); tipX = sx + 17; tipY = y + 40;
+            tipName = L.T("Как в теме", "Theme default"); tipX = sx + 17; tipY = y - 28;
         }
         sx += 46;
         for (int i = 0; i < Themes.Accents.Length; i++)
@@ -54,7 +54,7 @@ public static class ThemePicker
             var c = color;
             if (Swatch(UI.Id("acc:" + name), sx, y, c, cur == c, false, () => Themes.Apply(accent: Themes.Hex(c))))
             {
-                tipName = Themes.AccentLabel(name); tipX = sx + 17; tipY = y + 40;
+                tipName = Themes.AccentLabel(name); tipX = sx + 17; tipY = y - 28;
             }
             sx += 40;
         }
@@ -71,7 +71,7 @@ public static class ThemePicker
         if (ring > 0.01f) Gfx.Circle(x + 17, y + 17, 17, Gfx.Fade(Th.Text, ring));
         Gfx.Circle(x + 17, y + 17, 17 - 3 * ring, Th.Bg);
         Gfx.Circle(x + 17, y + 17, 12.5f, color);
-        if (isOwn) Gfx.Icon(Th.Refresh, new R(x, y, 34, 34), 11, 0xFFFFFFFF);
+        if (isOwn) Gfx.Icon(Th.Refresh, new R(x, y, 34, 34), 11, Themes.Current.OnBrand);
         if (UI.Click(id, r)) App.Post(pick);
         return over;
     }
@@ -216,6 +216,9 @@ public static class ThemeCodeEditor
         Open = true;
         _openedAt = UI.Now;
         AccountMenu.Close();
+        AudioStudioPanel.Close();
+        LoginModal.Close();
+        SharePanel.Close();
         Menus.Close();
         PreviewPlayer.HideNow();
         App.Invalidate();
@@ -270,7 +273,7 @@ public static class ThemeCodeEditor
         // Backdrop scrim
         Gfx.Fill(new R(0, 0, Gfx.W, Gfx.H), Gfx.Fade(0xFF000000, 0.58f * ease));
 
-        float mw = MathF.Min(740, Gfx.W - 60);
+        float mw = MathF.Min(820, Gfx.W - 48);
         float mh = MathF.Min(540, Gfx.H - 60);
         var card = new R(Gfx.Snap((Gfx.W - mw) / 2), Gfx.Snap((Gfx.H - mh) / 2 + (1f - ease) * 14), mw, mh);
         Rect = card;
@@ -362,6 +365,6 @@ public static class ThemeCodeEditor
             SaveAndApply();
 
         // Click outside modal closes it
-        if (UI.Pressed && !card.Contains(UI.MX, UI.MY)) Close();
+        if (UI.Pressed && !Menus.Open && !card.Contains(UI.MX, UI.MY)) Close();
     }
 }

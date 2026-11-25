@@ -303,7 +303,7 @@ public static unsafe class BgEngine
         float tileScale = Math.Clamp(s.BgPatternScale, 0.55f, 2.2f);
         float op = Math.Clamp(s.BgPatternOpacity, 0.03f, 0.65f);
         // In Audio-Only Music Mode with Bass Shake on, the pattern pulses & breathes with every bass beat!
-        if (s.AudioOnlyMode && s.MusicBassShake && Player.MpvPlayer.Instance.HasMedia && !Player.MpvPlayer.Instance.Paused && !App.Test)
+        if (s.AudioOnlyMode && s.MusicBassShake && Shell.Current is not Pages.ShortsPage && Player.MpvPlayer.Instance.HasMedia && !Player.MpvPlayer.Instance.Paused && !Player.MpvPlayer.Instance.Muted && !App.Test)
         {
             float bass = AudioAnalyzer.BassEnergy;
             tileScale *= 1f + bass * 0.048f;

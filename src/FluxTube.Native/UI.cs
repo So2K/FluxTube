@@ -303,13 +303,8 @@ public static class UI
             _scrollCandStack[_scrollDepth] = default;
         }
 
-        if (Wheel != 0 && Hover(view))
-        {
-            s.Target -= Wheel * 110;
-            s.LastTouch = Now;
-            Wheel = 0;
-        }
         s.Target = Math.Clamp(s.Target, 0, s.Max);
+        _scrollWheelStack[_scrollDepth] = (id, view, s);
 
         // scrollbar
         if (s.Max > 0)
@@ -370,6 +365,7 @@ public static class UI
     }
 
     private static readonly (int Id, R View)[] _scrollCandStack = new (int, R)[8];
+    private static readonly (int Id, R View, Scroll? S)[] _scrollWheelStack = new (int, R, Scroll?)[8];
     private static readonly (int Id, R Thumb, bool Hot, bool Visible, long HideAt)[] _pendingBarStack = new (int, R, bool, bool, long)[8];
     private static int _scrollDepth;
     private static long _barHideScheduledAt;
@@ -382,9 +378,25 @@ public static class UI
         Gfx.PopMotionBlur(_mbActiveStack[_scrollDepth]);
         _mbActiveStack[_scrollDepth] = false;
         var cand = _scrollCandStack[_scrollDepth];
+        var wh = _scrollWheelStack[_scrollDepth];
         var bar = _pendingBarStack[_scrollDepth];
         _scrollCandStack[_scrollDepth] = default;
+        _scrollWheelStack[_scrollDepth] = default;
         _pendingBarStack[_scrollDepth] = default;
+
+        // Innermost hovered scrollable container claims mouse wheel first (fixes nested WatchPage inline playlist scroll!)
+        if (Wheel != 0 && wh.S != null && Hover(wh.View))
+        {
+            bool nested = _scrollDepth > 0;
+            bool canScrollDir = wh.S.Max > 0 && ((Wheel > 0 && wh.S.Target > 0.5f) || (Wheel < 0 && wh.S.Target < wh.S.Max - 0.5f));
+            if (!nested || canScrollDir)
+            {
+                wh.S.Target = Math.Clamp(wh.S.Target - Wheel * 110f, 0, wh.S.Max);
+                wh.S.LastTouch = Now;
+                Wheel = 0;
+                Animate();
+            }
+        }
 
         // Browser-style autoscroll: only activates when MMB was pressed on empty space (not over a video card / link).
         if (!_middleOverLink && Modal == null && _autoScrollId == 0 && cand.Id != 0

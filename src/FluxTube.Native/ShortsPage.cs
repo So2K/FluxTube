@@ -85,10 +85,14 @@ public sealed class ShortsPage : IPage
         if (PlaybackTracker.Instance.CurrentSource == "shorts") { PlaybackTracker.Instance.Stop(); Shell.VideoReady = false; }
     }
 
+    private int _emptyBatches;
+
     public void Invalidate()
     {
         if (!_feed) return;
         _feedGen++;
+        _loading = false;
+        _emptyBatches = 0;
         _items.Clear(); _i = 0; _next = null; _failed = false; _pendingAdvance = false;
         _asked.Clear(); _rating.Clear(); _dislikes.Clear(); _commCounts.Clear();
         ResetComments();
@@ -152,7 +156,7 @@ public sealed class ShortsPage : IPage
     /// <summary>Global smooth volume for all Shorts (persisted in AppSettings.Volume + plays custom volume SFX).</summary>
     public void SetVolume(int vol, bool smooth = true)
     {
-        vol = Math.Clamp(vol, 0, 100);
+        vol = Math.Clamp(vol, 0, 150);
         if (vol != AppSettings.Current.Volume) Shell.PlayVolumeSfx(vol);
         AppSettings.Current.Volume = vol;
         var p = MpvPlayer.Instance;
@@ -240,7 +244,10 @@ public sealed class ShortsPage : IPage
         var cp = _createCommentParams;
         _ = Task.Run(async () =>
         {
-            var (ok, err) = await InnerTube.Instance.CreateCommentAsync(cp, text, vid);
+            bool ok;
+            string? err;
+            try { (ok, err) = await InnerTube.Instance.CreateCommentAsync(cp, text, vid); }
+            catch (Exception ex) { ok = false; err = ex.Message; }
             App.Post(() =>
             {
                 _postingComment = false;
@@ -312,10 +319,24 @@ public sealed class ShortsPage : IPage
                     _loading = false;
                     var have = _items.Select(v => v.VideoId).ToHashSet();
                     var wasEmpty = _items.Count == 0;
-                    foreach (var id in ids) if (have.Add(id)) _items.Add(new VideoItem { VideoId = id, IsShort = true });
-                    _next = ids.Count == 0 ? null : next;
+                    int added = 0;
+                    foreach (var id in ids) if (have.Add(id)) { _items.Add(new VideoItem { VideoId = id, IsShort = true }); added++; }
+                    _next = next;
+                    if (added == 0 && next != null && _emptyBatches < 3)
+                    {
+                        _emptyBatches++;
+                        LoadMore();
+                        return;
+                    }
+                    _emptyBatches = 0;
+                    bool wasPending = _pendingAdvance;
+                    _pendingAdvance = false;
                     if (wasEmpty && _items.Count > 0 && Shell.Current == this) PlayCurrent();
-                    else if (_pendingAdvance && _i + 1 < _items.Count) { _pendingAdvance = false; Step(1); }
+                    else if (wasPending && _i < _items.Count)
+                    {
+                        if (PlaybackTracker.Instance.Current?.VideoId != _items[_i].VideoId) PlayCurrent();
+                        else if (_i + 1 < _items.Count) Step(1);
+                    }
                     App.Invalidate();
                 });
             }
@@ -330,11 +351,11 @@ public sealed class ShortsPage : IPage
     private void PlayCurrent()
     {
         if (Cur is not { } v) return;
+        if (Pip.Active) Pip.Exit();
         if (PlaybackTracker.Instance.Current?.VideoId != v.VideoId || !MpvPlayer.Instance.HasMedia)
         {
             Shell.Play(v, "shorts");
             MpvPlayer.Instance.Command("set", "loop-file", _loop ? "inf" : "no");
-            MpvPlayer.Instance.Command("set", "volume", Math.Clamp(AppSettings.Current.Volume, 0, 100).ToString());
         }
         NeedInfo(v);
         if (_showComments) { if (_commentsFor != v.VideoId) StartComments(v.VideoId); }
@@ -348,9 +369,8 @@ public sealed class ShortsPage : IPage
 
     private void PrefetchShort(VideoItem item)
     {
-        if (item.VideoId == NextItem?.VideoId && CookieStore.IsLoggedIn)
-            Resolver.Instance.Prefetch(item.VideoId, urgent: true);
-        else if (!QuickStream.IsBlocked) QuickStream.Prefetch(item.VideoId);
+        if (!QuickStream.IsBlocked) QuickStream.Prefetch(item.VideoId);
+        else if (item.VideoId == NextItem?.VideoId) Resolver.Instance.Prefetch(item.VideoId, urgent: true);
         NeedInfo(item);
         Images.Get($"https://i.ytimg.com/vi/{item.VideoId}/oar2.jpg", _videoW, _videoH);
     }
@@ -371,13 +391,13 @@ public sealed class ShortsPage : IPage
             return;
         }
 
-        // Currently playing Short is an ad/sponsored video -> auto-skip cleanly!
-        _items.RemoveAt(at);
         if (_consecutiveAdSkips >= 15)
         {
             _consecutiveAdSkips = 0;
             return;
         }
+        // Currently playing Short is an ad/sponsored video -> auto-skip cleanly!
+        _items.RemoveAt(at);
         _consecutiveAdSkips++;
         Shell.Toast(L.T($"Рекламный Short пропущен ({reason})", $"Ad Short skipped ({reason})"), Th.Good, 2100);
         if (_i >= _items.Count)
@@ -389,8 +409,13 @@ public sealed class ShortsPage : IPage
         {
             _prevVideoId = id;
             _slideFrom = 1;
-            _slideAt = UI.Now;
+            _slideAt = Environment.TickCount64;
             PlayCurrent();
+        }
+        else if (_items.Count == 0 && (!_feed || _next == null))
+        {
+            PlaybackTracker.Instance.Stop();
+            Shell.VideoReady = false;
         }
         App.Invalidate();
     }
@@ -407,7 +432,11 @@ public sealed class ShortsPage : IPage
             List<Extras.Segment>? sponsorSegs = null;
 
             try { full = await InnerTube.Instance.ShortInfoAsync(id); }
-            catch (Exception e) { Paths.Log("short info: " + e.Message); }
+            catch (Exception e)
+            {
+                Paths.Log("short info: " + e.Message);
+                App.Post(() => { if (gen == _feedGen) _asked.Remove(id); });
+            }
 
             // Fetch full watch metadata (comments count + full description + paidPromotion) and SponsorBlock in parallel!
             var watchTask = Task.Run(async () =>
@@ -437,7 +466,20 @@ public sealed class ShortsPage : IPage
                     if (gen != _feedGen) return;
                     var at = _items.FindIndex(x => x.VideoId == id);
                     if (at < 0) return;
-                    _items[at] = full;
+                    var prevItem = _items[at];
+                    _items[at] = new VideoItem
+                    {
+                        VideoId = full.VideoId,
+                        IsShort = true,
+                        Title = full.Title.Length > 0 ? full.Title : prevItem.Title,
+                        Channel = full.Channel.Length > 0 ? full.Channel : prevItem.Channel,
+                        ChannelId = full.ChannelId ?? prevItem.ChannelId,
+                        AvatarUrl = full.AvatarUrl ?? prevItem.AvatarUrl,
+                        Meta = full.Meta.Length > 0 ? full.Meta : prevItem.Meta,
+                        IsAd = full.IsAd,
+                        HasPaidPromotion = full.HasPaidPromotion,
+                        Description = full.Description.Length > 0 ? full.Description : prevItem.Description,
+                    };
                     if (PlaybackTracker.Instance.Current?.VideoId == id)
                     {
                         PlaybackTracker.Instance.UpdateMeta(full.Title, full.Channel);
@@ -485,7 +527,8 @@ public sealed class ShortsPage : IPage
     /// <summary>Next (+1) or previous (-1) short; debounced to 160 ms so mouse wheel notches feel crisp.</summary>
     public void Step(int d)
     {
-        if (UI.Now - _lastStep < 160 && _lastStep != 0) return;
+        var now = Environment.TickCount64;
+        if (now - _lastStep < 160 && _lastStep != 0) return;
         var to = _i + d;
         if (to < 0 || to >= _items.Count)
         {
@@ -494,11 +537,11 @@ public sealed class ShortsPage : IPage
         }
         _pendingAdvance = false;
         _consecutiveAdSkips = 0;
-        _lastStep = UI.Now;
+        _lastStep = now;
         _prevVideoId = Cur?.VideoId;
         _i = to;
         _slideFrom = d;
-        _slideAt = UI.Now;
+        _slideAt = now;
         PlayCurrent();
         App.Invalidate();
     }
@@ -569,7 +612,7 @@ public sealed class ShortsPage : IPage
         App.Invalidate();
     }
 
-    private void ToggleLoop()
+    public void ToggleLoop()
     {
         _loop = !_loop;
         MpvPlayer.Instance.Command("set", "loop-file", _loop ? "inf" : "no");
@@ -701,11 +744,12 @@ public sealed class ShortsPage : IPage
         {
             // Settled: crisp borderless rounded live video surface
             Gfx.Fill(video, 0xFF0A0A0E, 14);
-            Shell.WantVideo(video, v.VideoId, radius: 14);
-            if (!Shell.VideoShown(v.VideoId))
+            bool audioOnlyQuality = AppSettings.Current.PlayerQuality == "audio";
+            if (!audioOnlyQuality) Shell.WantVideo(video, v.VideoId, radius: 14);
+            if (audioOnlyQuality || !Shell.VideoShown(v.VideoId))
             {
-                DrawShortPoster(v.VideoId, video, 0.85f);
-                UI.Spinner(video.X + vw / 2, video.Y + vh / 2, 14, 0xFFFFFFFF);
+                DrawShortPoster(v.VideoId, video, audioOnlyQuality ? 0.96f : 0.85f);
+                if (!audioOnlyQuality) UI.Spinner(video.X + vw / 2, video.Y + vh / 2, 14, 0xFFFFFFFF);
             }
         }
         Gfx.PopClip();
@@ -765,8 +809,12 @@ public sealed class ShortsPage : IPage
             float navTop = video.Y + 6;
             if (ry - navTop > 88)
             {
-                if (UI.IconButton(UI.Id("shorts:qup"), new R(rcx - 19, navTop, 38, 34), Th.ChevronUp, 13, Th.Text, _i > 0)) Step(-1);
-                if (UI.IconButton(UI.Id("shorts:qdn"), new R(rcx - 19, navTop + 38, 38, 34), Th.ChevronDown, 13, Th.Brand, _i < _items.Count - 1 || _next != null)) Step(1);
+                var upR = new R(rcx - 19, navTop, 38, 36);
+                Gfx.Fill(upR, Th.A(0.09f), 18);
+                if (UI.IconButton(UI.Id("shorts:qup"), upR, Th.ChevronUp, 13, Th.Text, _i > 0)) Step(-1);
+                var dnR = new R(rcx - 19, navTop + 42, 38, 36);
+                Gfx.Fill(dnR, Th.A(0.09f), 18);
+                if (UI.IconButton(UI.Id("shorts:qdn"), dnR, Th.ChevronDown, 13, Th.Brand, _i < _items.Count - 1 || _next != null)) Step(1);
             }
             if (!AppSettings.Current.ShortsInfoOverlay)
             {
@@ -794,14 +842,11 @@ public sealed class ShortsPage : IPage
             }
             if (UI.Wheel != 0)
             {
-                if (UI.Hover(video))
-                {
-                    if (W.KeyDown(W.VK_SHIFT) && AppSettings.Current.ShiftWheelFrameStep) Shell.StepVideoFrame(UI.Wheel);
-                    else if (AppSettings.Current.WheelVolumeOnVideo) AdjustVolume(UI.Wheel > 0 ? 5 : -5);
-                    else Step(UI.Wheel > 0 ? -1 : 1);
-                    UI.Wheel = 0;
-                }
-                else if (UI.Hover(r)) { Step(UI.Wheel > 0 ? -1 : 1); UI.Wheel = 0; }
+                if (UI.Hover(video) && W.KeyDown(W.VK_SHIFT) && AppSettings.Current.ShiftWheelFrameStep)
+                    Shell.StepVideoFrame(UI.Wheel);
+                else if (UI.Hover(r))
+                    Step(UI.Wheel > 0 ? -1 : 1);
+                UI.Wheel = 0;
             }
             return;
         }
@@ -841,7 +886,7 @@ public sealed class ShortsPage : IPage
         var nr = Gfx.Text(name, 14.5f, 600, w - 50 - badgeR.W - 40);
         var nameR = new R(x + 50, y + 3, nr.W, nr.H);
         Gfx.Draw(nr, nameR.X, nameR.Y, UI.Hover(nameR) && v.ChannelId != null ? Th.Brand : Th.Text);
-        Gfx.Draw(v.ChannelId != null ? L.T("Перейти на канал", "Open channel") : "YouTube Shorts", x + 50, y + 22, 11.5f, Th.Dim);
+        Gfx.Draw(v.ChannelId != null ? L.T("Перейти на канал", "Open channel") : "YouTube Shorts", x + 50, y + 22, 11.5f, Th.Dim, 400, MathF.Max(40, w - 50 - badgeR.W - 40));
         if (v.ChannelId != null && (UI.Click(UI.Id("shorts:ch"), new R(x + 50, y + 2, nr.W + 20, 36), playSfx: false) || UI.Click(UI.Id("shorts:av"), avR, playSfx: false)))
         {
             var cid = v.ChannelId; var cn = name;
@@ -1057,7 +1102,6 @@ public sealed class ShortsPage : IPage
             if (UI.Hover(video))
             {
                 if (W.KeyDown(W.VK_SHIFT) && AppSettings.Current.ShiftWheelFrameStep) Shell.StepVideoFrame(UI.Wheel);
-                else if (AppSettings.Current.WheelVolumeOnVideo) AdjustVolume(UI.Wheel > 0 ? 5 : -5);
                 else Step(UI.Wheel > 0 ? -1 : 1);
                 UI.Wheel = 0;
             }
@@ -1126,7 +1170,7 @@ public sealed class ShortsPage : IPage
                 Cards.Avatar(view.X, cy + 2, 30, c.Avatar, c.Author.TrimStart('@'));
                 float tx = view.X + 40;
                 var au = Gfx.Draw(c.Author, tx, cy, 12.5f, Th.Text, 600, tw - 60);
-                Gfx.Draw(c.When, tx + au.W + 8, cy + 1, 11.5f, Th.Dim);
+                Gfx.Draw(c.When, tx + au.W + 8, cy + 1, 11.5f, Th.Dim, 400, MathF.Max(20, tw - au.W - 8));
                 Gfx.Draw(tr, tx, cy + 19, Gfx.Mix(Th.Text, Th.Sub, 0.1f));
                 Gfx.Icon(Th.Like, new R(tx - 2, cy + 21 + tr.H, 16, 18), 11, Th.Dim);
                 Gfx.Draw(c.Likes, tx + 16, cy + 22 + tr.H, 11.5f, Th.Dim);

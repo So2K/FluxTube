@@ -91,11 +91,11 @@ public sealed class CachedStream
 
     public void Write(long pos, ReadOnlySpan<byte> data)
     {
-        if (data.Length == 0 || _closed) return;
+        if (data.Length == 0 || _closed || !MediaCache.HasDiskHeadroom()) return;
         var h = Handle();
         if (h == null) return;
         try { RandomAccess.Write(h, data, pos); }
-        catch (ObjectDisposedException) { return; }
+        catch (Exception ex) when (ex is ObjectDisposedException or IOException) { MediaCache.MarkDiskLow(); return; }
         lock (_lock)
         {
             if (_closed) return;
@@ -161,12 +161,35 @@ public static class MediaCache
     private static Timer? _timer;
     private static int _flushing;
     private static long _lastEnforce;
+    private static long _lastSpaceCheck;
+    private static volatile bool _diskOk = true;
     /// <summary>The video being played: never evicted.</summary>
     public static string? Pinned;
     /// <summary>Optional hook so background tabs keep their cache entries pinned too.</summary>
     public static Func<string, bool>? IsActive;
 
     private static bool IsProtected(string id) => id == Pinned || (IsActive?.Invoke(id) ?? false);
+
+    public static bool HasDiskHeadroom()
+    {
+        var now = Environment.TickCount64;
+        if (now - _lastSpaceCheck < 10_000) return _diskOk;
+        _lastSpaceCheck = now;
+        try
+        {
+            var root = Path.GetPathRoot(Dir);
+            if (!string.IsNullOrEmpty(root))
+                _diskOk = new DriveInfo(root).AvailableFreeSpace >= 2L * 1024 * 1024 * 1024;
+        }
+        catch { _diskOk = true; }
+        return _diskOk;
+    }
+
+    public static void MarkDiskLow()
+    {
+        _diskOk = false;
+        _lastSpaceCheck = Environment.TickCount64;
+    }
 
     public static bool Enabled => AppSettings.Current.CacheLimitMb > 0;
     private static long Limit => AppSettings.Current.CacheLimitMb * 1024L * 1024L;

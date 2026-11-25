@@ -955,9 +955,9 @@ public static unsafe class Gfx
 
         // Bass-reactive club/studio aurora glow across the entire backdrop in Audio-Only Music Mode (~0.02 ms GPU!)
         var s = Services.AppSettings.Current;
-        if (s.AudioOnlyMode && s.MusicBassShake && Player.MpvPlayer.Instance.HasMedia && !Player.MpvPlayer.Instance.Paused && !App.Test)
+        if (s.AudioOnlyMode && s.MusicBassShake && Shell.Current is not Pages.ShortsPage && Player.MpvPlayer.Instance.HasMedia && !Player.MpvPlayer.Instance.Paused && !Player.MpvPlayer.Instance.Muted && !App.Test)
         {
-            AudioAnalyzer.RequestFrame();
+            AudioAnalyzer.RequestFrame(force: true);
             float bass = AudioAnalyzer.BassEnergy;
             float mid = AudioAnalyzer.MidEnergy;
             float hi = AudioAnalyzer.HighEnergy;
@@ -1264,4 +1264,96 @@ public static unsafe class Gfx
         _prev.Clear(); _cur.Clear();
         while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
     }
+}
+
+/// <summary>
+/// Ultra-cheap per-element GPU bass/spectrum bounce for Audio-Only Music Mode (~0.0005ms per element, zero alloc).
+/// Each UI element reacts to its own FFT frequency band + kick impulse so buttons, tabs, sidebar icons, cover art,
+/// and cards hop, breathe, and tilt independently to the beat instead of shaking as one stiff rectangle.
+/// </summary>
+public static class MusicBounce
+{
+    public static bool Active { get; private set; }
+    public static float Kick { get; private set; }
+    public static float Bass { get; private set; }
+    public static float Mid { get; private set; }
+    public static float High { get; private set; }
+
+    private static float _bassAvg, _phase;
+    private static readonly float[] _bandAvg = new float[32];
+    private static readonly float[] _bandPulse = new float[32];
+
+    public static void Update(bool enabledPlaying, float dt)
+    {
+        if (!enabledPlaying)
+        {
+            if (Active)
+            {
+                Active = false;
+                Kick = Bass = Mid = High = _bassAvg = 0f;
+                Array.Clear(_bandAvg);
+                Array.Clear(_bandPulse);
+            }
+            return;
+        }
+
+        AudioAnalyzer.RequestFrame(force: true);
+        dt = Math.Clamp(dt, 0.003f, 0.04f);
+        float bass = AudioAnalyzer.BassEnergy;
+        float mid = AudioAnalyzer.MidEnergy;
+        float high = AudioAnalyzer.HighEnergy;
+        Bass = bass; Mid = mid; High = high;
+
+        float avgAlpha = 1f - MathF.Exp(-dt * 6.5f);
+        _bassAvg += (bass - _bassAvg) * avgAlpha;
+        float kickRaw = MathF.Max(0f, bass - _bassAvg * 0.84f) * 2.8f + MathF.Max(0f, bass - 0.26f) * 0.85f;
+        Kick = MathF.Max(Kick * MathF.Exp(-dt * 14.5f), Math.Clamp(kickRaw, 0f, 1.45f));
+
+        var bands = AudioAnalyzer.Bands;
+        float decay = MathF.Exp(-dt * 13.5f);
+        float bandAvgA = 1f - MathF.Exp(-dt * 5.5f);
+        float maxE = Kick;
+        for (int i = 0; i < 32 && i < bands.Length; i++)
+        {
+            float v = bands[i];
+            _bandAvg[i] += (v - _bandAvg[i]) * bandAvgA;
+            float trans = MathF.Max(0f, v - _bandAvg[i] * 0.78f) * 2.35f + v * 0.62f;
+            float next = MathF.Max(_bandPulse[i] * decay, Math.Clamp(trans, 0f, 1.45f));
+            _bandPulse[i] = next;
+            if (next > maxE) maxE = next;
+        }
+
+        _phase += dt * (11.5f + Kick * 17f);
+        Active = maxE > 0.012f;
+        if (Active) UI.Animate();
+    }
+
+    public static float BandEnergy(int band) => Active ? _bandPulse[band & 31] : 0f;
+
+    /// <summary>Pushes an independent per-element GPU hop/scale/tilt transform centered on rect. Zero heap alloc.</summary>
+    public static Matrix3x2 Push(R rect, int band, float amp = 1.0f, float rotAmp = 1.0f)
+    {
+        var prev = Gfx.DC.Transform;
+        if (!Active) return prev;
+        int b = band & 31;
+        float kickShare = b < 8 ? 0.50f : b < 18 ? 0.24f : 0.12f;
+        float e = Math.Clamp(_bandPulse[b] * 0.76f + Kick * kickShare, 0f, 1.55f) * amp;
+        if (e <= 0.008f) return prev;
+
+        // Distinct phase per band so neighbouring items ripple & hop independently without clipping top chrome edges
+        float wave = MathF.Cos(_phase * 1.15f + b * 1.29f);
+        float dy = Math.Clamp((-0.55f + 0.45f * wave) * e * 4.6f, -6.5f, 4.5f);
+        float dx = Math.Clamp(MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 1.8f, -4.5f, 4.5f);
+        float sc = 1f + Math.Clamp(e * 0.036f, 0f, 0.068f);
+        float ang = Math.Clamp(MathF.Sin(_phase * 1.07f + b * 2.31f) * e * 0.022f * rotAmp, -0.04f, 0.04f);
+
+        var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.5f);
+        var local = Matrix3x2.CreateScale(sc, sc, center)
+            * Matrix3x2.CreateRotation(ang, center)
+            * Matrix3x2.CreateTranslation(dx, dy);
+        Gfx.DC.Transform = local * prev;
+        return prev;
+    }
+
+    public static void Pop(Matrix3x2 prev) => Gfx.DC.Transform = prev;
 }

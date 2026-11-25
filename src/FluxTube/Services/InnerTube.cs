@@ -584,15 +584,19 @@ public sealed class InnerTube
 
     private static readonly HashSet<string> AdIndicatorKeys =
     [
-        "adSlotRenderer", "adSlotMetadata", "adLayoutLoggingData", "adClientParams", "adBreakParams",
-        "adBreakHeartbeatParams", "inFeedAdLayoutRenderer", "promotedSparklesWebRenderer",
+        "adSlotRenderer", "adSlotMetadata", "adLayoutLoggingData",
+        "inFeedAdLayoutRenderer", "promotedSparklesWebRenderer",
         "promotedSparklesTextSearchRenderer", "displayAdRenderer", "promotedVideoRenderer",
         "compactPromotedItemRenderer", "compactPromotedVideoRenderer", "adInfoRenderer",
         "adBadgeRenderer", "adBadgeViewModel", "adCtaButtonRenderer", "reelAdOverlayRenderer",
         "shortsAdOverlayRenderer", "adOverlayRenderer", "adActionInterstitialRenderer",
         "brandVideoShelfRenderer", "brandVideoSingletonRenderer", "adModule", "adsEngagementPanelContentRenderer",
-        "visitAdvertiser", "sponsoredBadge", "adMetadata",
+        "visitAdvertiser", "sponsoredBadge",
     ];
+
+    private static bool IsIgnoredAdSubtree(string? key) => key is
+        "unserializedPrefetchData" or "playerResponse" or "topbar" or "desktopTopbar"
+        or "engagementPanels" or "frameworkUpdates" or "secondaryResults";
 
     private static bool HasAdMarker(JsonNode? node)
     {
@@ -601,6 +605,7 @@ public sealed class InnerTube
         J.Walk(node, (key, o) =>
         {
             if (found) return false;
+            if (IsIgnoredAdSubtree(key)) return false;
             if (key != null && AdIndicatorKeys.Contains(key)) { found = true; return false; }
             foreach (var k in AdIndicatorKeys)
                 if (o.ContainsKey(k)) { found = true; return false; }
@@ -619,6 +624,7 @@ public sealed class InnerTube
         J.Walk(node, (key, o) =>
         {
             if (found) return false;
+            if (IsIgnoredAdSubtree(key)) return false;
             if (key is "paidContentOverlayRenderer" or "paidContentOverlay" or "paidPromotionOverlayRenderer"
                 || o.ContainsKey("paidContentOverlayRenderer") || o.ContainsKey("paidContentOverlay"))
             { found = true; return false; }
@@ -641,7 +647,9 @@ public sealed class InnerTube
             var first = await PostAsync("reel/reel_item_watch", new JsonObject { ["params"] = "CA8%3D", ["inputType"] = "REEL_WATCH_INPUT_TYPE_SEEDLESS", ["disablePlayerResponse"] = true }, Origin + "/shorts/", ct);
             if (first.S("replacementEndpoint", "reelWatchEndpoint", "videoId") is { } id0)
             {
-                if (blockAds && (HasAdMarker(first) || HasPaidPromotion(first)))
+                bool seedAd = HasAdMarker(first.P("overlay")) || HasAdMarker(first.P("replacementEndpoint"))
+                    || HasPaidPromotion(first.P("overlay")) || HasPaidPromotion(first.P("playerOverlays"));
+                if (blockAds && seedAd)
                 {
                     ShortsAdBlocker.RecordBlocked();
                     Paths.Log($"shorts-adblock: dropped seed ad {id0}");
@@ -675,8 +683,8 @@ public sealed class InnerTube
         {
             ["playerRequest"] = new JsonObject { ["videoId"] = videoId }, ["params"] = "CA8%3D", ["disablePlayerResponse"] = true,
         }, $"{Origin}/shorts/{videoId}", ct);
-        bool isAd = HasAdMarker(d);
-        bool paid = HasPaidPromotion(d);
+        bool isAd = HasAdMarker(d.P("overlay")) || HasAdMarker(d.P("playerOverlays")) || HasAdMarker(d.P("replacementEndpoint"));
+        bool paid = HasPaidPromotion(d.P("overlay")) || HasPaidPromotion(d.P("playerOverlays"));
         var bar = J.FindFirst(d, "reelChannelBarViewModel");
         var title = J.FindFirst(d, "shortsVideoTitleViewModel").S("text", "content");
         string? desc = J.FindFirst(d, "attributedDescription").Text()
@@ -717,7 +725,7 @@ public sealed class InnerTube
         var body = new JsonObject { ["videoId"] = videoId, ["racyCheckOk"] = true, ["contentCheckOk"] = true };
         if (playlistId != null) body["playlistId"] = playlistId;
         var data = await PostAsync("next", body, $"{Origin}/watch?v={videoId}" + (playlistId != null ? "&list=" + playlistId : ""), ct);
-        var info = new WatchInfo { VideoId = videoId, HasPaidPromotion = HasPaidPromotion(data) };
+        var info = new WatchInfo { VideoId = videoId, HasPaidPromotion = HasPaidPromotion(data.P("playerOverlays")) || HasPaidPromotion(data.P("contents", "twoColumnWatchNextResults", "results")) };
         // watched inside a playlist or a mix: the list comes with the page
         if (data.P("contents", "twoColumnWatchNextResults", "playlist", "playlist") is { } pl)
         {

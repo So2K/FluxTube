@@ -87,7 +87,7 @@ public static class Cards
         var items = new List<MenuItem>
         {
             new(L.T("Открыть в новой вкладке", "Open in new tab"), () => Shell.OpenVideoInNewTab(v), icon: Th.Tab, shortcut: L.T("СКМ", "MMB")),
-            new(L.T("Запустить в фоне (звук)", "Play in background (audio)"), () => { Shell.OpenVideoInNewTab(v); BgPlayers.Play(v.VideoId); }, icon: Th.Headphones),
+            new(L.T("Запустить в фоне (звук)", "Play in background (audio)"), () => Shell.OpenVideoInBgTab(v), icon: Th.Headphones),
             MenuItem.Sep,
             new(L.T("Скачать (", "Download (") + QualityName(AppSettings.Current.DownloadQuality) + ")", () => Download(v, null), icon: Th.Download),
             new(L.T("Скачать в качестве", "Download quality"), null, AppSettings.Qualities.Select(q => new MenuItem(QualityName(q), () => Download(v, q), icon: Th.Quality)).ToList(), icon: Th.Quality),
@@ -130,6 +130,9 @@ public static class Cards
     {
         float x = card.X, y = card.Y, cardW = card.W;
         var over = UI.Hover(card);
+        var cardTf = over ? Gfx.DC.Transform : MusicBounce.Push(card, ((id & 0x7FFFFFFF) * 5 + 2) % 28, amp: 0.56f, rotAmp: 0.36f);
+        try
+        {
         var cardFrame = card.Inset(-6, -6);
         float thumbRad = Gfx.Corner(12);
         uint behind;
@@ -221,6 +224,11 @@ public static class Cards
         else if (overChannel) { }
         else if (UI.Click(id, card, playSfx: false)) App.Post(() => Shell.OpenVideo(v, source));
         else if (UI.RightClick(card)) Menus.Popup(MenuFor(v));
+        }
+        finally
+        {
+            MusicBounce.Pop(cardTf);
+        }
     }
 
     /// <summary>Adds the video to one of the account's playlists or takes it out.</summary>
@@ -567,17 +575,21 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         return list;
     }
 
+    private string _contEndpoint = "";
+    private readonly Dictionary<int, string> _chipEndpoints = new();
+
     private void SelectChip(int idx)
     {
         if (idx < 0 || idx >= _chips.Count || idx == _chipIdx) return;
         PreviewPlayer.HideNow();
 
-        // Snapshot current category into memory cache so switching back is 0ms instant!
-        if (_items.Count > 0 && !_chipCache.ContainsKey(_chipIdx))
+        // Always update current category snapshot so loaded infinite-scroll pages are preserved when switching back!
+        if (_items.Count > 0)
         {
             var snap = new FeedPage_ { Continuation = _cont };
             snap.Items.AddRange(_items);
             _chipCache[_chipIdx] = snap;
+            _chipEndpoints[_chipIdx] = _contEndpoint;
         }
 
         _chipIdx = idx;
@@ -590,6 +602,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         if (_chipCache.TryGetValue(idx, out var cached) && cached.Items.Count > 0)
         {
             _loading = false;
+            _contEndpoint = _chipEndpoints.GetValueOrDefault(idx, "browse");
             Replace(cached, saveCache: false);
             App.Invalidate();
             return;
@@ -599,12 +612,13 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         _items = [];
         _ids.Clear();
         _cont = null;
+        _contEndpoint = "";
         UI.ScrollReset(_scroll);
         _loading = true;
         App.Invalidate();
 
         var fallbackQuery = idx < Top5HomeSpecs.Length && Top5HomeSpecs[idx].FallbackToken.StartsWith("search:", StringComparison.Ordinal)
-            ? Top5HomeSpecs[idx].FallbackToken[7..]
+            ? (AppSettings.Current.Hl == "ru" ? chip.Title : Top5HomeSpecs[idx].FallbackToken[7..])
             : chip.Title;
 
         _ = Task.Run(async () =>
@@ -613,24 +627,32 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
             {
                 var yt = InnerTube.Instance;
                 FeedPage_ page;
+                string ep = "browse";
                 if (string.IsNullOrEmpty(chip.Token))
                     page = await yt.HomeAsync();
                 else if (chip.Token.StartsWith("search:", StringComparison.Ordinal))
-                    page = await yt.SearchAsync(chip.Token[7..]);
+                {
+                    ep = "search";
+                    page = await yt.SearchAsync(AppSettings.Current.Hl == "ru" ? chip.Title : chip.Token[7..]);
+                }
                 else
                 {
                     try { page = await yt.ContinueAsync("browse", chip.Token); }
                     catch { page = new FeedPage_(); }
                     // Auto-fallback to search if YouTube continuation token expired or returned 0 items
                     if (page.Items.Count == 0 && !string.IsNullOrWhiteSpace(fallbackQuery))
+                    {
+                        ep = "search";
                         page = await yt.SearchAsync(fallbackQuery);
+                    }
                 }
                 Cards.WithProgress(page);
                 App.Post(() =>
                 {
                     if (gen != _gen) return;
                     _loading = false;
-                    if (page.Items.Count > 0) _chipCache[idx] = page;
+                    _contEndpoint = ep;
+                    if (page.Items.Count > 0) { _chipCache[idx] = page; _chipEndpoints[idx] = ep; }
                     Replace(page, saveCache: idx == 0);
                     if (_items.Count == 0) Say(L.T("По этой категории пока ничего не нашлось.", "Nothing found in this category yet."), Th.Sub);
                 });
@@ -871,7 +893,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         _loadingMore = true;
         var gen = _gen;
         var tok = _cont;
-        var endpoint = kind == "search" ? "search" : "browse";
+        var endpoint = !string.IsNullOrEmpty(_contEndpoint) ? _contEndpoint : (kind == "search" ? "search" : "browse");
         _ = Task.Run(async () =>
         {
             try
@@ -1080,6 +1102,8 @@ public sealed class WatchPage : IPage
     private List<SoundCloudBar.TimedMarker> _scMarkers = [];
     private int _scMarkerComments = -1;
     private int _scMarkerDurSec = -1;
+    private int _scPushedComments = -1;
+    private int _scPushedDurSec = -1;
 
     private IReadOnlyList<SoundCloudBar.TimedMarker> GetSoundCloudMarkers(double dur)
     {
@@ -1093,6 +1117,18 @@ public sealed class WatchPage : IPage
             _scMarkers = SoundCloudBar.ExtractMarkers(rawComments, _info?.Chapters ?? [], dur);
         }
         return _scMarkers;
+    }
+
+    /// <summary>Timed comment avatar markers for the mpv video seekbar overlay (fluxosc.lua).</summary>
+    public System.Text.Json.Nodes.JsonArray PlayerCommentsJson()
+    {
+        if (!AppSettings.Current.SoundCloudWave || AppSettings.Current.AudioOnlyMode || Pip.Active
+            || PlaybackTracker.Instance.Current?.VideoId != Video.VideoId)
+            return new System.Text.Json.Nodes.JsonArray();
+        var dur = MpvPlayer.Instance.Duration;
+        if (dur <= 5) return new System.Text.Json.Nodes.JsonArray();
+        var markers = GetSoundCloudMarkers(dur);
+        return SoundCloudBar.BuildPlayerCommentsJson(markers, dur, Gfx.Scale, Shell.PushPlayerState);
     }
 
     public string Tag => "";
@@ -1197,7 +1233,15 @@ public sealed class WatchPage : IPage
         if (_list == null) return SharePanel.LinkFor(Video.VideoId, at);
         return $"https://www.youtube.com/watch?v={Video.VideoId}&list={_list.Id}" + (at > 1 ? "&t=" + at : "");
     }
-    public string Speed => _speed;
+    public string Speed
+    {
+        get
+        {
+            var sp = MpvPlayer.Instance.Speed;
+            if (sp > 0.1) return Math.Abs(sp - 1.0) < 0.01 ? "1×" : sp.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "×";
+            return _speed;
+        }
+    }
     public void ToggleTheater() { AppSettings.Current.TheaterMode = !AppSettings.Current.TheaterMode; AppSettings.Current.Save(); App.Invalidate(); }
 
     private int _infoGen;
@@ -1244,6 +1288,8 @@ public sealed class WatchPage : IPage
         _commentCount = null;
         _createCommentParams = null;
         _commentsStarted = _commentsLoading = _commentsOff = false;
+        _scMarkerComments = _scMarkerDurSec = _scPushedComments = _scPushedDurSec = -1;
+        _scMarkers = [];
         LoadInfo(bypassCache: true);
     }
 
@@ -1426,6 +1472,8 @@ public sealed class WatchPage : IPage
                     _commentCount ??= page.Count;
                     if (!string.IsNullOrEmpty(page.CreateCommentParams)) _createCommentParams = page.CreateCommentParams;
                     _commentsLoading = false;
+                    if (AppSettings.Current.SoundCloudWave && !AppSettings.Current.AudioOnlyMode)
+                        Shell.PushPlayerState();
                     App.Invalidate();
                 });
             }
@@ -1749,53 +1797,73 @@ public sealed class WatchPage : IPage
             var vizR = new R(video.X + 18, video.Y + video.H * 0.34f, video.W - 36, video.H * 0.50f);
             AudioAnalyzer.DrawStageVisualizer(vizR, sOpt.VisualizerStyle == "off" ? "bars_wave" : sOpt.VisualizerStyle, opacity: 0.92f);
 
-            // Top status badge ("Только звук · 0% GPU" + active DSP preset)
-            var chipTxt = sOpt.AudioFxEnabled
-                ? L.T($"Только звук · GPU 0%  ·  FX: {AudioDsp.DisplayPresetName(sOpt)}", $"Audio only · GPU 0%  ·  FX: {AudioDsp.DisplayPresetName(sOpt)}")
-                : L.T("Только звук · Видео отключено (GPU 0%)", "Audio only · Video disabled (GPU 0%)");
-            var cr = Gfx.Text(chipTxt, 11.5f, 600);
-            var cb = new R(video.X + 16, video.Y + 14, cr.W + 22, 26);
-            Gfx.FillFrosted(cb, Th.Card, 13, opacity: 0.78f, border: true);
-            Gfx.Draw(cr, cb.X + 11, cb.Y + (cb.H - cr.H) / 2, Th.Text);
-
-            // Top-right quick buttons: Bass Shake + EQ Studio + Return Video
+            // Top-right quick buttons: Bass Shake + EQ Studio + Return Video (laid out first so left badge never overlaps!)
             float topRx = video.Right - 16;
             var showVidLbl = L.T("Показать видео", "Show video");
             var showVidW = UI.PillWidth(Th.Play, showVidLbl);
             topRx -= showVidW;
+            var tfVid = MusicBounce.Push(new R(topRx, video.Y + 12, showVidW, 30), 21, amp: 0.85f);
             if (UI.Pill(UI.Id("ms:vid", _infoScroll), topRx, video.Y + 12, 30, Th.Play, showVidLbl, out _))
                 App.Post(Shell.ToggleAudioOnlyMode);
+            MusicBounce.Pop(tfVid);
             topRx -= 8;
             var eqW = UI.PillWidth(Th.Headphones, "EQ / FX");
             topRx -= eqW;
+            var tfEq = MusicBounce.Push(new R(topRx, video.Y + 12, eqW, 30), 13, amp: 0.90f);
             if (UI.Pill(UI.Id("ms:eq", _infoScroll), topRx, video.Y + 12, 30, Th.Headphones, "EQ / FX", out _, accent: sOpt.AudioFxEnabled))
                 App.Post(AudioStudioPanel.Toggle);
+            MusicBounce.Pop(tfEq);
             topRx -= 8;
             var shLbl = L.T("Тряска", "Shake");
             var shW = UI.PillWidth(null, shLbl);
             topRx -= shW;
+            var tfSh = MusicBounce.Push(new R(topRx, video.Y + 12, shW, 30), 4, amp: 0.95f);
             if (UI.Pill(UI.Id("ms:shake", _infoScroll), topRx, video.Y + 12, 30, null, shLbl, out _, accent: sOpt.MusicBassShake))
             {
                 sOpt.MusicBassShake = !sOpt.MusicBassShake;
                 sOpt.Save();
                 App.Invalidate();
             }
+            MusicBounce.Pop(tfSh);
 
-            // Centered cover art card with dramatic bass-beat pulse + expanding shockwave ring
+            // Top-left status badge clamped cleanly against top-right buttons!
+            float maxChipW = topRx - (video.X + 26);
+            if (maxChipW > 80)
+            {
+                var chipTxt = sOpt.AudioFxEnabled
+                    ? L.T($"Только звук · GPU 0%  ·  FX: {AudioDsp.DisplayPresetName(sOpt)}", $"Audio only · GPU 0%  ·  FX: {AudioDsp.DisplayPresetName(sOpt)}")
+                    : L.T("Только звук · Видео отключено (GPU 0%)", "Audio only · Video disabled (GPU 0%)");
+                var cr = Gfx.Text(chipTxt, 11.5f, 600, MathF.Max(40, maxChipW - 22));
+                var cb = new R(video.X + 16, video.Y + 14, MathF.Min(maxChipW, cr.W + 22), 26);
+                var tfCb = MusicBounce.Push(cb, 6, amp: 0.55f, rotAmp: 0.25f);
+                Gfx.FillFrosted(cb, Th.Card, 13, opacity: 0.78f, border: true);
+                Gfx.Draw(cr, cb.X + 11, cb.Y + (cb.H - cr.H) / 2, Th.Text);
+                MusicBounce.Pop(tfCb);
+            }
+
+            // Centered cover art card with dramatic sub-bass bounce + dual expanding shockwave rings
             float baseArtW = MathF.Min(280, video.W * 0.33f);
-            float pulse = 1f + bass * (sOpt.MusicBassShake ? 0.068f : 0.032f);
+            float pulse = 1f + bass * (sOpt.MusicBassShake ? 0.062f : 0.030f);
             float artW = baseArtW * pulse, artH = artW * 9f / 16f;
             var artR = new R(Gfx.Snap(video.X + (video.W - artW) / 2), Gfx.Snap(video.Y + video.H * 0.14f + (baseArtW * 9f / 16f - artH) * 0.5f), artW, artH);
-            if (sOpt.MusicBassShake && bass > 0.18f)
+            var tfArt = MusicBounce.Push(artR, 1, amp: 1.45f, rotAmp: 1.25f);
+            if (sOpt.MusicBassShake && bass > 0.16f)
             {
-                float ringExp = (bass - 0.18f) * 26f;
-                Gfx.Stroke(artR.Inset(-ringExp), Gfx.Fade(Th.Brand, Math.Clamp((bass - 0.15f) * 0.65f, 0f, 0.55f)), Gfx.Corner(14) + ringExp * 0.4f, 2f);
+                float ringExp = (bass - 0.16f) * 28f;
+                Gfx.Stroke(artR.Inset(-ringExp), Gfx.Fade(Th.Brand, Math.Clamp((bass - 0.14f) * 0.65f, 0f, 0.56f)), Gfx.Corner(14) + ringExp * 0.4f, 2f);
+                if (bass > 0.34f)
+                {
+                    float ring2 = (bass - 0.34f) * 44f + 10f;
+                    uint c2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
+                    Gfx.Stroke(artR.Inset(-ring2), Gfx.Fade(c2, Math.Clamp((bass - 0.32f) * 0.45f, 0f, 0.34f)), Gfx.Corner(14) + ring2 * 0.4f, 1.4f);
+                }
             }
             Gfx.Fill(artR.Inset(-3), Gfx.Fade(0xFF000000, 0.34f), Gfx.Corner(14));
             var img = Images.Get(Video.Thumb720, 640, 360);
             if (img != null) Gfx.ImageRounded(img.Bmp!, artR, Gfx.Corner(12), Images.Alpha(img));
             else Gfx.Fill(artR, Th.Card, Gfx.Corner(12));
             Gfx.Stroke(artR, Gfx.Fade(Th.Brand, 0.30f + bass * 0.55f), Gfx.Corner(12), 1.6f);
+            MusicBounce.Pop(tfArt);
 
             // SoundCloud waveform seekbar with timed comments right inside the Music Stage!
             if (sOpt.SoundCloudWave)
@@ -1813,11 +1881,17 @@ public sealed class WatchPage : IPage
             var barR = new R(video.X + 16, video.Bottom - 52, video.W - 32, 40);
             Gfx.FillFrosted(barR, Th.Menu, Gfx.Corner(12), opacity: 0.86f, border: true);
             float cx = barR.X + 8;
-            if (UI.IconButton(UI.Id("ms:play", _infoScroll), new R(cx, barR.Y + 2, 36, 36), mpv.Paused ? Th.Play : Th.Pause, 15, Th.Brand)) mpv.TogglePause();
+            var rPlay = new R(cx, barR.Y + 2, 36, 36); var tfP = MusicBounce.Push(rPlay, 2, amp: 1.15f);
+            if (UI.IconButton(UI.Id("ms:play", _infoScroll), rPlay, mpv.Paused ? Th.Play : Th.Pause, 15, Th.Brand)) mpv.TogglePause();
+            MusicBounce.Pop(tfP);
             cx += 38;
-            if (UI.IconButton(UI.Id("ms:rew", _infoScroll), new R(cx, barR.Y + 2, 32, 36), Th.Rewind, 13)) mpv.Command("seek", "-10");
+            var rRew = new R(cx, barR.Y + 2, 32, 36); var tfRw = MusicBounce.Push(rRew, 10, amp: 0.95f);
+            if (UI.IconButton(UI.Id("ms:rew", _infoScroll), rRew, Th.Rewind, 13)) mpv.Command("seek", "-10");
+            MusicBounce.Pop(tfRw);
             cx += 34;
-            if (UI.IconButton(UI.Id("ms:fwd", _infoScroll), new R(cx, barR.Y + 2, 32, 36), Th.Forward, 13)) mpv.Command("seek", "10");
+            var rFwd = new R(cx, barR.Y + 2, 32, 36); var tfFw = MusicBounce.Push(rFwd, 18, amp: 0.95f);
+            if (UI.IconButton(UI.Id("ms:fwd", _infoScroll), rFwd, Th.Forward, 13)) mpv.Command("seek", "10");
+            MusicBounce.Pop(tfFw);
             cx += 40;
 
             var dur = mpv.Duration;
@@ -1855,75 +1929,99 @@ public sealed class WatchPage : IPage
         float relatedRowH = relatedThumbH + 96f;
         int relatedRows = (_related.Count + relatedCols - 1) / relatedCols;
         float relatedH = 44 + relatedRows * relatedRowH + (_relCont != null ? 54 : 16);
-        bool showScUnderVideo = AppSettings.Current.SoundCloudWave && !(AppSettings.Current.AudioOnlyMode && !Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id);
-        float scBarExtraH = showScUnderVideo ? SoundCloudBar.DefaultHeight + 12 : 0f;
-        float infoContentH = 14 + scBarExtraH + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + relatedH + 30 + _commentsH + (listInline ? _listInlineH : 0);
+        float infoContentH = 14 + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + relatedH + 30 + _commentsH + (listInline ? _listInlineH : 0);
 
         var view = new R(x0, r.Y, mainW + 12, r.H);
         var scroll = UI.BeginScroll(_infoScroll, view, topPad + videoH + infoContentH);
         var video = new R(videoX, Gfx.Snap(view.Y + topPad - scroll), videoW, videoH);
         DrawVideoBox(video, view);
-        float y = video.Bottom + 12;
+        float y = video.Bottom + 16;
 
-        // SoundCloud-style Waveform + Timed Comment Avatars bar directly beneath the player!
-        if (showScUnderVideo)
+        // In normal video mode, no waveform strip under the player — instead feed timed comment avatar circles
+        // directly to the mpv media player bar (fluxosc.lua) right above the seekbar!
+        if (AppSettings.Current.SoundCloudWave && !AppSettings.Current.AudioOnlyMode && !Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id)
         {
             if (!_commentsStarted && _info?.CommentsToken != null) LoadComments();
-            var mpvSc = MpvPlayer.Instance;
-            bool isThis = mpvSc.CurrentVideoId == id;
-            var scRect = new R(videoX, y, videoW, SoundCloudBar.DefaultHeight);
-            if (scRect.Bottom >= view.Y - 20 && scRect.Y <= view.Bottom + 20)
+            var durNow = MpvPlayer.Instance.Duration;
+            int dSec = (int)Math.Round(durNow);
+            if (_comments.Count > 0 && durNow > 5 && (_scPushedComments != _comments.Count || Math.Abs(_scPushedDurSec - dSec) > 2))
             {
-                SoundCloudBar.Draw(scRect, id, isThis ? mpvSc.TimePos : 0, isThis ? mpvSc.Duration : 0,
-                    isThis ? mpvSc.CurrentAudioUrl : null,
-                    GetSoundCloudMarkers(isThis ? mpvSc.Duration : 0),
-                    _info?.Chapters ?? []);
+                _scPushedComments = _comments.Count;
+                _scPushedDurSec = dSec;
+                App.Post(Shell.PushPlayerState);
             }
-            y += SoundCloudBar.DefaultHeight + 14;
         }
-        else y += 4;
 
         if (Title.Length > 0) Sel.Text(UI.Id(_infoScroll, 8001), Title, x0, y, 20, Th.Text, 600, mainW, 3);
         Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, L.T("Копировать название", "Copy title"));
         y += titleRun.H + 14;
 
-        // channel + upgraded Like/Dislike pill + actions (wraps cleanly onto 2 rows if narrow so Like/Dislike NEVER vanishes!)
+        // channel + upgraded Like/Dislike pill + actions (each button hops on its own frequency band in Music Mode!)
         var chName = _info?.Channel ?? Video.Channel;
         var subText = _info?.Subscribers ?? "";
         float bx = x0 + mainW, by = y + 4;
         const float ph = 36;
         bx -= 40;
-        if (UI.IconButton(UI.Id("theater", _infoScroll), new R(bx, by, 36, 36), Th.Theater, 16, AppSettings.Current.TheaterMode ? Th.Brand : Th.Text)) ToggleTheater();
+        var rTh = new R(bx, by, 36, 36); var tfA1 = MusicBounce.Push(rTh, 28, amp: 1.0f);
+        if (UI.IconButton(UI.Id("theater", _infoScroll), rTh, Th.Theater, 16, AppSettings.Current.TheaterMode ? Th.Brand : Th.Text)) ToggleTheater();
+        MusicBounce.Pop(tfA1);
         bx -= 42;
-        if (UI.IconButton(UI.Id("pip", _infoScroll), new R(bx, by, 36, 36), "\uE8A7", 16, Pip.Active ? Th.Brand : Th.Text)) App.Post(Pip.Toggle);
+        var rPip = new R(bx, by, 36, 36); var tfA2 = MusicBounce.Push(rPip, 25, amp: 1.0f);
+        if (UI.IconButton(UI.Id("pip", _infoScroll), rPip, "\uE8A7", 16, Pip.Active ? Th.Brand : Th.Text)) App.Post(Pip.Toggle);
+        MusicBounce.Pop(tfA2);
         bx -= 42;
-        if (UI.IconButton(UI.Id("audioonly", _infoScroll), new R(bx, by, 36, 36), Th.Headphones, 16, AppSettings.Current.AudioOnlyMode ? Th.Brand : Th.Text)) App.Post(Shell.ToggleAudioOnlyMode);
+        var rAo = new R(bx, by, 36, 36); var tfA3 = MusicBounce.Push(rAo, 22, amp: 1.05f);
+        if (UI.IconButton(UI.Id("audioonly", _infoScroll), rAo, Th.Headphones, 16, AppSettings.Current.AudioOnlyMode ? Th.Brand : Th.Text)) App.Post(Shell.ToggleAudioOnlyMode);
+        MusicBounce.Pop(tfA3);
         bx -= 42;
-        if (UI.IconButton(UI.Id("more", _infoScroll), new R(bx, by, 36, 36), Th.More)) MoreMenu();
+        var rMr = new R(bx, by, 36, 36); var tfA4 = MusicBounce.Push(rMr, 19, amp: 1.0f);
+        if (UI.IconButton(UI.Id("more", _infoScroll), rMr, Th.More)) MoreMenu();
+        MusicBounce.Pop(tfA4);
         var s = AppSettings.Current;
-        var scLbl = L.T("Волна", "Wave");
-        bx -= UI.PillWidth(null, scLbl) + 8;
-        if (UI.Pill(UI.Id("scwave", _infoScroll), bx, by, ph, null, scLbl, out _, accent: s.SoundCloudWave))
+        var scLbl = s.AudioOnlyMode ? L.T("Волна", "Wave") : L.T("Кругляшки", "Comments");
+        var scIcon = s.AudioOnlyMode ? null : "\uE8BD";
+        var scW = UI.PillWidth(scIcon, scLbl);
+        bx -= scW + 8;
+        var tfSc = MusicBounce.Push(new R(bx, by, scW, ph), 16, amp: 1.05f);
+        if (UI.Pill(UI.Id("scwave", _infoScroll), bx, by, ph, scIcon, scLbl, out _, accent: s.SoundCloudWave))
         {
             s.SoundCloudWave = !s.SoundCloudWave;
             s.Save();
+            Shell.PushPlayerState();
             App.Invalidate();
         }
+        MusicBounce.Pop(tfSc);
         var eqLbl = s.AudioFxEnabled ? AudioDsp.DisplayPresetName(s) : "EQ";
-        bx -= UI.PillWidth(null, eqLbl) + 8;
+        var eqW = UI.PillWidth(null, eqLbl);
+        bx -= eqW + 8;
+        var tfEqP = MusicBounce.Push(new R(bx, by, eqW, ph), 13, amp: 1.1f);
         if (UI.Pill(UI.Id("eq", _infoScroll), bx, by, ph, null, eqLbl, out _, accent: s.AudioFxEnabled)) App.Post(AudioStudioPanel.Toggle);
+        MusicBounce.Pop(tfEqP);
         var shareLbl = L.T("Поделиться", "Share");
-        bx -= UI.PillWidth(Th.Share, shareLbl) + 8;
+        var shW = UI.PillWidth(Th.Share, shareLbl);
+        bx -= shW + 8;
+        var tfShP = MusicBounce.Push(new R(bx, by, shW, ph), 10, amp: 0.95f);
         if (UI.Pill(UI.Id("share", _infoScroll), bx, by, ph, Th.Share, shareLbl, out _)) OpenShare();
+        MusicBounce.Pop(tfShP);
         var ql = Cards.QualityName(s.PlayerQuality);
-        bx -= UI.PillWidth(null, ql) + 8;
+        var qW = UI.PillWidth(null, ql);
+        bx -= qW + 8;
+        var tfQP = MusicBounce.Push(new R(bx, by, qW, ph), 7, amp: 0.95f);
         if (UI.Pill(UI.Id("q", _infoScroll), bx, by, ph, null, ql, out _)) QualityMenu();
-        bx -= UI.PillWidth(null, _speed) + 8;
-        if (UI.Pill(UI.Id("sp", _infoScroll), bx, by, ph, null, _speed, out _)) SpeedMenu();
+        MusicBounce.Pop(tfQP);
+        var spTxt = Speed;
+        var spW = UI.PillWidth(null, spTxt);
+        bx -= spW + 8;
+        var tfSpP = MusicBounce.Push(new R(bx, by, spW, ph), 4, amp: 0.85f);
+        if (UI.Pill(UI.Id("sp", _infoScroll), bx, by, ph, null, spTxt, out _)) SpeedMenu();
+        MusicBounce.Pop(tfSpP);
         if (UI.Now - _dlCheckedAt > 1000) { _dlCheckedAt = UI.Now; _isDownloaded = Downloader.Instance.IsDownloaded(id, out _); }
         var dl = _isDownloaded ? L.T("Скачано", "Saved") : L.T("Скачать", "Download");
-        bx -= UI.PillWidth(Th.Download, dl) + 8;
+        var dlW = UI.PillWidth(Th.Download, dl);
+        bx -= dlW + 8;
+        var tfDlP = MusicBounce.Push(new R(bx, by, dlW, ph), 2, amp: 1.0f);
         if (UI.Pill(UI.Id("dl", _infoScroll), bx, by, ph, Th.Download, dl, out _)) DownloadMenu();
+        MusicBounce.Pop(tfDlP);
 
         float estLikeW = 14 + 18 + 7 + Gfx.Text(_likes, 13.5f, 600).W + 14 + 1 + 12 + 18 + 7 + Gfx.Text(_dislikes, 13.5f, 600).W + 14;
         var nameFullW = Gfx.Text(chName, 15, 600, 260).W;
@@ -1939,7 +2037,9 @@ public sealed class WatchPage : IPage
         }
 
         var chMaxW = MathF.Max(70, MathF.Min(260, leftEdge - (x0 + 54) - 14));
+        var tfChAv = MusicBounce.Push(new R(x0, y + 1, 42, 42), 3, amp: 1.18f);
         Cards.Avatar(x0, y + 1, 42, _info?.ChannelAvatar, chName);
+        MusicBounce.Pop(tfChAv);
         var nameRun = Gfx.Text(chName, 15, 600, chMaxW);
         var nameRect = new R(x0 + 54, y + 2, nameRun.W, nameRun.H);
         Gfx.Draw(nameRun, nameRect.X, nameRect.Y, UI.Hover(nameRect) && (_info?.ChannelId ?? Video.ChannelId) != null ? Th.Brand : Th.Text);

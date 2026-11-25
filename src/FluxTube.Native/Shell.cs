@@ -75,7 +75,7 @@ public static class Shell
         if (s.AudioOnlyMode)
         {
             if (Pip.Active) Pip.Exit();
-            P.SetVideoEnabled(false);
+            if (_cur is not ShortsPage) P.SetVideoEnabled(false);
             Toast(L.T("Режим «Только звук» включён — видео не декодируется (0% GPU)", "Audio-only mode on — video decoder suspended (0% GPU)"), Th.Good, 2400);
         }
         else
@@ -83,6 +83,7 @@ public static class Shell
             P.SetVideoEnabled(true);
             Toast(L.T("Видео возвращено", "Video restored"), Th.Sub, 1600);
         }
+        PushPlayerState();
         App.Invalidate();
     }
 
@@ -108,7 +109,7 @@ public static class Shell
     {
         if (!P.IsReady || !P.HasMedia) return;
         var s = AppSettings.Current;
-        if (s.AudioOnlyMode && !Pip.Active)
+        if (s.AudioOnlyMode && !Pip.Active && _cur is not ShortsPage && !_fullscreen)
         {
             _videoHiddenSince = 0;
             if (P.VideoEnabled) P.SetVideoEnabled(false);
@@ -252,6 +253,27 @@ public static class Shell
     }
 
     public static void OpenVideoInNewTab(VideoItem v, bool activate = false) => NewTab("video", v.VideoId, v.Title, v.Channel, activate);
+
+    /// <summary>Opens a video in a background tab wired with tab.PlayKey so tab controls &amp; close manage its BgPlayer cleanly.</summary>
+    public static void OpenVideoInBgTab(VideoItem v)
+    {
+        Sfx.Tab();
+        if (_tab < 0) SetTab("root", "home", "");
+        var existing = _tabs.Find(t => t.Kind == "video" && t.Arg == v.VideoId);
+        if (existing != null)
+        {
+            existing.KeepInBg = true;
+            existing.StartPaused = false;
+            BgPlayers.Play(existing.PlayKey);
+            App.Invalidate();
+            return;
+        }
+        var tab = new Tab { Kind = "video", Arg = v.VideoId, Title = v.Title, Sub = v.Channel, KeepInBg = true, StartPaused = false };
+        var idx = Math.Min(_tab + 1, _tabs.Count);
+        _tabs.Insert(idx, tab);
+        BgPlayers.Play(tab.PlayKey);
+        App.Invalidate();
+    }
 
     public static void ReopenClosedTab()
     {
@@ -575,9 +597,10 @@ public static class Shell
         float xStart = strip.X + 24;
         float maxRight = strip.Right - addW - 24;
         float avail = MathF.Max(100, strip.W - 48 - addW - 8);
-        float tw = Math.Clamp(avail / Math.Max(1, _tabs.Count), 108, 250);
+        float tw = Math.Clamp(avail / Math.Max(1, _tabs.Count), 68, 250);
         int visibleCount = 0;
-        for (int i = 0; i < _tabs.Count && xStart + i * tw < maxRight; i++) visibleCount++;
+        for (int i = 0; i < _tabs.Count && xStart + (i + 1) * tw <= maxRight + 1f; i++) visibleCount++;
+        if (visibleCount == 0 && _tabs.Count > 0) visibleCount = 1;
 
         int hoveredNow = -1;
         R hoveredRect = default;
@@ -640,6 +663,7 @@ public static class Shell
             var over = !_draggingTab && UI.Hover(r);
             if (over) { hoveredNow = i; hoveredRect = r; }
             var sel = UI.Smooth(id ^ 0x4242, active ? 1 : 0, 20);
+            var tabTf = elevated ? Gfx.DC.Transform : MusicBounce.Push(r, (i * 5 + 3) % 26, amp: 0.68f, rotAmp: 0.45f);
 
             if (elevated)
             {
@@ -766,6 +790,7 @@ public static class Shell
                 else if (UI.RightClick(r)) deferred ??= () => TabContextMenu(tabIdx);
                 else if (UI.Click(id, r)) deferred ??= () => GoTab(tabIdx);
             }
+            MusicBounce.Pop(tabTf);
         }
 
         // Draw stationary/sliding tabs first, then the dragged tab on top!
@@ -779,8 +804,10 @@ public static class Shell
 
         // "+" New Tab button — always drawn without single-frame flicker
         var addR = new R(Gfx.Snap(xStart + visibleCount * tw + 2), strip.Y + 4, addW, TabH - 9);
+        var addTf = MusicBounce.Push(addR, 27, amp: 0.85f);
         if (UI.IconButton(UI.Id("tab:add"), addR, Th.Add, 12, Th.Sub))
             deferred ??= () => { NewTab(); _search.Focus(); };
+        MusicBounce.Pop(addTf);
 
         if (deferred != null) App.Post(deferred);
 
@@ -912,7 +939,7 @@ public static class Shell
     private static readonly List<R> _holes = new(8);
     private static long _navAt, _toastAt;
     private static float _markY = -1, _markShown, _prevSideW = SideW;
-    private static float _shakeBassAvg, _shakeEnergy, _shakePhase;
+    private static int _markIdx = -1;
 
     public static bool TopBarControlAt(float x, float y)
     {
@@ -920,18 +947,46 @@ public static class Shell
         return false;
     }
 
+    public static bool AnyModalOpen => Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open;
+
+    /// <summary>Closes top-most floating modal/menu when clicking outside it (e.g. on VideoHwnd backdrop). Returns true if consumed.</summary>
+    public static bool CloseModalOnOutsideClick()
+    {
+        if (Menus.Open) { Menus.Close(); return true; }
+        if (AccountMenu.Open) { AccountMenu.Close(); return true; }
+        if (SharePanel.Open) { SharePanel.Close(); return true; }
+        if (AudioStudioPanel.Open) { AudioStudioPanel.Close(); return true; }
+        if (LoginModal.Open) { LoginModal.Close(); return true; }
+        if (ThemeCodeEditor.Open) return true; // never dismiss unsaved code editor on stray click
+        return false;
+    }
+
     private static bool CaptionButton(string id, R r, string glyph, bool close = false)
     {
         _topHits.Add(r);
         var over = UI.Hover(r);
-        float red = 0;
+        // Full edge-to-edge Fitts-Law hitbox, sleek modern centered rounded pill visual (matches topbar aesthetic!)
+        var pill = new R(Gfx.Snap(r.X + 4), Gfx.Snap(r.Y + 9), MathF.Max(26, r.W - 8), MathF.Max(26, r.H - 18));
+        float rad = Gfx.Corner(9);
+        float hov = UI.Anim(UI.Id(id) ^ 0x11, over ? 1 : 0, 26);
         if (close)
         {
-            red = UI.Anim(UI.Id(id) ^ 0x11, over ? 1 : 0, 26);
-            if (red > 0.01f) Gfx.Fill(r, Gfx.Fade(0xFFE81123, red));
+            if (hov > 0.01f)
+            {
+                Gfx.Fill(pill, Gfx.Fade(0xFFE53945, 0.92f * hov), rad);
+                if (AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(pill, rad, 0xFFE53945, 0.45f * hov);
+            }
+            else
+            {
+                Gfx.Fill(pill, Th.A(0.05f), rad);
+            }
+            Gfx.Icon(glyph, pill, 10.5f, Gfx.Mix(Th.Icon, 0xFFFFFFFF, hov));
         }
-        else UI.Glow(UI.Id(id), r, 0, over);
-        Gfx.Icon(glyph, r, 10, Gfx.Mix(Th.Icon, 0xFFFFFFFF, red));
+        else
+        {
+            Gfx.Fill(pill, Th.A(0.05f + 0.11f * hov), rad);
+            Gfx.Icon(glyph, pill, 10.5f, Gfx.Mix(Th.Icon, Th.Text, hov));
+        }
         return UI.Click(UI.Id(id), r, hand: false);
     }
 
@@ -980,6 +1035,8 @@ public static class Shell
         _userMuted = App.Mute;
         P.FullscreenChanged += SetFullscreen;
         P.PlaybackStarted += () => { VideoReady = true; PushPlayerState(); };
+        P.DurationChanged += _ => PushPlayerState();
+        P.SpeedChanged += _ => { PushPlayerState(); App.Invalidate(); };
         P.Message += OnPlayerMessage;
         P.VolumeChanged += v =>
         {
@@ -1087,6 +1144,11 @@ public static class Shell
             }
         }
         if (App.Bench) _benchStep = 0;
+        if (App.Test && args.Contains("--test-sc"))
+        {
+            AppSettings.Current.SoundCloudWave = true;
+            App.After(5500, () => P.Command("script-message", "flux-show", "yes"));
+        }
         if (args.Contains("--test-tabs"))
         {
             OpenInNewTab("video", "kJQP7kiw5Fk", "Luis Fonsi - Despacito ft. Daddy Yankee", "Luis Fonsi");
@@ -1320,9 +1382,9 @@ public static class Shell
             }
             if (v.IsShort && source == "shorts") P.Command("set", "loop-file", "inf");
             else if (T.Current?.VideoId != v.VideoId || T.CurrentSource == "shorts") P.Command("set", "loop-file", "no");
-            // Always restore video decoding BEFORE loadfile when not in Audio-Only mode (prevents black screen after tab/minimize suspend!)
+            // Always restore video decoding BEFORE loadfile when not in Audio-Only mode (and ALWAYS for Shorts!)
             _videoHiddenSince = 0;
-            if (!AppSettings.Current.AudioOnlyMode || Pip.Active) P.SetVideoEnabled(true);
+            if (!AppSettings.Current.AudioOnlyMode || Pip.Active || (v.IsShort && source == "shorts")) P.SetVideoEnabled(true);
             T.Play(v, source, exactStart, startPaused);
         }
 
@@ -1360,21 +1422,27 @@ public static class Shell
         foreach (var s in T.Segments)
             segs.Add(new System.Text.Json.Nodes.JsonArray(System.Text.Json.Nodes.JsonValue.Create(s.Start), System.Text.Json.Nodes.JsonValue.Create(s.End)));
         var shortOv = sp != null && AppSettings.Current.ShortsPanelHidden && AppSettings.Current.ShortsInfoOverlay;
+        var curSpeed = P.Speed;
+        var speedTxt = Math.Abs(curSpeed - 1.0) < 0.01 ? "1×" : $"{curSpeed.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}×";
         var o = new System.Text.Json.Nodes.JsonObject
         {
             ["next"] = w?.NextUp() != null,
             ["quality"] = T.IsLocal ? "" : q,
-            ["speed"] = w?.Speed ?? "1×",
+            ["speed"] = speedTxt,
             ["title"] = sp != null ? sp.CurrentTitle : (T.Current?.Title ?? ""),
             ["channel"] = sp != null ? sp.CurrentChannel : "",
             ["likes"] = sp != null ? sp.CurrentLikes : "",
             ["short_overlay"] = shortOv,
+            ["is_short"] = sp != null,
+            ["lang"] = AppSettings.Current.UiLanguage,
             ["segments"] = segs,
             ["rclick"] = AppSettings.Current.RightClickPause ? "pause" : "menu",
             ["accent"] = Themes.Hex(Themes.AccentOverride ?? Themes.Current.Brand),
             ["pip"] = Pip.Active,
             ["subs"] = w?.SubsOn ?? false,
             ["chapters"] = w?.ChaptersJson() ?? new System.Text.Json.Nodes.JsonArray(),
+            ["sc_on"] = AppSettings.Current.SoundCloudWave && !AppSettings.Current.AudioOnlyMode && !Pip.Active && sp == null,
+            ["sc_comments"] = w?.PlayerCommentsJson() ?? new System.Text.Json.Nodes.JsonArray(),
         };
         P.Command("script-message-to", "fluxosc", "flux-state", o.ToJsonString());
     }
@@ -1397,6 +1465,16 @@ public static class Shell
             case "menu-quality": w?.QualityMenu(); break;
             case "menu-speed": w?.SpeedMenu(); break;
             case "menu-subs": w?.TracksMenu(); break;
+            case "toggle-loop":
+                if (_cur is ShortsPage sh) sh.ToggleLoop();
+                else P.Command("cycle-values", "loop-file", "inf", "no");
+                break;
+            case "toggle-sc":
+                AppSettings.Current.SoundCloudWave = !AppSettings.Current.SoundCloudWave;
+                AppSettings.Current.Save();
+                PushPlayerState();
+                App.Invalidate();
+                break;
             case "menu":
                 if (w != null) w.MoreMenu();
                 else (_cur as ShortsPage)?.OpenContextMenu();
@@ -1638,7 +1716,7 @@ public static class Shell
         _videoWanted = false;
         _miniVideoRect = null;
         _toastRect = default;
-        if (Menus.Open || AccountMenu.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
+        if (AnyModalOpen) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
         var cur = T.Current;
 
         if (_fullscreen)
@@ -1654,39 +1732,16 @@ public static class Shell
             return;
         }
 
-        // Ultra-cheap GPU camera shake during Audio-Only Music Mode (1 Matrix3x2 transform = 0.001 ms!)
-        var prevTf = Gfx.DC.Transform;
-        bool bassShakeActive = false;
-        if (AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && P.HasMedia && !P.Paused && !P.Muted && !App.Test)
-        {
-            AudioAnalyzer.RequestFrame();
-            float bass = AudioAnalyzer.BassEnergy;
-            float dt = (float)Math.Clamp(UI.Dt, 0.003, 0.04);
-            _shakeBassAvg += (bass - _shakeBassAvg) * (1f - MathF.Exp(-dt * 7.5f));
-            float kick = MathF.Max(0f, bass - _shakeBassAvg * 0.88f) * 2.4f + MathF.Max(0f, bass - 0.30f) * 0.9f;
-            _shakeEnergy = MathF.Max(_shakeEnergy * MathF.Exp(-dt * 15f), Math.Clamp(kick, 0f, 1.35f));
-            if (_shakeEnergy > 0.012f)
-            {
-                _shakePhase += dt * (36f + _shakeEnergy * 24f);
-                float sx = MathF.Sin(_shakePhase * 1.13f) * _shakeEnergy * 5.2f;
-                float sy = MathF.Cos(_shakePhase * 1.47f + 0.7f) * _shakeEnergy * 4.4f;
-                float ang = MathF.Sin(_shakePhase * 0.89f) * _shakeEnergy * 0.0048f; // ~0.28° subtle club thump
-                float sc = 1f + _shakeEnergy * 0.0075f;
-                var center = new System.Numerics.Vector2(w * 0.5f, h * 0.5f);
-                Gfx.DC.Transform = System.Numerics.Matrix3x2.CreateScale(sc, sc, center)
-                    * System.Numerics.Matrix3x2.CreateRotation(ang, center)
-                    * System.Numerics.Matrix3x2.CreateTranslation(sx, sy);
-                bassShakeActive = true;
-                UI.Animate();
-            }
-        }
-        else { _shakeEnergy = 0f; _shakeBassAvg = 0f; }
+        // Update per-element GPU bass/spectrum bounce for Audio-Only Music Mode (exempt Shorts!)
+        bool musicBounceOn = AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && _cur is not ShortsPage && P.HasMedia && !P.Paused && !P.Muted && !App.Test;
+        MusicBounce.Update(musicBounceOn, (float)UI.Dt);
 
         // Tactile frosted/matte glass backdrop behind the entire window
         Gfx.DrawFrostedBackdrop(w, h);
 
         var playing = cur != null && P.HasMedia;
-        var onWatch = _cur is WatchPage wp && wp.Video.VideoId == cur?.VideoId || _cur is ShortsPage;
+        var onWatch = (_cur is WatchPage wp && wp.Video.VideoId == cur?.VideoId)
+                   || (_cur is ShortsPage shP && shP.CurrentId != null && shP.CurrentId == cur?.VideoId);
         var bar = playing && !onWatch;
         var barA = UI.Anim(UI.Id("npbar"), bar ? 1 : 0, 16);
         var barH = BarH * barA;
@@ -1716,22 +1771,30 @@ public static class Shell
         Gfx.FillFrosted(new R(0, 0, w, TopH), Th.Panel, 0, opacity: 0.88f);
         var menuR = new R(16, 8, 36, 36);
         _topHits.Add(menuR);
+        var tfM = MusicBounce.Push(menuR, 2, amp: 0.85f);
         if (UI.IconButton(UI.Id("sidebar:toggle"), menuR, Th.Hamburger, 15, AppSettings.Current.SidebarCollapsed ? Th.Sub : Th.Text)) App.Post(ToggleSidebar);
+        MusicBounce.Pop(tfM);
         var backR = new R(56, 8, 34, 36);
         _topHits.Add(backR);
+        var tfB = MusicBounce.Push(backR, 5, amp: 0.85f);
         if (UI.IconButton(UI.Id("back"), backR, Th.Back, 14, Th.Text, _back.Count > 0)) App.Post(Back);
+        MusicBounce.Pop(tfB);
         var fwdR = new R(92, 8, 34, 36);
         _topHits.Add(fwdR);
+        var tfF = MusicBounce.Push(fwdR, 8, amp: 0.85f);
         if (UI.IconButton(UI.Id("fwd"), fwdR, "\uE72A", 14, Th.Text, _forward.Count > 0)) App.Post(Forward);
+        MusicBounce.Pop(tfF);
         var logo = new R(132, 8, 122, 36);
         _topHits.Add(logo);
         var logoId = UI.Id("logo");
+        var tfLogo = MusicBounce.Push(logo, 1, amp: 1.15f);
         UI.Glow(logoId, logo, 8, UI.Hover(logo));
         Gfx.Fill(new R(140, 17, 27, 18), Th.Brand, 5);
         Gfx.Icon("\uF5B0", new R(140, 17, 27, 18), 9, Th.OnBrand);
         Gfx.Draw("FluxTube", 175, 15, 15.5f, Th.Text, 600);
         if (UI.MiddleClick(logo)) App.Post(() => { NewTab("root", "home", activate: false); Toast(L.T("Открыта новая вкладка: Главная", "Opened new tab: Home"), Th.Sub, 1800); });
         else if (UI.Click(logoId, logo)) App.Post(() => OpenRoot("home"));
+        MusicBounce.Pop(tfLogo);
 
         const float cbw = 46, cbh = TopH;
         var zoomed = W.IsZoomed(App.Hwnd);
@@ -1740,9 +1803,13 @@ public static class Shell
         if (CaptionButton("cap:min", new R(w - cbw * 3, 0, cbw, cbh), "\uE921")) App.Post(() => W.ShowWindow(App.Hwnd, 6));
         var rightEdge = w - cbw * 3 - 12;
 
-        var sw = Math.Clamp(w - 720, 220, 600);
+        var logged = CookieStore.IsLoggedIn;
+        var signInText = L.T("Войти", "Sign in");
+        float accReserve = logged ? 50 : UI.PillWidth(Th.Account, signInText) + 18;
+        float maxSearchW = MathF.Max(140, rightEdge - accReserve - (logo.Right + 24));
+        var sw = Math.Clamp(MathF.Min(w - 720, maxSearchW), MathF.Min(140, maxSearchW), MathF.Min(600, maxSearchW));
         float contentCenter = sideW + (w - sideW) * 0.5f;
-        float searchX = Math.Clamp(contentCenter - sw * 0.5f, logo.Right + 16, MathF.Max(logo.Right + 16, rightEdge - sw - 64));
+        float searchX = Math.Clamp(contentCenter - sw * 0.5f, logo.Right + 16, MathF.Max(logo.Right + 16, rightEdge - sw - accReserve));
         _searchBox = new R(Gfx.Snap(searchX), 8, sw, 36);
         float searchRad = Gfx.Corner(18);
         Gfx.Fill(_searchBox, Th.Card, searchRad);
@@ -1759,27 +1826,30 @@ public static class Shell
         _search.Place(_searchBox, 18, 44);
         if (UI.IconButton(UI.Id("go"), new R(_searchBox.Right - 40, 10, 34, 32), Th.Search, 14, Th.Sub)) App.Post(() => Submit(_search.Text));
 
-        var logged = CookieStore.IsLoggedIn;
         float accLeft;
         if (logged)
         {
             var ar = new R(rightEdge - 40, 8, 36, 36);
             accLeft = ar.X;
             _topHits.Add(ar);
+            var tfAcc = MusicBounce.Push(ar, 22, amp: 0.78f);
             var aid = UI.Id("acc");
             var ring = UI.Anim(aid ^ 0x1313, UI.Hover(ar) || AccountMenu.Open ? 1 : 0, 22);
             if (ring > 0.01f) Gfx.Circle(ar.X + 18, ar.Y + 18, 18, Th.A(0.18f * ring));
             var acc = AccountMenu.Current;
             Cards.Avatar(ar.X + 3, ar.Y + 3, 30, acc?.Photo, acc?.Name is { Length: > 0 } nm ? nm : "?");
             if (UI.Click(aid, ar)) AccountMenu.Toggle(rightEdge, TopH - 2);
+            MusicBounce.Pop(tfAcc);
         }
         else
         {
-            var signInText = L.T("Войти", "Sign in");
             var accW = UI.PillWidth(Th.Account, signInText);
             accLeft = rightEdge - accW;
-            _topHits.Add(new R(accLeft, 9, accW, 34));
+            var accR = new R(accLeft, 9, accW, 34);
+            _topHits.Add(accR);
+            var tfAcc = MusicBounce.Push(accR, 22, amp: 0.75f);
             if (UI.Pill(UI.Id("acc"), accLeft, 9, 34, Th.Account, signInText, out _, Th.A(0.10f))) LoginModal.Show();
+            MusicBounce.Pop(tfAcc);
         }
 
         var fxBtnLbl = AppSettings.Current.AudioFxEnabled ? AudioDsp.DisplayPresetName(AppSettings.Current) : "EQ";
@@ -1787,13 +1857,16 @@ public static class Shell
         var fxBtnX = accLeft - fxBtnW - 8;
         if (fxBtnX > _searchBox.Right + 10)
         {
-            _topHits.Add(new R(fxBtnX, 9, fxBtnW, 34));
+            var fxR = new R(fxBtnX, 9, fxBtnW, 34);
+            _topHits.Add(fxR);
+            var tfFx = MusicBounce.Push(fxR, 16, amp: 1.1f);
             if (UI.Pill(UI.Id("top:eq"), fxBtnX, 9, 34, Th.Headphones, fxBtnLbl, out _,
                 AppSettings.Current.AudioFxEnabled ? Th.Brand : Th.A(0.08f),
                 AppSettings.Current.AudioFxEnabled ? Th.OnBrand : Th.Text))
             {
                 AudioStudioPanel.Toggle();
             }
+            MusicBounce.Pop(tfFx);
             accLeft = fxBtnX;
         }
 
@@ -1804,9 +1877,12 @@ public static class Shell
             var upX = accLeft - upW - 10;
             if (upX > _searchBox.Right + 10)
             {
-                _topHits.Add(new R(upX, 9, upW, 34));
+                var upR = new R(upX, 9, upW, 34);
+                _topHits.Add(upR);
+                var tfUp = MusicBounce.Push(upR, 19, amp: 0.95f);
                 if (UI.Pill(UI.Id("top:upd"), upX, 9, 34, Th.Download, upLabel, out _, accent: true) && !Updater.Downloading)
                     App.Post(Updater.DownloadAndInstall);
+                MusicBounce.Pop(tfUp);
             }
         }
 
@@ -1819,33 +1895,40 @@ public static class Shell
             float sx = sideW - SideW;
             Gfx.FillFrosted(new R(sx, TopH, SideW, h - TopH), Th.Panel, 0, opacity: 0.88f);
             Gfx.Fill(new R(sx + SideW - 1, TopH, 1, h - TopH), Gfx.Fade(Th.Line, 0.7f));
+            float availSideH = MathF.Max(200, h - TopH - barH - 12);
+            float sideStep = Math.Clamp((availSideH - 26) / 9f, 40f, 52f);
+            float itemH = MathF.Min(48f, sideStep - 3f);
+            float divGap = sideStep < 46f ? 3f : 6f;
             float y = TopH + 4;
             var tag = _cur?.Tag ?? "";
-            SideItem(sx, ref y, Th.Home, L.T("Главная", "Home"), "home", tag);
-            SideItem(sx, ref y, Th.Subs, L.T("Подписки", "Subs"), "subs", tag);
-            SideItem(sx, ref y, Th.Later, L.T("Позже", "Later"), "wl", tag);
-            SideItem(sx, ref y, Th.Like, L.T("Лайки", "Liked"), "liked", tag);
-            y += 6; Gfx.Fill(new R(sx + 18, y, SideW - 36, 1), Th.Line); y += 7;
-            SideItem(sx, ref y, Th.History, L.T("История", "History"), "history", tag);
-            SideItem(sx, ref y, Th.Eye, L.T("Видел", "Seen"), "seen", tag);
-            SideItem(sx, ref y, Th.Download, L.T("Загрузки", "Saved"), "downloads", tag, Downloader.Instance.Items.Any(i => i.IsActive));
-            y += 6; Gfx.Fill(new R(sx + 18, y, SideW - 36, 1), Th.Line); y += 7;
-            SideItem(sx, ref y, "\uE714", "Shorts", "shorts", tag);
-            var sy = h - 56 - barH;
-            if (sy > y) SideItem(sx, ref sy, Th.Settings, L.T("Настройки", "Settings"), "settings", tag);
+            SideItem(sx, ref y, Th.Home, L.T("Главная", "Home"), "home", tag, idx: 0, itemH: itemH, step: sideStep);
+            SideItem(sx, ref y, Th.Subs, L.T("Подписки", "Subs"), "subs", tag, idx: 1, itemH: itemH, step: sideStep);
+            SideItem(sx, ref y, Th.Later, L.T("Позже", "Later"), "wl", tag, idx: 2, itemH: itemH, step: sideStep);
+            SideItem(sx, ref y, Th.Like, L.T("Лайки", "Liked"), "liked", tag, idx: 3, itemH: itemH, step: sideStep);
+            y += divGap; Gfx.Fill(new R(sx + 18, y, SideW - 36, 1), Th.Line); y += divGap + 1;
+            SideItem(sx, ref y, Th.History, L.T("История", "History"), "history", tag, idx: 4, itemH: itemH, step: sideStep);
+            SideItem(sx, ref y, Th.Eye, L.T("Видел", "Seen"), "seen", tag, idx: 5, itemH: itemH, step: sideStep);
+            SideItem(sx, ref y, Th.Download, L.T("Загрузки", "Saved"), "downloads", tag, Downloader.Instance.Items.Any(i => i.IsActive), idx: 6, itemH: itemH, step: sideStep);
+            y += divGap; Gfx.Fill(new R(sx + 18, y, SideW - 36, 1), Th.Line); y += divGap + 1;
+            SideItem(sx, ref y, "\uE714", "Shorts", "shorts", tag, idx: 7, itemH: itemH, step: sideStep);
+            var sy = MathF.Max(y + 2, h - itemH - 8 - barH);
+            SideItem(sx, ref sy, Th.Settings, L.T("Настройки", "Settings"), "settings", tag, idx: 8, itemH: itemH, step: sideStep);
             var markA = UI.Anim(UI.Id("sidemark:a"), _markY >= 0 ? 1 : 0, 18);
             if (_markY >= 0) _markShown = UI.Smooth(UI.Id("sidemark:y"), _markY, 20);
             if (markA > 0.01f)
             {
                 var markR = new R(sx + 2, _markShown, 3, 22);
+                var tfMark = _markIdx >= 0 ? MusicBounce.Push(markR, (_markIdx * 3 + 1) % 28, amp: 1.0f, rotAmp: 0.35f) : Gfx.DC.Transform;
                 Gfx.Fill(markR, Gfx.Fade(Th.Brand, markA), Gfx.Corner(1.5f));
                 if (AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(markR, Gfx.Corner(1.5f), Th.Brand, 0.45f * markA);
+                MusicBounce.Pop(tfMark);
             }
             _markY = -1;
+            _markIdx = -1;
             Gfx.PopClip();
             Gfx.PopMotionBlur(sideMb);
         }
-        else _markY = -1;
+        else { _markY = -1; _markIdx = -1; }
 
         if (barA > 0.01f)
         {
@@ -1853,7 +1936,6 @@ public static class Shell
             if (bar) NowPlaying(cur!, sideW, w, h + slideDown);
             else Gfx.Fill(new R(sideW, h - barH, w - sideW, barH), Th.Panel);
         }
-        if (bassShakeActive) Gfx.DC.Transform = prevTf;
         DrawToast(w, h - barH);
         DrawDropOverlay(w, h);
         var eff = AppSettings.Current.SeasonalEffect;
@@ -1954,29 +2036,32 @@ public static class Shell
         return arr;
     }
 
-    /// <summary>Full-width draped festive fairy-light garland spanning 0..w with hanging glowing bulbs + dark cord.</summary>
+    /// <summary>Full-width draped festive fairy-light garland stopping cleanly before window controls with smooth anti-aliased wire.</summary>
     private static void DrawFullWidthGarland(float w, float t, uint[] palette, float twinkleSpeed)
     {
-        const float span = 112f; // width of one draped cord swag
-        const float step = 28f;  // spacing between glowing hanging bulbs
-        // Subtle draped dark wire curves across the entire window width
-        int wireSegs = Math.Max(4, (int)MathF.Ceiling(w / 10f));
-        for (int i = 0; i < wireSegs; i++)
+        const float span = 112f;
+        const float step = 28f;
+        // Stop cleanly before the right-hand window caption buttons (min / max / close) so bulbs never clash with them!
+        float maxW = MathF.Max(120f, w - 152f);
+        float prevX = 0f, prevY = 1.5f;
+        for (float x = 8f; x <= maxW; x += 8f)
         {
-            float x0 = i * 10f;
-            float u = (x0 % span) / span;
-            float sag = MathF.Sin(u * MathF.PI) * 5.2f;
-            Gfx.Fill(new R(x0, 1.5f + sag, 10.5f, 1.15f), Gfx.Fade(Th.Ink, 0.16f));
+            float u = (x % span) / span;
+            float sag = MathF.Sin(u * MathF.PI) * 5.0f;
+            float ny = 1.5f + sag;
+            float fade = x > maxW - 44f ? Math.Clamp((maxW - x) / 44f, 0f, 1f) : 1f;
+            Gfx.Line(prevX, prevY, x, ny, Gfx.Fade(Th.Ink, 0.20f * fade), 1.15f);
+            prevX = x; prevY = ny;
         }
 
-        // Hanging twinkling bulbs all the way from x=12 to w-8 (full width!)
         int idx = 0;
-        for (float gx = 12f; gx < w - 6f; gx += step, idx++)
+        for (float gx = 14f; gx < maxW - 10f; gx += step, idx++)
         {
             float u = (gx % span) / span;
-            float sag = MathF.Sin(u * MathF.PI) * 5.2f;
+            float sag = MathF.Sin(u * MathF.PI) * 5.0f;
             float cy = 4.2f + sag;
-            float wave = 0.5f + 0.5f * MathF.Sin(t * twinkleSpeed + idx * 1.15f);
+            float fade = gx > maxW - 44f ? Math.Clamp((maxW - gx) / 44f, 0f, 1f) : 1f;
+            float wave = (0.5f + 0.5f * MathF.Sin(t * twinkleSpeed + idx * 1.15f)) * fade;
             float tw = 0.42f + 0.58f * wave;
             var col = palette[idx % palette.Length];
 
@@ -2077,23 +2162,27 @@ public static class Shell
         UI.Animate();
     }
 
-    private static void SideItem(float sx, ref float y, string glyph, string label, string tag, string current, bool dot = false)
+    private static void SideItem(float sx, ref float y, string glyph, string label, string tag, string current, bool dot = false, int idx = 0, float itemH = 48f, float step = 52f)
     {
-        var r = new R(sx + 10, y, SideW - 18, 48);
+        var r = new R(sx + 10, y, SideW - 18, itemH);
         var sel = tag == current;
         var id = UI.Id(tag, 77);
         var selA = UI.Anim(id ^ 0x77, sel ? 1 : 0, 18);
+        var tf = MusicBounce.Push(r, (idx * 3 + 1) % 28, amp: 0.72f, rotAmp: 0.7f);
         float cr = Gfx.Corner(10);
         if (selA > 0.01f) Gfx.Fill(r, Th.A(0.095f * selA), cr);
         if (!sel) UI.Glow(id, r, cr, UI.Hover(r));
-        if (sel) _markY = y + 13;
-        Gfx.Icon(glyph, new R(r.X, y + 5, r.W, 22), 18, sel ? Th.Text : Th.Icon);
-        var run = Gfx.Text(label, 10f, sel ? 600 : 400, r.W - 8);
-        Gfx.Draw(run, Gfx.Snap(r.X + (r.W - run.W) / 2), y + 29, sel ? Th.Text : Th.Sub);
+        if (sel) { _markY = y + (itemH - 22f) * 0.5f; _markIdx = idx; }
+        float iconY = y + (itemH < 44f ? 3f : 5f);
+        float lblY = y + (itemH < 44f ? 23f : 29f);
+        Gfx.Icon(glyph, new R(r.X, iconY, r.W, 20), itemH < 44f ? 16 : 18, sel ? Th.Text : Th.Icon);
+        var run = Gfx.Text(label, itemH < 44f ? 9.5f : 10f, sel ? 600 : 400, r.W - 8);
+        Gfx.Draw(run, Gfx.Snap(r.X + (r.W - run.W) / 2), lblY, sel ? Th.Text : Th.Sub);
         if (dot) Gfx.Circle(r.X + r.W / 2 + 12, y + 9, 3.5f, Th.Brand);
+        MusicBounce.Pop(tf);
         if (UI.MiddleClick(r)) App.Post(() => OpenInNewTab("root", tag, ""));
         else if (UI.Click(id, r)) App.Post(() => OpenRoot(tag));
-        y += 52;
+        y += step;
     }
 
     private static void NowPlaying(VideoItem cur, float sideW, float w, float h)
@@ -2117,7 +2206,9 @@ public static class Shell
         }
 
         var thumb = new R(r.X + 14, r.Y + 9, 78, 44);
+        var tfTh = MusicBounce.Push(thumb, 1, amp: 1.25f);
         Cards.Thumb(thumb, cur, false, 7, badge: false, behind: Th.Panel);
+        MusicBounce.Pop(tfTh);
         if (UI.Click(UI.Id("np:thumb"), thumb)) App.Post(OpenCurrentVideo);
 
         // Right controls: optional inline volume slider + EQ button + transport buttons
@@ -2142,7 +2233,8 @@ public static class Shell
         var shownPos = _npDragSeek ? _npDragSeekTarget : P.TimePos;
         var time = $"{Fmt.Time(shownPos)} / {Fmt.Time(d)}";
         var timeRun = Gfx.Text(time, 12);
-        var ch = Gfx.Draw(cur.Channel, tx, r.Y + 31, 12, Th.Sub, 400, MathF.Min(210, MathF.Max(40, tw / 3)));
+        var chMaxW = MathF.Max(30, MathF.Min(210, tw - timeRun.W - 16));
+        var ch = Gfx.Draw(cur.Channel, tx, r.Y + 31, 12, Th.Sub, 400, chMaxW);
         var px = tx + ch.W + 12;
         var pw = tx + tw - timeRun.W - 12 - px;
         if (pw > 40)
@@ -2174,12 +2266,12 @@ public static class Shell
                 float kx = px + (float)(pw * frac);
                 Gfx.Circle(kx, r.Y + 39, 6.5f, Th.Brand);
                 Gfx.Circle(kx, r.Y + 39, 2.5f, 0xFFFFFFFF);
-                // Floating hover/drag timestamp tooltip above the slider
+                // Floating hover/drag timestamp tooltip cleanly above the mini-player bar
                 double hoverT = _npDragSeek ? _npDragSeekTarget : d * Math.Clamp((UI.MX - px) / pw, 0, 1);
                 var tipRun = Gfx.Text(Fmt.Time(hoverT), 11.5f, 600);
                 float tipW = tipRun.W + 14, tipH = tipRun.H + 6;
                 float tipX = Math.Clamp((_npDragSeek ? kx : UI.MX) - tipW / 2, px, px + pw - tipW);
-                var tipR = new R(Gfx.Snap(tipX), r.Y + 12 - tipH, tipW, tipH);
+                var tipR = new R(Gfx.Snap(tipX), r.Y - tipH - 6, tipW, tipH);
                 Gfx.Fill(tipR, Th.Menu, 5);
                 Gfx.Stroke(tipR, Th.Line, 5);
                 Gfx.Draw(tipRun, tipR.X + 7, tipR.Y + 3, Th.Text);
@@ -2204,23 +2296,38 @@ public static class Shell
             if (_npDragVol && UI.Now - _npLastVolAt >= 40)
             {
                 _npLastVolAt = UI.Now;
-                int nv = (int)MathF.Round(Math.Clamp((UI.MX - vtx) / vtw, 0, 1) * 100);
+                int nv = (int)MathF.Round(Math.Clamp((UI.MX - vtx) / vtw, 0, 1) * 150);
                 AppSettings.Current.Volume = nv;
+                var ownerTab = _mainTabKey != null ? _tabs.FirstOrDefault(t => t.Key == _mainTabKey) : null;
+                if (ownerTab != null) ownerTab.CustomVolume = -1;
                 _volSaveDueAt = UI.Now + 450;
+                _suppressVolSfxUntil = UI.Now + 260;
                 P.SetVolumeSmooth(nv, 0);
                 PlayVolumeSfx(nv);
             }
             if (vHot) UI.Hand();
-            UI.Progress(new R(vtx, by + 16, vtw, vHot ? 5 : 4), Math.Clamp(vol / 100.0, 0, 1), Th.A(0.22f), muted ? Th.Dim : Th.Brand);
-            Gfx.Circle(vtx + vtw * Math.Clamp(vol / 100f, 0, 1), by + 18, vHot ? 5.5f : 4f, muted ? Th.Sub : Th.Text);
+            UI.Progress(new R(vtx, by + 16, vtw, vHot ? 5 : 4), Math.Clamp(vol / 150.0, 0, 1), Th.A(0.22f), muted ? Th.Dim : Th.Brand);
+            Gfx.Circle(vtx + vtw * Math.Clamp(vol / 150f, 0, 1), by + 18, vHot ? 5.5f : 4f, muted ? Th.Sub : Th.Text);
         }
 
-        if (UI.IconButton(UI.Id("np:eq"), new R(bx, by, 36, 36), Th.Headphones, 15, AppSettings.Current.AudioFxEnabled ? Th.Brand : Th.Text)) AudioStudioPanel.Toggle();
-        if (UI.IconButton(UI.Id("np:b"), new R(bx + 40, by, 36, 36), Th.Rewind)) P.Command("seek", "-10");
-        if (UI.IconButton(UI.Id("np:p"), new R(bx + 80, by, 36, 36), P.Paused ? Th.Play : Th.Pause)) P.TogglePause();
-        if (UI.IconButton(UI.Id("np:f"), new R(bx + 120, by, 36, 36), Th.Forward)) P.Command("seek", "10");
-        if (UI.IconButton(UI.Id("np:o"), new R(bx + 160, by, 36, 36), Th.Expand)) App.Post(OpenCurrentVideo);
-        if (UI.IconButton(UI.Id("np:x"), new R(bx + 200, by, 36, 36), Th.Close)) App.Post(() => { if (Pip.Active) Pip.Exit(); T.Stop(); _mainTabKey = null; VideoReady = false; });
+        var rEq = new R(bx, by, 36, 36); var tf1 = MusicBounce.Push(rEq, 4, amp: 0.95f);
+        if (UI.IconButton(UI.Id("np:eq"), rEq, Th.Headphones, 15, AppSettings.Current.AudioFxEnabled ? Th.Brand : Th.Text)) AudioStudioPanel.Toggle();
+        MusicBounce.Pop(tf1);
+        var rRew = new R(bx + 40, by, 36, 36); var tf2 = MusicBounce.Push(rRew, 9, amp: 0.95f);
+        if (UI.IconButton(UI.Id("np:b"), rRew, Th.Rewind)) P.Command("seek", "-10");
+        MusicBounce.Pop(tf2);
+        var rPlay = new R(bx + 80, by, 36, 36); var tf3 = MusicBounce.Push(rPlay, 2, amp: 1.15f);
+        if (UI.IconButton(UI.Id("np:p"), rPlay, P.Paused ? Th.Play : Th.Pause)) P.TogglePause();
+        MusicBounce.Pop(tf3);
+        var rFwd = new R(bx + 120, by, 36, 36); var tf4 = MusicBounce.Push(rFwd, 14, amp: 0.95f);
+        if (UI.IconButton(UI.Id("np:f"), rFwd, Th.Forward)) P.Command("seek", "10");
+        MusicBounce.Pop(tf4);
+        var rExp = new R(bx + 160, by, 36, 36); var tf5 = MusicBounce.Push(rExp, 19, amp: 0.95f);
+        if (UI.IconButton(UI.Id("np:o"), rExp, Th.Expand)) App.Post(OpenCurrentVideo);
+        MusicBounce.Pop(tf5);
+        var rCls = new R(bx + 200, by, 36, 36); var tf6 = MusicBounce.Push(rCls, 24, amp: 0.95f);
+        if (UI.IconButton(UI.Id("np:x"), rCls, Th.Close)) App.Post(() => { if (Pip.Active) Pip.Exit(); T.Stop(); _mainTabKey = null; VideoReady = false; });
+        MusicBounce.Pop(tf6);
     }
 
     private static void DrawToast(float w, float bottom)
@@ -2283,7 +2390,7 @@ public static class Shell
 
     public static void OpenCurrentVideo()
     {
-        if (T.Current is not { } cur) return;
+        if (T.Current is not { } cur || string.IsNullOrEmpty(cur.VideoId)) return;
         if (_cur is WatchPage wp && wp.Video.VideoId == cur.VideoId) return;
         // Only switch to another tab if that tab STILL holds this video (never stall when current tab navigated to Settings/Home!)
         int ownerIdx = _mainTabKey != null ? _tabs.FindIndex(t => t.Key == _mainTabKey && t.Kind == "video" && t.Arg == cur.VideoId) : -1;
@@ -2539,13 +2646,19 @@ public static class Shell
         }
         var playing = T.Current != null && P.HasMedia;
         var onWatch = _cur is WatchPage or ShortsPage;
+        if (playing && onWatch && _cur is WatchPage wpKey)
+        {
+            if (vk == 'T') { wpKey.ToggleTheater(); return true; }
+            if (vk == 'C') { wpKey.TracksMenu(); return true; }
+        }
         if (playing && (onWatch || vk == W.VK_SPACE || vk == 'K' || vk == 'M'))
         {
+            // Explicit safe allowlist: NEVER forward 'Q' (Russian 'Й') or unmapped letters to libmpv where 'q' = quit!
             var key = vk switch
             {
                 W.VK_SPACE => "SPACE", W.VK_LEFT => "LEFT", W.VK_RIGHT => "RIGHT", W.VK_UP => "UP", W.VK_DOWN => "DOWN",
                 W.VK_HOME => "HOME", W.VK_BACK => "BS", W.VK_OEM_COMMA => ",", W.VK_OEM_PERIOD => ".", W.VK_OEM_4 => "[", W.VK_OEM_6 => "]",
-                >= 'A' and <= 'Z' => ((char)(vk + 32)).ToString(),
+                'K' => "k", 'M' => "m", 'J' => "j", 'L' => "l", 'F' => "f", 'S' => "s",
                 >= '0' and <= '9' => ((char)vk).ToString(),
                 _ => null,
             };
@@ -2574,6 +2687,12 @@ public static class Shell
     {
         if (fs == _fullscreen) return;
         if (fs && Pip.Active) Pip.Exit();
+        if (fs && AppSettings.Current.AudioOnlyMode)
+        {
+            AppSettings.Current.AudioOnlyMode = false;
+            AppSettings.Current.Save();
+            P.SetVideoEnabled(true);
+        }
         AccountMenu.Close();
         var cur = T.Current;
         if (fs && cur != null && _cur is not ShortsPage && !(_cur is WatchPage wp && wp.Video.VideoId == cur.VideoId))

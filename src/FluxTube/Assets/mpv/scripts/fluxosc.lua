@@ -14,6 +14,7 @@ local S = {
     bezel = nil, vol_until = 0, fade = 0, last_seek = 0, drag_pct = 0, ready = false,
     hold_at = nil, hold_2x = false, ext_2x = nil, saved_speed = 1,
     thumb_file = nil, thumb_w = 0, thumb_h = 0, thumb_want = -99, thumb_on = false,
+    sc_on = true, is_short = false, lang = "ru", sc_comments = {}, pending_sc_comments = nil, cm_ovs = {}, cm_auto_idx = nil, cm_auto_until = 0,
 }
 local W, H, sc = 1280, 720, 1
 local L = {} -- layout of the current frame
@@ -26,7 +27,7 @@ local function glyph(cp) -- UTF-8 for a BMP code point
 end
 local G = { play = glyph(0xE768), pause = glyph(0xE769), next = glyph(0xE893), vol = glyph(0xE767), vol0 = glyph(0xE74F),
             fs = glyph(0xE740), unfs = glyph(0xE73F), theater = glyph(0xE9A6), back = glyph(0xED3C), fwd = glyph(0xED3D),
-            cc = glyph(0xE7F0), loop = glyph(0xE8EE), pip = glyph(0xE8A7), lock = glyph(0xE72E), unlock = glyph(0xE785), toapp = glyph(0xE73F), close = glyph(0xE711) }
+            cc = glyph(0xE7F0), loop = glyph(0xE8EE), pip = glyph(0xE8A7), lock = glyph(0xE72E), unlock = glyph(0xE785), toapp = glyph(0xE73F), close = glyph(0xE711), sc = glyph(0xE8BD) }
 
 local function fmt_time(t)
     if not t or t < 0 then t = 0 end
@@ -46,7 +47,24 @@ local function thumb_hide()
     end
 end
 
-local function esc(s) return (s:gsub("\\", "\\\\"):gsub("{", "\\{"):gsub("\n", " ")) end
+local function comments_hide()
+    for slot, _ in pairs(S.cm_ovs) do
+        mp.commandv("overlay-remove", slot)
+    end
+    S.cm_ovs = {}
+end
+
+local function show_comment_dots()
+    return S.sc_on and not S.pip and not S.short_overlay and not S.is_short and S.dur > 5 and S.sc_comments and #S.sc_comments > 0
+end
+
+local function comment_pos(m)
+    local pw = L.px1 - L.px0
+    local frac = clamp((m.t or 0) / S.dur, 0.025, 0.975)
+    return L.px0 + pw * frac, L.py - 23 * sc
+end
+
+local function esc(s) return (s:gsub("\\", "\\\226\128\139"):gsub("{", "\\{"):gsub("[\r\n\t]+", " ")) end
 
 -- ---------------------------------------------------------------- drawing helpers
 local A -- current assdraw
@@ -100,9 +118,11 @@ local function layout()
     L.time_x = x + 4 * sc
     local rx = W - m
     local function right(id, w) rx = rx - w; L.hits[#L.hits + 1] = { id = id, x0 = rx, x1 = rx + w }; return rx + w / 2 end
+    local min_rx = L.time_x + text_w("0:00:00 / 0:00:00", L.fs_txt) + 14 * sc
+    local function can_fit(w) return rx - w >= min_rx end
     if not S.pip then L.fs = right("fs", L.btn) end
-    if not S.fs and not S.pip then L.pipb = right("pip", L.btn) end
-    if not compact and not S.fs and not S.pip then L.theater = right("theater", L.btn) end
+    if not S.fs and not S.pip and can_fit(L.btn) then L.pipb = right("pip", L.btn) end
+    if not compact and not S.fs and not S.pip and not S.is_short and can_fit(L.btn) then L.theater = right("theater", L.btn) end
     -- the separate window: lock, back into the app, close, in its top-right corner
     if S.pip then
         L.top = {}
@@ -114,10 +134,17 @@ local function layout()
         L.ty = 24 * sc
     end
     if not compact then
-        L.cc = right("subs", L.btn)
-        if not S.pip then L.loop = right("loop", L.btn) end
-        if S.quality ~= "" then local w = text_w(S.quality, L.fs_txt) + 22 * sc; L.q = right("quality", w); L.qw = w end
-        local w = text_w(S.speed, L.fs_txt) + 22 * sc; L.sp = right("speed", w); L.spw = w
+        if not S.is_short and can_fit(L.btn) then L.cc = right("subs", L.btn) end
+        if not S.pip and can_fit(L.btn) then L.loop = right("loop", L.btn) end
+        if not S.pip and not S.short_overlay and not S.is_short and can_fit(L.btn) then L.sc = right("sc", L.btn) end
+        if not S.is_short and S.quality ~= "" then
+            local w = text_w(S.quality, L.fs_txt) + 22 * sc
+            if can_fit(w) then L.q = right("quality", w); L.qw = w end
+        end
+        if not S.is_short then
+            local w = text_w(S.speed, L.fs_txt) + 22 * sc
+            if can_fit(w) then L.sp = right("speed", w); L.spw = w end
+        end
     end
     L.right_edge = rx
 end
@@ -144,7 +171,16 @@ local function hit()
     if L.top and y <= L.ty + 18 * sc then
         for _, h in ipairs(L.top) do if x >= h.x0 and x < h.x1 then return h.id end end
     end
-    if y >= L.py - 11 * sc and y <= L.py + 9 * sc and x >= L.px0 - 6 * sc and x <= L.px1 + 6 * sc then return "seek" end
+    if show_comment_dots() and S.fade >= 0.3 and not (S.drag == "seek") then
+        local lim = math.min(22, #S.sc_comments)
+        local r2 = (11.5 * sc) * (11.5 * sc)
+        for i = lim, 1, -1 do
+            local mx, cy = comment_pos(S.sc_comments[i])
+            local dx, dy = x - mx, y - cy
+            if dx * dx + dy * dy <= r2 then return "cm:" .. i end
+        end
+    end
+    if y >= L.py - 10 * sc and y <= L.py + 9 * sc and x >= L.px0 - 6 * sc and x <= L.px1 + 6 * sc then return "seek" end
     if y > L.py + 9 * sc and y <= H then
         for _, h in ipairs(L.hits) do if x >= h.x0 and x < h.x1 then return h.id end end
         return "bar"
@@ -173,12 +209,37 @@ local function text_btn(cx, w, str, hot)
     text(cx, L.by, 5, L.fs_txt, esc(str), 1, nil, true)
 end
 
+local function wrap_utf8(str, maxc)
+    maxc = math.max(12, math.floor(maxc))
+    local out, cur, cur_n = {}, "", 0
+    for word in str:gmatch("%S+") do
+        local wl = utf8_len(word)
+        if cur_n == 0 then
+            if wl > maxc then cur = utf8_sub(word, maxc - 1) .. "…"; cur_n = maxc
+            else cur = word; cur_n = wl end
+        elseif cur_n + 1 + wl <= maxc then
+            cur = cur .. " " .. word; cur_n = cur_n + 1 + wl
+        else
+            out[#out + 1] = cur
+            if #out >= 2 then
+                out[2] = utf8_sub(out[2], math.max(1, maxc - 1)) .. "…"
+                return out
+            end
+            if wl > maxc then cur = utf8_sub(word, maxc - 1) .. "…"; cur_n = maxc
+            else cur = word; cur_n = wl end
+        end
+    end
+    if cur_n > 0 and #out < 2 then out[#out + 1] = cur end
+    return out
+end
+
 local function render()
     layout()
-    if S.fade <= 0.01 then thumb_hide() end
+    if S.fade <= 0.01 then thumb_hide(); comments_hide() end
     A = assdraw.ass_new()
     local t = now()
     local h = hit()
+    local hov_cm = (type(h) == "string" and h:sub(1, 3) == "cm:") and tonumber(h:sub(4)) or nil
 
     if S.fade > 0.01 then
         -- gradient under the controls
@@ -241,7 +302,90 @@ local function render()
             end
         end
         if hot then circle(L.px0 + pw * pct, L.py, 7.0 * sc, opts.brand, 1) end
-        if hot and S.dur > 0 and S.mx >= 0 then
+
+        -- SoundCloud-style timed comment avatar circles directly above the video seekbar (hidden cleanly while actively scrubbing!)
+        if show_comment_dots() and not hot then
+            local lim = math.min(22, #S.sc_comments)
+            local used_slots = {}
+            local last_mx = -1e9
+            for i = 1, lim do
+                local m = S.sc_comments[i]
+                local mx, cy = comment_pos(m)
+                local is_hov = (hov_cm == i)
+                if not is_hov and (mx - last_mx) < 22 * sc then
+                    local slot0 = 9 + i
+                    if S.cm_ovs[slot0] then mp.commandv("overlay-remove", slot0); S.cm_ovs[slot0] = nil end
+                else
+                    last_mx = mx
+                    -- Crisp pin connecting the avatar down to its exact timestamp on the seekbar
+                    rect(mx - 0.8 * sc, cy + 11 * sc, mx + 0.8 * sc, L.py - 3 * sc, is_hov and opts.brand or "FFFFFF", is_hov and 0.96 or 0.44)
+                    local slot = 9 + i
+                    if m.f and m.w and m.h then
+                        if S.fade >= 0.45 then
+                            local ox = math.floor(mx - m.w / 2 + 0.5)
+                            local oy = math.floor(cy - m.h / 2 + 0.5)
+                            local prev = S.cm_ovs[slot]
+                            if not prev or prev.f ~= m.f or prev.x ~= ox or prev.y ~= oy or prev.w ~= m.w or prev.h ~= m.h then
+                                mp.commandv("overlay-add", slot, ox, oy, m.f, 0, "bgra", m.w, m.h, m.w * 4)
+                                S.cm_ovs[slot] = { f = m.f, x = ox, y = oy, w = m.w, h = m.h }
+                            end
+                            used_slots[slot] = true
+                        end
+                        if is_hov then
+                            rect(mx - 11 * sc, cy + 12.5 * sc, mx + 11 * sc, cy + 15.2 * sc, opts.brand, 1, 1.3 * sc)
+                        end
+                    else
+                        if S.cm_ovs[slot] then mp.commandv("overlay-remove", slot); S.cm_ovs[slot] = nil end
+                        local r = (is_hov and 11.5 or 9.5) * sc
+                        circle(mx, cy, r + 1.4 * sc, is_hov and opts.brand or "FFFFFF", is_hov and 1.0 or 0.85)
+                        circle(mx, cy, r, m.c or "B67EFF", 0.96)
+                        text(mx, cy, 5, (is_hov and 11.5 or 10) * sc, esc(m.i or "?"), 1, nil, true)
+                    end
+                    if not hov_cm and m.ts and not S.paused and math.abs(S.time - (m.t or -99)) < 1.6 then
+                        if S.cm_auto_idx ~= i then S.cm_auto_idx = i; S.cm_auto_until = t + 3.2 end
+                    end
+                end
+            end
+            for slot, _ in pairs(S.cm_ovs) do
+                if not used_slots[slot] then mp.commandv("overlay-remove", slot); S.cm_ovs[slot] = nil end
+            end
+
+            local show_idx = hov_cm
+            if not show_idx and S.cm_auto_idx and t < S.cm_auto_until and S.sc_comments[S.cm_auto_idx] then
+                show_idx = S.cm_auto_idx
+            end
+            if show_idx and S.sc_comments[show_idx] and W >= 200 * sc then
+                local m = S.sc_comments[show_idx]
+                local mx, cy = comment_pos(m)
+                local max_card_w = math.min(W - 24 * sc, 390 * sc)
+                local maxc = math.max(16, math.floor((max_card_w - 28 * sc) / (13 * sc * 0.60)))
+                local author = m.a or ""
+                if utf8_len(author) > 26 then author = utf8_sub(author, 25) .. "…" end
+                local hdr = author .. "  ·  " .. fmt_time(m.t or 0)
+                local lines = wrap_utf8(m.x or "", maxc)
+                local maxw = text_w(hdr, 12.5 * sc)
+                for _, ln in ipairs(lines) do maxw = math.max(maxw, text_w(ln, 13 * sc) * 1.12) end
+                local cw = clamp(maxw + 28 * sc, math.min(150 * sc, max_card_w), max_card_w)
+                local ch = (26 + #lines * 17.5 + 10) * sc
+                local cx0 = clamp(mx - cw / 2, L.px0, math.max(L.px0, L.px1 - cw))
+                local cy1 = cy - 16 * sc
+                local cy0 = math.max(8 * sc, cy1 - ch)
+                cy1 = cy0 + ch
+                rect(cx0 - 1.5 * sc, cy0 - 1.5 * sc, cx0 + cw + 1.5 * sc, cy1 + 1.5 * sc, opts.brand, 0.45, 9.5 * sc)
+                rect(cx0, cy0, cx0 + cw, cy1, "101016", 0.94, 8 * sc)
+                rect(cx0 + 5 * sc, cy0 + 8 * sc, cx0 + 8 * sc, cy1 - 8 * sc, opts.brand, 1, 1.5 * sc)
+                A:new_event()
+                A:append(string.format("{\\an7\\pos(%.1f,%.1f)\\fs%.1f\\fn%s\\b1\\bord0\\shad0\\1c&H%s&\\1a&H%02X&}%s",
+                    cx0 + 14 * sc, cy0 + 7 * sc, 12 * sc, opts.font, opts.brand, alpha(1), esc(hdr)))
+                for li, ln in ipairs(lines) do
+                    text(cx0 + 14 * sc, cy0 + (24 + (li - 1) * 17.5) * sc, 7, 13 * sc, esc(ln), 0.96)
+                end
+            end
+        else
+            comments_hide()
+        end
+
+        if hot and not hov_cm and S.dur > 0 and S.mx >= 0 then
             local hp = clamp((S.mx - L.px0) / pw, 0, 1)
             local ht = hp * S.dur
             if math.abs(ht - S.thumb_want) > 0.25 then
@@ -308,6 +452,10 @@ local function render()
         end
         if L.sp then text_btn(L.sp, L.spw, S.speed, h == "speed") end
         if L.q then text_btn(L.q, L.qw, S.quality, h == "quality") end
+        if L.sc then
+            icon_btn(L.sc, G.sc, h == "sc")
+            if S.sc_on then rect(L.sc - 9 * sc, L.by + 13 * sc, L.sc + 9 * sc, L.by + 15 * sc, opts.brand, 1, 1 * sc) end
+        end
         if L.theater then icon_btn(L.theater, G.theater, h == "theater") end
         if L.pipb then icon_btn(L.pipb, G.pip, h == "pip") end
         if L.loop then
@@ -348,15 +496,16 @@ local function render()
         end
     end
     if t < S.vol_until then
-        local label = S.mute and "Звук выключен" or string.format("Громкость %d%%", math.floor(S.vol + 0.5))
+        local en = S.lang == "en"
+        local label = S.mute and (en and "Muted" or "Звук выключен") or string.format(en and "Volume %d%%" or "Громкость %d%%", math.floor(S.vol + 0.5))
         local tw = text_w(label, 15 * sc) + 34 * sc
         local op = clamp((S.vol_until - t) / 0.25, 0, 1)
-        rect(W / 2 - tw / 2, 26 * sc, W / 2 + tw / 2, 62 * sc, "101010", 0.72 * op, 18 * sc)
-        text(W / 2, 44 * sc, 5, 15 * sc, label, op, nil, true)
-        -- level under the label
+        local vy = (S.hold_2x or S.ext_2x) and 64 * sc or 26 * sc
+        rect(W / 2 - tw / 2, vy, W / 2 + tw / 2, vy + 36 * sc, "101010", 0.72 * op, 18 * sc)
+        text(W / 2, vy + 18 * sc, 5, 15 * sc, label, op, nil, true)
         local bw = tw - 30 * sc
-        rect(W / 2 - bw / 2, 58 * sc, W / 2 + bw / 2, 60 * sc, "FFFFFF", 0.25 * op)
-        rect(W / 2 - bw / 2, 58 * sc, W / 2 - bw / 2 + bw * clamp((S.mute and 0 or S.vol) / 100, 0, 1), 60 * sc, opts.brand, op)
+        rect(W / 2 - bw / 2, vy + 32 * sc, W / 2 + bw / 2, vy + 34 * sc, "FFFFFF", 0.25 * op)
+        rect(W / 2 - bw / 2, vy + 32 * sc, W / 2 - bw / 2 + bw * clamp((S.mute and 0 or S.vol) / 100, 0, 1), vy + 34 * sc, opts.brand, op)
     end
     if S.hold_2x or S.ext_2x then
         local sp_lbl = (S.ext_2x or (S.saved_speed < 2 and "2×" or (string.format("%.2g×", math.min(4, S.saved_speed * 2))))) .. "  ▸▸"
@@ -402,7 +551,8 @@ local function tick()
         S.fade = target == 1 and math.min(1, S.fade + step) or math.max(0, S.fade - step)
     end
     local vol_fading = t >= S.vol_until - 0.28 and t < S.vol_until + 0.05
-    local animating = S.fade ~= target or S.bezel or S.hold_at ~= nil or vol_fading or ((S.buffering or S.seeking) and S.ready)
+    local cm_auto_active = S.cm_auto_idx ~= nil and t < S.cm_auto_until
+    local animating = S.fade ~= target or S.bezel or S.hold_at ~= nil or vol_fading or cm_auto_active or ((S.buffering or S.seeking) and S.ready)
     if active() then
         if S.dirty or animating then S.dirty = false; render() end
         -- Pause 40Hz timer while purely static (paused / steady controls / static 2x pill) until an event wakes it
@@ -411,6 +561,7 @@ local function tick()
         end
     else
         thumb_hide()
+        comments_hide()
         ov:remove()
         timer:kill()
     end
@@ -460,9 +611,19 @@ local function activate(id)
     elseif id == "pip" or id == "pip-lock" or id == "pip-back" or id == "pip-close" then app(id)
     elseif id == "quality" then app("menu-quality")
     elseif id == "subs" then app("menu-subs")
+    elseif id == "sc" then app("toggle-sc")
+    elseif type(id) == "string" and id:sub(1, 3) == "cm:" then
+        local idx = tonumber(id:sub(4))
+        local m = idx and S.sc_comments and S.sc_comments[idx]
+        if m and m.t then
+            S.time = m.t
+            mp.commandv("seek", tostring(m.t), "absolute+exact")
+            wake()
+        end
     elseif id == "loop" then
-        mp.set_property("loop-file", S.loop and "no" or "inf")
-        mp.osd_message(S.loop and "Повтор выключен" or "Повтор включён: видео играет по кругу", 2)
+        app("toggle-loop")
+        local en = S.lang == "en"
+        mp.osd_message(S.loop and (en and "Loop off" or "Повтор выключен") or (en and "Loop on" or "Повтор включён: видео играет по кругу"), 2)
     elseif id == "speed" then app("menu-speed")
     end
 end
@@ -533,7 +694,10 @@ local last_q = -1
 mp.observe_property("time-pos", "number", function(_, v)
     S.time = v or 0
     local q = math.floor(S.time * 4)
-    if q ~= last_q then last_q = q; S.dirty = true end -- the bar and the clock move a few times a second, not every frame
+    if q ~= last_q then
+        last_q = q
+        if S.fade > 0.01 then wake() else S.dirty = true end
+    end
 end)
 mp.observe_property("duration", "number", function(_, v) S.dur = v or 0 end)
 mp.observe_property("demuxer-cache-time", "number", function(_, v) S.cache = v or 0 end)
@@ -553,7 +717,7 @@ mp.observe_property("mute", "bool", function(_, v)
     if mute_seen then S.vol_until = now() + 1.3; wake() end
     mute_seen = true
 end)
-mp.register_event("file-loaded", function() S.thumb_file = nil; S.thumb_want = -99; thumb_hide(); S.ready = true; S.segments = S.pending_segments or {}; wake() end)
+mp.register_event("file-loaded", function() S.thumb_file = nil; S.thumb_want = -99; thumb_hide(); comments_hide(); S.cm_auto_idx = nil; S.ready = true; S.segments = S.pending_segments or {}; if S.pending_sc_comments then S.sc_comments = S.pending_sc_comments end; wake() end)
 mp.register_script_message("flux-thumb", function(file, w, h)
     if file == "none" or not file then
         S.thumb_file = nil
@@ -578,7 +742,7 @@ mp.register_event("end-file", function()
     cancel_hold_2x()
     S.ext_2x = nil
     S.ready = false; S.time = 0; S.dur = 0; S.cache = 0
-    S.thumb_file = nil; S.ov_file = nil; thumb_hide()
+    S.thumb_file = nil; S.ov_file = nil; thumb_hide(); comments_hide(); S.sc_comments = {}; S.cm_auto_idx = nil
     wake()
 end)
 
@@ -593,6 +757,8 @@ mp.register_script_message("flux-state", function(json)
     if t.channel ~= nil then S.channel = t.channel end
     if t.likes ~= nil then S.likes = t.likes end
     if t.short_overlay ~= nil then S.short_overlay = t.short_overlay end
+    if t.is_short ~= nil then S.is_short = t.is_short end
+    if type(t.lang) == "string" then S.lang = t.lang end
     if t.rclick then S.rclick = t.rclick end
     if t.pip ~= nil then S.pip = t.pip end
     -- the app's theme accent, "#RRGGBB" -> ASS colour order BBGGRR
@@ -600,6 +766,8 @@ mp.register_script_message("flux-state", function(json)
     if t.segments then S.segments = t.segments; S.pending_segments = t.segments end
     if t.chapters then S.chapters = t.chapters end
     if t.subs ~= nil then S.subs_on = t.subs end
+    if t.sc_on ~= nil then S.sc_on = t.sc_on; if not S.sc_on then comments_hide() end end
+    if t.sc_comments then S.sc_comments = t.sc_comments; S.pending_sc_comments = t.sc_comments end
     wake()
 end)
 mp.register_script_message("flux-leave", function() S.mx, S.my = -1, -1; cancel_hold_2x(); wake() end)

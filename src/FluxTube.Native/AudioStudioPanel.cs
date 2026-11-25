@@ -278,6 +278,7 @@ public static class AudioStudioPanel
         Gfx.Fill(vizR, Gfx.Fade(0xFF07070C, Th.Light ? 0.14f : 0.78f), Gfx.Corner(10));
         Gfx.Stroke(vizR, Th.Line, Gfx.Corner(10), 1f);
         Gfx.PushClip(vizR.Inset(1));
+        AudioAnalyzer.RequestFrame(force: true);
         AudioAnalyzer.DrawStageVisualizer(vizR, s.VisualizerStyle == "off" ? "bars_wave" : s.VisualizerStyle, opacity: 0.65f);
 
         float midY = vizR.Y + vizR.H * 0.5f;
@@ -290,8 +291,8 @@ public static class AudioStudioPanel
         Gfx.Draw("-12", vizR.X + 6, vizR.Bottom - 14, 9f, Th.Dim, 500);
 
         float px0 = vizR.X + 46, px1 = vizR.Right - 20;
-        var nodeX = new float[AudioDsp.Freqs.Length];
-        var nodeY = new float[AudioDsp.Freqs.Length];
+        Span<float> nodeX = stackalloc float[AudioDsp.Freqs.Length];
+        Span<float> nodeY = stackalloc float[AudioDsp.Freqs.Length];
         for (int i = 0; i < AudioDsp.Freqs.Length; i++)
         {
             nodeX[i] = px0 + (px1 - px0) * (i / (float)(AudioDsp.Freqs.Length - 1));
@@ -436,6 +437,8 @@ public static class AudioStudioPanel
                             new(L.T("Удалить пресет", "Delete preset"), () =>
                             {
                                 s.CustomAudioPresets.RemoveAll(x => x.Name == cpName);
+                                if (s.AudioPreset.Equals("user:" + cpName, StringComparison.OrdinalIgnoreCase))
+                                    s.AudioPreset = "Custom";
                                 s.Save();
                                 Shell.Toast(L.T($"Пресет «{cpName}» удалён", $"Preset \"{cpName}\" deleted"), Th.Sub, 1800);
                             }, icon: Th.Delete, danger: true),
@@ -478,7 +481,7 @@ public static class AudioStudioPanel
         y += rowH + 10;
 
         // ---- Main Split: Left 10-Band EQ Faders | Right Master FX Rack ----
-        float bodyH = MathF.Max(220, panel.Bottom - y - 46);
+        float bodyH = MathF.Max(148, panel.Bottom - y - 46);
         float eqW = MathF.Round((panel.W - pad * 2 - 14) * 0.56f);
         var eqBox = new R(panel.X + pad, y, eqW, bodyH);
         var fxBox = new R(eqBox.Right + 14, y, panel.Right - pad - (eqBox.Right + 14), bodyH);
@@ -608,7 +611,7 @@ public static class AudioStudioPanel
         {
             var (rk, _) = AudioDsp.Rooms[i];
             var rl = AudioDsp.RoomLabel(rk);
-            var rr = new R(rpx, fyCur - 4, rbw, 22);
+            var rr = new R(rpx, fyCur, rbw, 22);
             bool on = s.FxReverbRoom == rk;
             Gfx.Fill(rr, on ? Gfx.Fade(Th.Brand, 0.25f) : Th.A(0.07f), Gfx.Corner(6));
             if (on) Gfx.Stroke(rr, Gfx.Fade(Th.Brand, 0.65f), Gfx.Corner(6), 1f);
@@ -674,7 +677,7 @@ public static class AudioStudioPanel
         MiniToggle("dsp:8d", "8D", s.PlayerAudio8D, () => { s.PlayerAudio8D = !s.PlayerAudio8D; AudioDsp.MarkCustom(s); ApplyNow(); });
         MiniToggle("dsp:lim", L.T("Лимитер", "Limiter"), s.FxLimiter, () => { s.FxLimiter = !s.FxLimiter; ApplyNow(); });
         MiniToggle("dsp:audioonly", L.T("Только звук", "Audio only"), s.AudioOnlyMode, () => Shell.ToggleAudioOnlyMode());
-        MiniToggle("dsp:scwave", L.T("Волна SC", "SC Wave"), s.SoundCloudWave, () => { s.SoundCloudWave = !s.SoundCloudWave; s.Save(); App.Invalidate(); });
+        MiniToggle("dsp:scwave", L.T("Комменты / Волна", "Comments / Wave"), s.SoundCloudWave, () => { s.SoundCloudWave = !s.SoundCloudWave; s.Save(); Shell.PushPlayerState(); App.Invalidate(); });
 
         Gfx.PopMotionBlur(mb);
         UI.Modal = savedModal;

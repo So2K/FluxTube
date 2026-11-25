@@ -36,7 +36,7 @@ public static partial class ShortsAdBlocker
     private static partial Regex AdHashtagRx();
 
     // Max mode: promo codes, discount codes, betting/casino, marketplace article spam, affiliate funnel phrases
-    [GeneratedRegex(@"\b(промокод\w*|по\s+промокоду|код\s+на\s+скидку|скидк\w+\s+по\s+ссылке|купить\s+со\s+скидкой|заказывай\s+по\s+ссылке|переходи\s+по\s+ссылке|ссылка\s+на\s+товар|use\s+code\s+[a-z0-9_-]{3,}|promo\s*code|discount\s+code|coupon\s+code|%\s*off\s+with\s+code)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"\b(промокод\w*|по\s+промокоду|код\s+на\s+скидку|скидк\w+\s+по\s+ссылке|купить\s+со\s+скидкой|заказывай\s+по\s+ссылке|ссылка\s+на\s+товар|use\s+code\s+[a-z0-9_-]{3,}|promo\s*code|discount\s+code|coupon\s+code|%\s*off\s+with\s+code)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex PromoCodeRx();
 
     [GeneratedRegex(@"\b(1xbet|1win|melbet|fonbet|winline|betboom|mostbet|parimatch|betcity|leonbets|pin[\s-]?up|stake\.com|bc\.game|букмекер\w*|ставки\s+на\s+спорт|бонус\s+на\s+депозит|фрибет\w*|фриспин\w*|бесплатн\w+\s+вращени\w*|онлайн[\s-]?казино|online\s+casino|gambling\s+bonus)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
@@ -85,17 +85,17 @@ public static partial class ShortsAdBlocker
             {
                 if (seg.End > maxEnd) maxEnd = seg.End;
                 bool isAdCat = seg.Category is "sponsor" or "selfpromo" or "exclusive_access";
-                if (seg.ActionType == "full" && (isAdCat || IsMax))
+                if (seg.ActionType == "full" && isAdCat)
                     return "SponsorBlock · " + Extras.CategoryName(seg.Category);
                 if (isAdCat && seg.End > seg.Start)
                     adSeconds += (seg.End - seg.Start);
             }
             if (adSeconds > 0)
             {
-                double effDur = durationSeconds > 1 ? durationSeconds : Math.Max(maxEnd, 30);
+                double effDur = durationSeconds > 1 ? durationSeconds : Math.Max(maxEnd, 60);
                 double ratio = adSeconds / effDur;
-                double threshold = IsMax ? 0.35 : 0.65;
-                if (ratio >= threshold || (IsMax && adSeconds >= 18 && ratio >= 0.28))
+                double threshold = durationSeconds > 1 ? (IsMax ? 0.50 : 0.70) : 0.68;
+                if (ratio >= threshold || (durationSeconds > 1 && IsMax && adSeconds >= 24 && ratio >= 0.42))
                     return "SponsorBlock";
             }
         }

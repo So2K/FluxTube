@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using FluxTube.Player;
 using FluxTube.Services;
@@ -5,9 +6,10 @@ using FluxTube.Services;
 namespace FluxTube;
 
 /// <summary>
-/// Ultra-lightweight Native-AOT real-time audio spectrum & waveform analyzer via Win32 WASAPI loopback.
-/// Zero external packages, zero COM reflection, and ZERO CPU/audio activity when idle, paused, minimized, or off-screen:
-/// the capture client automatically stops and parks its thread until a visible visualizer requests live frames.
+/// Ultra-lightweight Native-AOT real-time audio spectrum &amp; waveform analyzer via Win32 Per-Process WASAPI Loopback.
+/// Captures ONLY FluxTube's own audio process tree (Windows 10 2004+ / Windows 11 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK),
+/// completely ignoring Discord, games, Telegram, and other system apps! Falls back to default loopback on older OSes.
+/// Zero CPU/audio activity when idle, paused, minimized, or off-screen.
 /// </summary>
 public static unsafe class AudioAnalyzer
 {
@@ -19,6 +21,9 @@ public static unsafe class AudioAnalyzer
     private static readonly Guid IID_IMMDeviceEnumerator = new("A95664D2-9614-4F35-A746-DE8DB63617E6");
     private static readonly Guid IID_IAudioClient = new("1CB9AD4C-DBFA-4C32-B178-C2F568A703B2");
     private static readonly Guid IID_IAudioCaptureClient = new("C8ADBD64-E71E-48A0-A4DE-185C395CD317");
+    private static readonly Guid IID_IUnknown = new("00000000-0000-0000-C000-000000000046");
+    private static readonly Guid IID_IAgileObject = new("94EA2B94-E9CC-49E0-C0FF-EE64CA8F5B90");
+    private static readonly Guid IID_IActivateAudioInterfaceCompletionHandler = new("41D949AB-9862-444A-80F6-C261334DA5EB");
 
     private static readonly float[] _targetBands = new float[BandCount];
     private static readonly float[] _smoothBands = new float[BandCount];
@@ -30,7 +35,8 @@ public static unsafe class AudioAnalyzer
     private static readonly ManualResetEventSlim _wake = new(false);
     private static Thread? _thread;
     private static volatile bool _disposed, _started;
-    private static long _lastNeededAt;
+    private static long _lastNeededAt, _lastForcedAt;
+    private static bool _loggedMode;
     private static float _bassEnergy, _midEnergy, _highEnergy;
     private static long _lastStepFrame = -1;
 
@@ -47,16 +53,19 @@ public static unsafe class AudioAnalyzer
         return (p.HasMedia && !p.Paused && !p.Muted) || BgPlayers.ActiveCount > 0;
     }
 
-    /// <summary>Called only by visible UI panels that want live spectrum/wave data this frame.</summary>
-    public static void RequestFrame()
+    /// <summary>Called only by visible UI panels that want live spectrum/wave data this frame. Pass force=true for EQ studio / MusicBounce.</summary>
+    public static void RequestFrame(bool force = false)
     {
-        if (_disposed || App.Test || AppSettings.Current.VisualizerStyle == "off") return;
+        if (_disposed || App.Test) return;
+        if (!force && AppSettings.Current.VisualizerStyle == "off") return;
         if (W.IsIconic(App.Hwnd) || Gfx.Occluded) return;
 
         bool playing = IsPlayingAudio();
         if (playing)
         {
-            Volatile.Write(ref _lastNeededAt, Environment.TickCount64);
+            var now = Environment.TickCount64;
+            Volatile.Write(ref _lastNeededAt, now);
+            if (force) Volatile.Write(ref _lastForcedAt, now);
             EnsureThread();
             _wake.Set();
         }
@@ -128,7 +137,260 @@ public static unsafe class AudioAnalyzer
         _wake.Set();
     }
 
-    // ---------------- Native-AOT WASAPI Loopback + 512-pt Radix-2 FFT ----------------
+    // ---------------- Native-AOT Per-Process WASAPI Loopback + 512-pt Radix-2 FFT ----------------
+
+    [DllImport("mmdevapi.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+    private static extern int ActivateAudioInterfaceAsync(string deviceInterfacePath, Guid* riid, PropVariantBlob* activationParams, void* completionHandler, void** activationOperation);
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    private static extern nint CreateEventW(nint attrs, int manualReset, int initialState, nint name);
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    private static extern int SetEvent(nint hEvent);
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    private static extern uint WaitForSingleObject(nint hHandle, uint ms);
+
+    [DllImport("kernel32.dll", ExactSpelling = true)]
+    private static extern int CloseHandle(nint hObject);
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct AudioClientActivationParams
+    {
+        public uint ActivationType;      // 1 = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
+        public uint TargetProcessId;     // Environment.ProcessId
+        public uint ProcessLoopbackMode; // 0 = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PropVariantBlob
+    {
+        public ushort Vt;                // 65 = VT_BLOB
+        public ushort R1, R2, R3;
+        public uint CbSize;
+        public uint Pad;
+        public void* PBlobData;
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 2)]
+    private struct WaveFormatEx
+    {
+        public ushort FormatTag;
+        public ushort Channels;
+        public uint SamplesPerSec;
+        public uint AvgBytesPerSec;
+        public ushort BlockAlign;
+        public ushort BitsPerSample;
+        public ushort CbSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ActivationHandler
+    {
+        public void** Vtbl;
+        public int RefCount;
+        public int ActivateHr;
+        public void* Activated;
+        public nint DoneEvent;
+    }
+
+    private static readonly void** _handlerVtbl = InitHandlerVtbl();
+
+    private static void** InitHandlerVtbl()
+    {
+        var v = (void**)NativeMemory.Alloc(4, (nuint)sizeof(void*));
+        v[0] = (delegate* unmanaged[Stdcall]<ActivationHandler*, Guid*, void**, int>)&HandlerQueryInterface;
+        v[1] = (delegate* unmanaged[Stdcall]<ActivationHandler*, uint>)&HandlerAddRef;
+        v[2] = (delegate* unmanaged[Stdcall]<ActivationHandler*, uint>)&HandlerRelease;
+        v[3] = (delegate* unmanaged[Stdcall]<ActivationHandler*, void*, int>)&HandlerActivateCompleted;
+        return v;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
+    private static int HandlerQueryInterface(ActivationHandler* self, Guid* riid, void** ppv)
+    {
+        if (ppv == null) return unchecked((int)0x80004003);
+        var g = *riid;
+        if (g == IID_IUnknown || g == IID_IAgileObject || g == IID_IActivateAudioInterfaceCompletionHandler)
+        {
+            Interlocked.Increment(ref self->RefCount);
+            *ppv = self;
+            return 0;
+        }
+        *ppv = null;
+        return unchecked((int)0x80004002); // E_NOINTERFACE
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
+    private static uint HandlerAddRef(ActivationHandler* self) => (uint)Interlocked.Increment(ref self->RefCount);
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
+    private static uint HandlerRelease(ActivationHandler* self)
+    {
+        int rc = Interlocked.Decrement(ref self->RefCount);
+        if (rc == 0)
+        {
+            if (self->Activated != null) { ReleaseCom(self->Activated); self->Activated = null; }
+            if (self->DoneEvent != 0) { CloseHandle(self->DoneEvent); self->DoneEvent = 0; }
+            NativeMemory.Free(self);
+        }
+        return (uint)Math.Max(0, rc);
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
+    private static int HandlerActivateCompleted(ActivationHandler* self, void* asyncOp)
+    {
+        try
+        {
+            if (asyncOp != null)
+            {
+                var vtbl = *(void***)asyncOp;
+                var getResult = (delegate* unmanaged[Stdcall]<void*, int*, void**, int>)vtbl[3];
+                int hrRes = unchecked((int)0x80004005);
+                void* unk = null;
+                if (getResult(asyncOp, &hrRes, &unk) >= 0)
+                {
+                    self->ActivateHr = hrRes;
+                    self->Activated = unk;
+                }
+            }
+        }
+        catch { }
+        if (self->DoneEvent != 0) SetEvent(self->DoneEvent);
+        return 0;
+    }
+
+    /// <summary>Opens a Windows 10/11 per-process WASAPI loopback IAudioClient capturing ONLY FluxTube's process tree.</summary>
+    private static bool TryOpenProcessLoopback(out void* client, out ushort channels, out uint sampleRate, out ushort bits, out bool isFloat)
+    {
+        client = null; channels = 2; sampleRate = 48000; bits = 32; isFloat = true;
+        var handler = (ActivationHandler*)NativeMemory.AllocZeroed(1, (nuint)sizeof(ActivationHandler));
+        handler->Vtbl = _handlerVtbl;
+        handler->RefCount = 1;
+        handler->ActivateHr = unchecked((int)0x80004005);
+        handler->DoneEvent = CreateEventW(0, 1, 0, 0);
+        void* asyncOp = null;
+        try
+        {
+            var actParams = new AudioClientActivationParams
+            {
+                ActivationType = 1, // AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK
+                TargetProcessId = (uint)Environment.ProcessId,
+                ProcessLoopbackMode = 0, // PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+            };
+            var pv = new PropVariantBlob
+            {
+                Vt = 65, // VT_BLOB
+                CbSize = (uint)sizeof(AudioClientActivationParams),
+                PBlobData = &actParams,
+            };
+            var iid = IID_IAudioClient;
+            int hr = ActivateAudioInterfaceAsync("VAD\\Process_Loopback", &iid, &pv, handler, &asyncOp);
+            if (hr < 0) return false;
+            if (WaitForSingleObject(handler->DoneEvent, 2500) != 0) return false;
+            if (handler->ActivateHr < 0 || handler->Activated == null) return false;
+
+            // QueryInterface for IID_IAudioClient (GetActivateResult returns IUnknown*)
+            void* unk = handler->Activated;
+            handler->Activated = null;
+            void* cli = null;
+            var unkVtbl = *(void***)unk;
+            var qiFn = (delegate* unmanaged[Stdcall]<void*, Guid*, void**, int>)unkVtbl[0];
+            var iidCli = IID_IAudioClient;
+            int qhr = qiFn(unk, &iidCli, &cli);
+            ReleaseCom(unk);
+            if (qhr < 0 || cli == null) return false;
+
+            var cliVtbl = *(void***)cli;
+            var initFn = (delegate* unmanaged[Stdcall]<void*, int, uint, long, long, void*, Guid*, int>)cliVtbl[3];
+            var wfxF = new WaveFormatEx
+            {
+                FormatTag = 3, // WAVE_FORMAT_IEEE_FLOAT
+                Channels = 2,
+                SamplesPerSec = 48000,
+                BitsPerSample = 32,
+                BlockAlign = 8,
+                AvgBytesPerSec = 48000 * 8,
+                CbSize = 0,
+            };
+            // Per-process loopback: try 32-bit float (AUTOCONVERTPCM then plain LOOPBACK), then 16-bit PCM fallback
+            int ihr = initFn(cli, 0, 0x88020000u, 500_000, 0, &wfxF, null);
+            if (ihr < 0) ihr = initFn(cli, 0, 0x00020000u, 500_000, 0, &wfxF, null);
+            if (ihr < 0)
+            {
+                var wfxP = new WaveFormatEx
+                {
+                    FormatTag = 1, // WAVE_FORMAT_PCM
+                    Channels = 2,
+                    SamplesPerSec = 48000,
+                    BitsPerSample = 16,
+                    BlockAlign = 4,
+                    AvgBytesPerSec = 48000 * 4,
+                    CbSize = 0,
+                };
+                ihr = initFn(cli, 0, 0x88020000u, 500_000, 0, &wfxP, null);
+                if (ihr < 0) ihr = initFn(cli, 0, 0x00020000u, 500_000, 0, &wfxP, null);
+                if (ihr >= 0) { bits = 16; isFloat = false; }
+            }
+            if (ihr < 0)
+            {
+                ReleaseCom(cli);
+                return false;
+            }
+            client = cli;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            ReleaseCom(asyncOp);
+            ReleaseCom(handler);
+        }
+    }
+
+    /// <summary>Headless self-test for Windows 10/11 per-process WASAPI loopback activation (zero audio, zero UI).</summary>
+    public static int SelfTestProcessLoopback()
+    {
+        int hrInit = W.CoInitializeEx(0, 0 /*COINIT_MULTITHREADED*/);
+        void* client = null, capture = null;
+        try
+        {
+            if (!TryOpenProcessLoopback(out client, out var ch, out var sr, out var bits, out var isFloat) || client == null)
+            {
+                Console.WriteLine("PROCESS_LOOPBACK_FAIL: TryOpenProcessLoopback returned false");
+                return 2;
+            }
+            var cliVtbl = *(void***)client;
+            var getSvc = (delegate* unmanaged[Stdcall]<void*, Guid*, void**, int>)cliVtbl[14];
+            var iidCap = IID_IAudioCaptureClient;
+            int ghr = getSvc(client, &iidCap, &capture);
+            if (ghr < 0 || capture == null)
+            {
+                Console.WriteLine($"PROCESS_LOOPBACK_FAIL: GetService hr=0x{ghr:X8}");
+                return 3;
+            }
+            var startFn = (delegate* unmanaged[Stdcall]<void*, int>)cliVtbl[10];
+            int shr = startFn(client);
+            if (shr < 0)
+            {
+                Console.WriteLine($"PROCESS_LOOPBACK_FAIL: Start hr=0x{shr:X8}");
+                return 4;
+            }
+            var stopFn = (delegate* unmanaged[Stdcall]<void*, int>)cliVtbl[11];
+            stopFn(client);
+            Console.WriteLine($"PROCESS_LOOPBACK_OK pid={Environment.ProcessId} ch={ch} sr={sr} bits={bits} float={isFloat}");
+            return 0;
+        }
+        finally
+        {
+            ReleaseCom(capture);
+            ReleaseCom(client);
+            if (hrInit >= 0) W.CoUninitialize();
+        }
+    }
 
     private static void ReleaseCom(void* p)
     {
@@ -166,57 +428,64 @@ public static unsafe class AudioAnalyzer
                 bool started = false;
                 try
                 {
-                    var clsid = CLSID_MMDeviceEnumerator;
-                    var iidEnum = IID_IMMDeviceEnumerator;
-                    if (W.CoCreateInstance(&clsid, 0, 23 /*CLSCTX_ALL*/, &iidEnum, &enumerator) < 0 || enumerator == null)
-                    {
-                        Thread.Sleep(1500);
-                        continue;
-                    }
+                    ushort channels, bits;
+                    uint sampleRate;
+                    bool isFloat;
 
-                    // IMMDeviceEnumerator::GetDefaultAudioEndpoint (vtable[4])
-                    var enumVtbl = *(void***)enumerator;
-                    var getDefault = (delegate* unmanaged[Stdcall]<void*, int, int, void**, int>)enumVtbl[4];
-                    if (getDefault(enumerator, 0 /*eRender*/, 0 /*eConsole*/, &device) < 0 || device == null)
+                    // 1. Prefer Windows 10/11 per-process loopback (captures ONLY FluxTube audio, zero Discord/game bleed!)
+                    if (TryOpenProcessLoopback(out client, out channels, out sampleRate, out bits, out isFloat))
                     {
-                        Thread.Sleep(1500);
-                        continue;
+                        if (!_loggedMode) { _loggedMode = true; Paths.Log($"audio analyzer: per-process WASAPI loopback active (pid={Environment.ProcessId})"); }
                     }
-
-                    // IMMDevice::Activate (vtable[3]) -> IAudioClient
-                    var devVtbl = *(void***)device;
-                    var activate = (delegate* unmanaged[Stdcall]<void*, Guid*, uint, void*, void**, int>)devVtbl[3];
-                    var iidClient = IID_IAudioClient;
-                    if (activate(device, &iidClient, 23, null, &client) < 0 || client == null)
+                    else
                     {
-                        Thread.Sleep(1500);
-                        continue;
+                        // 2. Fallback on older Windows: default render loopback
+                        var clsid = CLSID_MMDeviceEnumerator;
+                        var iidEnum = IID_IMMDeviceEnumerator;
+                        if (W.CoCreateInstance(&clsid, 0, 23 /*CLSCTX_ALL*/, &iidEnum, &enumerator) < 0 || enumerator == null)
+                        {
+                            Thread.Sleep(1500);
+                            continue;
+                        }
+                        var enumVtbl = *(void***)enumerator;
+                        var getDefault = (delegate* unmanaged[Stdcall]<void*, int, int, void**, int>)enumVtbl[4];
+                        if (getDefault(enumerator, 0 /*eRender*/, 0 /*eConsole*/, &device) < 0 || device == null)
+                        {
+                            Thread.Sleep(1500);
+                            continue;
+                        }
+                        var devVtbl = *(void***)device;
+                        var activate = (delegate* unmanaged[Stdcall]<void*, Guid*, uint, void*, void**, int>)devVtbl[3];
+                        var iidClient = IID_IAudioClient;
+                        if (activate(device, &iidClient, 23, null, &client) < 0 || client == null)
+                        {
+                            Thread.Sleep(1500);
+                            continue;
+                        }
+                        var cliVtbl0 = *(void***)client;
+                        var getMix = (delegate* unmanaged[Stdcall]<void*, void**, int>)cliVtbl0[8];
+                        if (getMix(client, &fmtPtr) < 0 || fmtPtr == null)
+                        {
+                            Thread.Sleep(1500);
+                            continue;
+                        }
+                        ushort fmtTag = *(ushort*)fmtPtr;
+                        channels = *(ushort*)((byte*)fmtPtr + 2);
+                        sampleRate = *(uint*)((byte*)fmtPtr + 4);
+                        bits = *(ushort*)((byte*)fmtPtr + 14);
+                        ushort cbSize = *(ushort*)((byte*)fmtPtr + 16);
+                        isFloat = fmtTag == 3 || (fmtTag == 0xFFFE && cbSize >= 22 && *(uint*)((byte*)fmtPtr + 24) == 3);
+                        if (channels == 0 || sampleRate < 8000) { Thread.Sleep(1500); continue; }
+                        var initFn = (delegate* unmanaged[Stdcall]<void*, int, uint, long, long, void*, Guid*, int>)cliVtbl0[3];
+                        if (initFn(client, 0, 0x00020000u, 500_000 /*50ms*/, 0, fmtPtr, null) < 0)
+                        {
+                            Thread.Sleep(1500);
+                            continue;
+                        }
+                        if (!_loggedMode) { _loggedMode = true; Paths.Log("audio analyzer: fallback system WASAPI loopback"); }
                     }
 
                     var cliVtbl = *(void***)client;
-                    // IAudioClient::GetMixFormat (vtable[8])
-                    var getMix = (delegate* unmanaged[Stdcall]<void*, void**, int>)cliVtbl[8];
-                    if (getMix(client, &fmtPtr) < 0 || fmtPtr == null)
-                    {
-                        Thread.Sleep(1500);
-                        continue;
-                    }
-
-                    ushort fmtTag = *(ushort*)fmtPtr;
-                    ushort channels = *(ushort*)((byte*)fmtPtr + 2);
-                    uint sampleRate = *(uint*)((byte*)fmtPtr + 4);
-                    ushort bits = *(ushort*)((byte*)fmtPtr + 14);
-                    ushort cbSize = *(ushort*)((byte*)fmtPtr + 16);
-                    bool isFloat = fmtTag == 3 || (fmtTag == 0xFFFE && cbSize >= 22 && *(uint*)((byte*)fmtPtr + 24) == 3);
-                    if (channels == 0 || sampleRate < 8000) { Thread.Sleep(1500); continue; }
-
-                    // IAudioClient::Initialize (vtable[3]) with AUDCLNT_SHAREMODE_SHARED (0) | AUDCLNT_STREAMFLAGS_LOOPBACK (0x00020000)
-                    var initFn = (delegate* unmanaged[Stdcall]<void*, int, uint, long, long, void*, Guid*, int>)cliVtbl[3];
-                    if (initFn(client, 0, 0x00020000u, 500_000 /*50ms*/, 0, fmtPtr, null) < 0)
-                    {
-                        Thread.Sleep(1500);
-                        continue;
-                    }
 
                     // IAudioClient::GetService (vtable[14]) -> IAudioCaptureClient
                     var getSvc = (delegate* unmanaged[Stdcall]<void*, Guid*, void**, int>)cliVtbl[14];
@@ -329,9 +598,12 @@ public static unsafe class AudioAnalyzer
 
     private static bool ShouldCaptureNow()
     {
-        if (_disposed || AppSettings.Current.VisualizerStyle == "off") return false;
+        if (_disposed) return false;
+        var now = Environment.TickCount64;
+        bool forced = now - Volatile.Read(ref _lastForcedAt) < 1200;
+        if (!forced && AppSettings.Current.VisualizerStyle == "off") return false;
         if (!IsPlayingAudio()) return false;
-        return Environment.TickCount64 - Volatile.Read(ref _lastNeededAt) < 1200;
+        return now - Volatile.Read(ref _lastNeededAt) < 1200;
     }
 
     private static void ComputeSpectrum(float[] ring, int ringPos, float[] hann, float[] re, float[] im, uint sampleRate, float[] outBands, float[] outWave)

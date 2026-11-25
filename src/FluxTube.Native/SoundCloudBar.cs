@@ -1,8 +1,12 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using FluxTube.Models;
 using FluxTube.Player;
 using FluxTube.Services;
+using Vortice.Mathematics;
+using Vortice.WIC;
 
 namespace FluxTube;
 
@@ -32,6 +36,7 @@ public static partial class SoundCloudBar
     private static readonly object _lock = new();
     private static readonly Dictionary<string, WaveEntry> _cache = new(StringComparer.Ordinal);
     private static bool _scrubbing;
+    private static string? _scrubVideoId;
     private static double _scrubTarget;
     private static string? _lastBubbleKey;
     private static long _lastBubbleAt;
@@ -161,7 +166,7 @@ public static partial class SoundCloudBar
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
-                RedirectStandardError = true,
+                RedirectStandardError = false,
             };
             psi.ArgumentList.Add("-nostdin");
             psi.ArgumentList.Add("-hide_banner");
@@ -277,16 +282,17 @@ public static partial class SoundCloudBar
             foreach (var c in comments)
             {
                 if (list.Count >= 18) break;
-                if (list.Any(x => x.Author == c.Author && x.Text.StartsWith(c.Text.Length > 20 ? c.Text[..20] : c.Text, StringComparison.Ordinal))) continue;
+                var cleanTxt = c.Text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+                if (cleanTxt.Length > 110) cleanTxt = cleanTxt[..107] + "…";
+                var prefix = cleanTxt.Length > 20 ? cleanTxt[..20] : cleanTxt;
+                if (list.Any(x => x.Author == c.Author && x.Text.StartsWith(prefix, StringComparison.Ordinal))) continue;
                 // Deterministic aesthetic position from author+text hash (avoiding very start/end badges)
                 uint h = 2166136261u;
                 foreach (var ch in c.Author) h = (h ^ ch) * 16777619u;
-                foreach (var ch in c.Text.AsSpan(0, Math.Min(24, c.Text.Length))) h = (h ^ ch) * 16777619u;
+                foreach (var ch in cleanTxt.AsSpan(0, Math.Min(24, cleanTxt.Length))) h = (h ^ ch) * 16777619u;
                 float frac = 0.06f + ((h % 880u) / 1000f);
                 int bk = Math.Clamp((int)(frac * buckets), 1, buckets - 2);
                 if (!usedBuckets.Add(bk)) { idx++; continue; }
-                var cleanTxt = c.Text.Replace('\r', ' ').Replace('\n', ' ').Trim();
-                if (cleanTxt.Length > 110) cleanTxt = cleanTxt[..107] + "…";
                 list.Add(new TimedMarker(frac * duration, c.Author, c.Avatar, cleanTxt, false));
                 idx++;
             }
@@ -294,6 +300,215 @@ public static partial class SoundCloudBar
 
         list.Sort((a, b) => a.Seconds.CompareTo(b.Seconds));
         return list;
+    }
+
+    // ---------------- Video Player Overlay Comment Avatars ("кругляшки над медиаплеером") ----------------
+
+    private static readonly ConcurrentDictionary<string, string?> _overlayAvFiles = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, byte> _overlayAvLoading = new(StringComparer.Ordinal);
+    private static readonly HttpClient _avHttp = MakeAvatarHttp();
+    private static long _lastOverlayNotifyAt;
+    private static int _overlayNotifyScheduled;
+
+    private static HttpClient MakeAvatarHttp()
+    {
+        var h = new SocketsHttpHandler { AutomaticDecompression = System.Net.DecompressionMethods.All, MaxConnectionsPerServer = 6 };
+        if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy)) { h.Proxy = new System.Net.WebProxy(AppSettings.Current.Proxy); h.UseProxy = true; }
+        var c = new HttpClient(h) { Timeout = TimeSpan.FromSeconds(8) };
+        c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", InnerTube.UserAgent);
+        return c;
+    }
+
+    private static string OverlayAvDir
+    {
+        get
+        {
+            var d = Path.Combine(Paths.Data, "sc_av");
+            Directory.CreateDirectory(d);
+            return d;
+        }
+    }
+
+    private static string HashHex(string s)
+    {
+        ulong h = 14695981039346656037UL;
+        foreach (var ch in s) { h ^= ch; h *= 10995981039346656037UL; }
+        return h.ToString("x16");
+    }
+
+    private static string AssColorFor(string author)
+    {
+        ReadOnlySpan<string> pal = ["B67EFF", "FF924F", "6CE3B2", "F78CF7", "FFCB52", "68D5FF", "8C8CFF", "FF7A9C"];
+        uint h = 2166136261u;
+        foreach (var c in author) h = (h ^ c) * 16777619u;
+        return pal[(int)(h % (uint)pal.Length)];
+    }
+
+    private static string FirstGlyph(string author)
+    {
+        var s = author.TrimStart('@', ' ');
+        if (s.Length == 0) return "?";
+        return System.Globalization.StringInfo.GetNextTextElement(s).ToUpperInvariant();
+    }
+
+    private static void ScheduleOverlayNotify(Action onReady)
+    {
+        if (Interlocked.Exchange(ref _overlayNotifyScheduled, 1) != 0) return;
+        long wait = Math.Max(40, 180 - (Environment.TickCount64 - Interlocked.Read(ref _lastOverlayNotifyAt)));
+        _ = Task.Delay((int)wait).ContinueWith(_ =>
+        {
+            Interlocked.Exchange(ref _lastOverlayNotifyAt, Environment.TickCount64);
+            Interlocked.Exchange(ref _overlayNotifyScheduled, 0);
+            App.Post(onReady);
+        });
+    }
+
+    /// <summary>
+    /// Builds compact JSON for fluxosc.lua comment avatar circles directly above the video seekbar,
+    /// and asynchronously bakes anti-aliased premultiplied BGRA circular avatars so mpv draws real photos cleanly.
+    /// </summary>
+    public static JsonArray BuildPlayerCommentsJson(IReadOnlyList<TimedMarker> markers, double duration, float dpiScale, Action onAvatarsReady)
+    {
+        var arr = new JsonArray();
+        if (duration <= 5 || markers.Count == 0) return arr;
+
+        // Use real monitor DPI (matching mpv's display-hidpi-scale in fluxosc.lua) instead of UiScale!
+        float winDpi = App.Hwnd != 0 ? W.GetDpiForWindow(App.Hwnd) / 96f : dpiScale;
+        int px = Math.Clamp((int)MathF.Round(22f * Math.Clamp(winDpi, 1f, 3f)) & ~1, 20, 44);
+        // Up to 22 well-spaced avatars matching mpv overlay slots 10..31
+        int maxCount = Math.Min(22, markers.Count);
+        double minGapSec = duration / 26.0;
+        double lastSec = -9999;
+
+        for (int i = 0; i < markers.Count && arr.Count < maxCount; i++)
+        {
+            var mk = markers[i];
+            if (mk.Seconds - lastSec < minGapSec && arr.Count > 0) continue;
+            lastSec = mk.Seconds;
+
+            string? file = null;
+            if (!string.IsNullOrEmpty(mk.Avatar))
+            {
+                var key = mk.Avatar + "#" + px;
+                if (_overlayAvFiles.TryGetValue(key, out var cached))
+                {
+                    if (cached != null && File.Exists(cached)) file = cached;
+                }
+                else
+                {
+                    var diskPath = Path.Combine(OverlayAvDir, $"av_{HashHex(mk.Avatar)}_{px}.bgra");
+                    if (File.Exists(diskPath) && new FileInfo(diskPath).Length == px * px * 4)
+                    {
+                        _overlayAvFiles[key] = diskPath;
+                        file = diskPath;
+                    }
+                    else if (_overlayAvLoading.TryAdd(key, 1))
+                    {
+                        var url = mk.Avatar;
+                        _ = Task.Run(() => BakeCircularBgraAvatarAsync(url, px, key, diskPath, onAvatarsReady));
+                    }
+                }
+            }
+
+            var item = new JsonObject
+            {
+                ["t"] = Math.Round(mk.Seconds, 2),
+                ["a"] = mk.Author,
+                ["x"] = mk.Text,
+                ["ts"] = mk.HasRealTimestamp,
+                ["c"] = AssColorFor(mk.Author),
+                ["i"] = FirstGlyph(mk.Author),
+            };
+            if (file != null)
+            {
+                item["f"] = file;
+                item["w"] = px;
+                item["h"] = px;
+            }
+            arr.Add(item);
+        }
+        return arr;
+    }
+
+    private static async Task BakeCircularBgraAvatarAsync(string url, int size, string key, string outPath, Action onReady)
+    {
+        try
+        {
+            var bytes = await _avHttp.GetByteArrayAsync(url);
+            if (bytes.Length == 0) { _overlayAvFiles[key] = null; return; }
+            var wic = Wic.Factory;
+            using var stream = wic.CreateStream(bytes);
+            using var dec = wic.CreateDecoderFromStream(stream, DecodeOptions.CacheOnLoad);
+            using var frame = dec.GetFrame(0);
+            using var scaler = wic.CreateBitmapScaler();
+            scaler.Initialize(frame, (uint)size, (uint)size, BitmapInterpolationMode.Fant);
+            using var conv = wic.CreateFormatConverter();
+            conv.Initialize(scaler, PixelFormat.Format32bppBGRA);
+            var px = new byte[size * size * 4];
+            unsafe
+            {
+                fixed (byte* p = px)
+                    conv.CopyPixels(new RectI(0, 0, size, size), (uint)(size * 4), (uint)px.Length, (nint)p);
+            }
+
+            // Anti-aliased circular mask + crisp 1.4px light ring + 1px dark halo (premultiplied BGRA for mpv overlay-add!)
+            float half = size * 0.5f;
+            float outerR = half - 0.5f;
+            float ringInner = outerR - MathF.Max(1.3f, size * 0.065f);
+            float haloOuter = outerR;
+            float ringOuter = outerR - 0.85f;
+            for (int y = 0; y < size; y++)
+            {
+                float dy = y + 0.5f - half;
+                int row = y * size * 4;
+                for (int x = 0; x < size; x++)
+                {
+                    float dx = x + 0.5f - half;
+                    float dist = MathF.Sqrt(dx * dx + dy * dy);
+                    int idx = row + x * 4;
+                    if (dist >= haloOuter + 0.6f)
+                    {
+                        px[idx] = px[idx + 1] = px[idx + 2] = px[idx + 3] = 0;
+                        continue;
+                    }
+                    float alpha = Math.Clamp(haloOuter + 0.6f - dist, 0f, 1f);
+                    float b = px[idx], g = px[idx + 1], r = px[idx + 2];
+                    if (dist >= ringOuter)
+                    {
+                        // Subtle dark outer shadow edge so avatar pops on bright sky/white video frames
+                        b = 12f; g = 12f; r = 16f;
+                        alpha *= 0.88f;
+                    }
+                    else if (dist >= ringInner)
+                    {
+                        // Crisp bright white border ring like SoundCloud
+                        float t = Math.Clamp((dist - ringInner) / 0.8f, 0f, 1f);
+                        b = b + (248f - b) * t;
+                        g = g + (248f - g) * t;
+                        r = r + (252f - r) * t;
+                    }
+                    // Premultiply RGB by alpha for exact mpv BGRA overlay blending
+                    px[idx] = (byte)Math.Clamp((int)(b * alpha + 0.5f), 0, 255);
+                    px[idx + 1] = (byte)Math.Clamp((int)(g * alpha + 0.5f), 0, 255);
+                    px[idx + 2] = (byte)Math.Clamp((int)(r * alpha + 0.5f), 0, 255);
+                    px[idx + 3] = (byte)Math.Clamp((int)(alpha * 255f + 0.5f), 0, 255);
+                }
+            }
+
+            var tmp = outPath + ".tmp";
+            await File.WriteAllBytesAsync(tmp, px);
+            File.Move(tmp, outPath, overwrite: true);
+            _overlayAvFiles[key] = outPath;
+            ScheduleOverlayNotify(onReady);
+        }
+        catch
+        {
+            _overlayAvFiles[key] = null;
+        }
+        finally
+        {
+            _overlayAvLoading.TryRemove(key, out _);
+        }
     }
 
     /// <summary>Draws the full SoundCloud waveform deck with interactive scrubbing, midline time badges, and timed comment avatars.</summary>
@@ -320,11 +535,13 @@ public static partial class SoundCloudBar
         var hitR = new R(barAreaX, rect.Y + 2, barAreaW, rect.H - 4);
         bool overWave = UI.Hover(hitR);
 
-        // Handle smooth scrubbing (click or press-and-drag)
+        // Handle smooth scrubbing (click or press-and-drag; track videoId so switching mid-drag never seeks the new video!)
+        if (_scrubbing && _scrubVideoId != videoId) _scrubbing = false;
         if (!UI.Down && _scrubbing)
         {
             _scrubbing = false;
-            if (duration > 0) mpv.SeekAbsolute(_scrubTarget);
+            if (duration > 0 && _scrubVideoId == videoId) mpv.SeekAbsolute(_scrubTarget);
+            _scrubVideoId = null;
         }
         float hoverFrac = Math.Clamp((UI.MX - barAreaX) / barAreaW, 0f, 1f);
         if (overWave && duration > 0) UI.Hand();
@@ -361,6 +578,7 @@ public static partial class SoundCloudBar
         if (hoveredMarker == null && duration > 0 && UI.Pressed && overWave)
         {
             _scrubbing = true;
+            _scrubVideoId = videoId;
             _scrubTarget = duration * hoverFrac;
         }
         if (_scrubbing && duration > 0)
@@ -372,12 +590,12 @@ public static partial class SoundCloudBar
         double effPos = _scrubbing ? _scrubTarget : pos;
         float playFrac = duration > 0 ? (float)Math.Clamp(effPos / duration, 0, 1) : 0f;
 
-        // Crisp vertical SoundCloud bars (2.5px bar + 1.5px gap)
-        const float barW = 2.5f;
-        const float stride = 4.0f;
-        int cols = Math.Clamp((int)(barAreaW / stride), 40, 360);
-        float totalBarsW = cols * stride - (stride - barW);
-        float startX = barAreaX + (barAreaW - totalBarsW) * 0.5f;
+        // Span bars 100.0% across barAreaX..barAreaX+barAreaW at ANY screen width (exact 1:1 alignment with cursor & playhead!)
+        int cols = Math.Clamp((int)MathF.Floor(barAreaW / 4.0f), 40, 640);
+        float stride = barAreaW / cols;
+        float barW = MathF.Max(1.8f, stride * 0.62f);
+        float startX = barAreaX;
+        float totalBarsW = barAreaW;
 
         bool playing = mpv.HasMedia && !mpv.Paused && mpv.CurrentVideoId == videoId;
         float beatPulse = playing ? (1f + AudioAnalyzer.BassEnergy * 0.14f) : 1f;
@@ -426,7 +644,7 @@ public static partial class SoundCloudBar
                 Gfx.Fill(new R(headX - 3f, midY - maxUp, 6f, maxUp + maxDn), Gfx.Fade(Th.Brand, 0.20f));
         }
 
-        // Timed comment avatars pinned right along the SoundCloud midline!
+        // Timed comment avatars pinned right along the SoundCloud midline (draw hovered avatar LAST so it sits on top!)
         TimedMarker? activeAutoMarker = null;
         float activeAutoX = 0;
         if (duration > 1 && markers.Count > 0)
@@ -435,14 +653,12 @@ public static partial class SoundCloudBar
             {
                 var mk = markers[i];
                 float mx = barAreaX + (float)Math.Clamp(mk.Seconds / duration, 0.03, 0.97) * barAreaW;
-                bool isHov = ReferenceEquals(mk, hoveredMarker);
-                float sz = isHov ? avSize + 4f : avSize;
-                float ax = mx - sz * 0.5f, ay = avY - (isHov ? 2f : 0f);
-                // Crisp outer ring so clustered avatars pop cleanly like SoundCloud
-                Gfx.Circle(mx, ay + sz * 0.5f, sz * 0.5f + 1.2f, isHov ? Th.Brand : Gfx.Fade(Th.Bg, 0.92f));
-                Pages.Cards.Avatar(ax, ay, sz, mk.Avatar, mk.Author.TrimStart('@'));
-
-                // Auto-pop comment bubble briefly when playback passes a real timestamped comment
+                if (!ReferenceEquals(mk, hoveredMarker))
+                {
+                    float ax = mx - avSize * 0.5f;
+                    Gfx.Circle(mx, avY + avSize * 0.5f, avSize * 0.5f + 1.2f, Gfx.Fade(Th.Bg, 0.92f));
+                    Pages.Cards.Avatar(ax, avY, avSize, mk.Avatar, mk.Author.TrimStart('@'));
+                }
                 if (hoveredMarker == null && mk.HasRealTimestamp && playing && Math.Abs(pos - mk.Seconds) < 1.8)
                 {
                     activeAutoMarker = mk;
@@ -450,6 +666,13 @@ public static partial class SoundCloudBar
                     var key = videoId + ":" + (int)mk.Seconds;
                     if (_lastBubbleKey != key) { _lastBubbleKey = key; _lastBubbleAt = UI.Now; }
                 }
+            }
+            if (hoveredMarker != null)
+            {
+                float sz = avSize + 4f;
+                float ax = hoveredMarkerX - sz * 0.5f, ay = avY - 2f;
+                Gfx.Circle(hoveredMarkerX, ay + sz * 0.5f, sz * 0.5f + 1.4f, Th.Brand);
+                Pages.Cards.Avatar(ax, ay, sz, hoveredMarker.Avatar, hoveredMarker.Author.TrimStart('@'));
             }
         }
 
@@ -480,8 +703,8 @@ public static partial class SoundCloudBar
             float bw = MathF.Min(360, MathF.Max(hRun.W, tRun.W) + 46);
             float bh = MathF.Max(38, hRun.H + tRun.H + 14);
             float bx = Math.Clamp(showX - bw * 0.5f, rect.X + 4, rect.Right - bw - 4);
-            float by = MathF.Max(rect.Y - bh - 4, rect.Y + 2);
-            if (rect.Y - bh - 4 > 60) by = rect.Y - bh - 4;
+            float minY = MathF.Max(Gfx.Clip.Y + 4, 60);
+            float by = rect.Y - bh - 4 >= minY ? rect.Y - bh - 4 : rect.Y + 2;
             var bubble = new R(Gfx.Snap(bx), Gfx.Snap(by), bw, bh);
             Gfx.Fill(bubble.Inset(-2), Gfx.Fade(0xFF000000, 0.34f), Gfx.Corner(10));
             Gfx.FillFrosted(bubble, Th.Menu, Gfx.Corner(9), opacity: 0.96f, border: true);

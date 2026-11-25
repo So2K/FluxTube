@@ -593,7 +593,7 @@ public sealed class SettingsPage : IPage
                 {
                     var (tk, tru, ten) = BgEngine.PatternTints[ti];
                     var tl = L.T(tru, ten);
-                    var tw = UI.PillWidth(null, tl) - 6; px -= tw;
+                    var tw = UI.PillWidth(null, tl); px -= tw;
                     bool on = s.BgPatternTint == tk;
                     if (UI.Pill(UI.Id("set:ptint:" + tk), px, patCfgRow.Y + 13, 32, null, tl, out _, accent: on))
                     { s.BgPatternTint = tk; Saved(); App.Invalidate(); }
@@ -671,7 +671,7 @@ public sealed class SettingsPage : IPage
                 {
                     var (bv, bru, ben) = BgEngine.WallpaperBlurs[bi];
                     var bl = L.T(bru, ben);
-                    var bw = UI.PillWidth(null, bl) - 4; wx -= bw;
+                    var bw = UI.PillWidth(null, bl); wx -= bw;
                     bool on = MathF.Abs(s.BgImageBlur - bv) < 2f;
                     if (UI.Pill(UI.Id("set:wblur:" + bi), wx, wallCfg.Y + 12, 32, null, bl, out _, accent: on))
                     { s.BgImageBlur = bv; Saved(); App.Invalidate(); }
@@ -921,10 +921,10 @@ public sealed class SettingsPage : IPage
             if (UI.Pill(UI.Id("set:dsp"), dspRow.Right - dw - 14, dspRow.Y + 12, 34, Th.Headphones, dLbl, out _, accent: s.AudioFxEnabled))
                 AudioStudioPanel.Show();
         }
-        ToggleRow("scwave", L.T("Волна SoundCloud с комментариями под видео", "SoundCloud waveform bar with timed comments"), s.SoundCloudWave, v => s.SoundCloudWave = v,
-            L.T("Рисует настоящую звуковую волну трека с аватарками комментариев по таймкодам (переключается и под видео)", "Shows a real audio waveform seekbar with YouTube comment avatars at timestamps (also toggleable under videos)"));
-        ToggleRow("bassshake", L.T("Тряска UI от баса в режиме «Только звук»", "Bass-reactive UI shake in Audio-Only mode"), s.MusicBassShake, v => s.MusicBassShake = v,
-            L.T("Ультра-дёшевый GPU-эффект: весь интерфейс мягко качает и пульсирует в такт басу (одна матрица 0.001 мс)", "Ultra-cheap GPU camera kick: the UI gently thumps and shakes with bass beats (single matrix, 0.001 ms)"));
+        ToggleRow("scwave", L.T("Кругляшки комментариев на плеере (и волна в музыке)", "SoundCloud comment avatars on player bar (wave in Music Mode)"), s.SoundCloudWave, v => { s.SoundCloudWave = v; Shell.PushPlayerState(); },
+            L.T("В обычных видео показывает круглые аватарки комментариев прямо над полоской плеера (без волны), а в режиме «Только звук» — полную волну SoundCloud", "In normal videos shows circular comment avatars directly above the player seekbar (no bulky waveform); full SoundCloud waveform in Audio-Only mode"));
+        ToggleRow("bassshake", L.T("Поэлементная тряска и прыжки UI от баса («Только звук»)", "Per-element bass bounce in Audio-Only mode"), s.MusicBassShake, v => s.MusicBassShake = v,
+            L.T("Каждый элемент UI (обложка, кнопки, вкладки, сайдбар, карточки) прыгает и пульсирует отдельно на своей частоте спектра", "Every UI element (cover art, buttons, tabs, sidebar icons, cards) hops and bounces independently to its own FFT frequency band"));
         ToggleRow("wheelvol", L.T("Колёсико мыши меняет громкость на видео", "Mouse wheel adjusts volume over video"), s.WheelVolumeOnVideo, v => s.WheelVolumeOnVideo = v,
             L.T("Выключено: прокрутка колёсика над видео просто скроллит страницу (а в Shorts листает ленту)", "Off: wheel over video scrolls the page normally (and switches Shorts in Shorts feed)"));
         ToggleRow("shiftframe", L.T("Shift + колёсико: покадровая прокрутка видео", "Shift + wheel: frame-by-frame scrubbing"), s.ShiftWheelFrameStep, v => s.ShiftWheelFrameStep = v,
@@ -956,7 +956,7 @@ public sealed class SettingsPage : IPage
         }
 
         ToggleRow("audio8d", L.T("8D Аудио и реверберация в плеере", "8D Audio & Reverb in player"), s.PlayerAudio8D, v => { s.PlayerAudio8D = v; BgPlayers.ApplyAudioDsp(); }, L.T("Плавный 8D-эффект вращения звука и глубокая реверберация на видео и музыку (включается на лету)", "Smooth 8D spatial orbit and rich hall reverb on video & music (toggles live)"));
-        ToggleRow("audioonly", L.T("Режим «Только звук» (волны вместо видео, 0% GPU)", "Audio-only mode (visualizer, 0% GPU)"), s.AudioOnlyMode, v => { s.AudioOnlyMode = v; MpvPlayer.Instance.SetVideoEnabled(!v); }, L.T("Полностью отключает декодирование видео и показывает живые аудиоволны поверх обложки", "Disables video decoding completely and renders a live audio visualizer over cover art"));
+        ToggleRow("audioonly", L.T("Режим «Только звук» (волны вместо видео, 0% GPU)", "Audio-only mode (visualizer, 0% GPU)"), s.AudioOnlyMode, _ => Shell.ToggleAudioOnlyMode(), L.T("Полностью отключает декодирование видео и показывает живые аудиоволны поверх обложки", "Disables video decoding completely and renders a live audio visualizer over cover art"));
         ToggleRow("suspvid", L.T("Не декодировать видео при сворачивании и в фоне", "Suspend video decode when minimized/hidden"), s.AutoSuspendVideoWhenHidden, v => s.AutoSuspendVideoWhenHidden = v, L.T("Когда окно свёрнуто или открыта другая вкладка, видео не рендерится (0% GPU), звук продолжает играть", "Suspends video decoding (0% GPU) when minimized or on another tab while audio continues"));
         ToggleRow("shov", L.T("Подпись Shorts поверх видео при наведении", "Shorts title overlay on hover"), s.ShortsInfoOverlay, v => { s.ShortsInfoOverlay = v; Shell.PushPlayerState(); }, L.T("Включено: когда панель Shorts скрыта, канал и название появляются поверх видео при наведении.", "On: when the Shorts side panel is hidden, channel & title appear over the video on hover."));
         ToggleRow("sb", "SponsorBlock", s.SponsorBlock, v => s.SponsorBlock = v, L.T("Пропускать рекламные вставки авторов (выделяются жирной зелёной полосой на таймлайне)", "Auto-skip creator sponsor segments (highlighted in green on the timeline)"));

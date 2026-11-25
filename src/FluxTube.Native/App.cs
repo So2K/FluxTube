@@ -77,6 +77,7 @@ public static unsafe class App
 
     private static int Run(string[] args)
     {
+        if (args.Contains("--test-loopback")) return AudioAnalyzer.SelfTestProcessLoopback();
         Mute = args.Contains("--mute");
         NoActivate = args.Contains("--noactivate");
         Bench = args.Contains("--bench");
@@ -438,7 +439,10 @@ public static unsafe class App
                         Shell.StepVideoFrame(delta);
                         return 0;
                     }
-                    if (Shell.OverVideo(UI.MX, UI.MY) && AppSettings.Current.WheelVolumeOnVideo) Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
+                    if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp && Shell.OverVideo(UI.MX, UI.MY))
+                        sp.Step(delta > 0 ? -1 : 1);
+                    else if (Shell.OverVideo(UI.MX, UI.MY) && AppSettings.Current.WheelVolumeOnVideo && !Shell.AnyModalOpen)
+                        Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
                     else { UI.Wheel += delta; Invalidate(); }
                     return 0;
                 }
@@ -655,9 +659,7 @@ internal static unsafe class VideoHost
                 }
                 if (W.GetFocus() != App.Hwnd) W.SetFocus(App.Hwnd);
                 Suggest.Hide();
-                if (ThemeCodeEditor.Open) return 0;
-                if (Menus.Open) { Menus.Close(); return 0; }
-                if (AccountMenu.Open) { AccountMenu.Close(); return 0; } // a click outside the menu only closes it
+                if (Shell.CloseModalOnOutsideClick()) return 0;
                 _lmbSent = true;
                 Cmd("keydown", "MBTN_LEFT");
                 return 0;
@@ -672,13 +674,15 @@ internal static unsafe class VideoHost
                 if (_lmbSent) { _lmbSent = false; Cmd("keyup", "MBTN_LEFT"); }
                 return 0;
             case W.WM_RBUTTONDOWN:
-                if (Menus.Open) { Menus.Close(); return 0; }
+                if (Shell.CloseModalOnOutsideClick()) return 0;
                 Cmd("keydown", "MBTN_RIGHT");
                 return 0;
             case W.WM_RBUTTONUP:
+                if (Shell.AnyModalOpen) return 0;
                 Cmd("keyup", "MBTN_RIGHT");
                 return 0;
             case W.WM_MBUTTONUP:
+                if (Shell.AnyModalOpen) return 0;
                 Cmd("keypress", "MBTN_MID");
                 return 0;
             case W.WM_XBUTTONUP:
@@ -690,6 +694,7 @@ internal static unsafe class VideoHost
             }
             case W.WM_MOUSEWHEEL:
             {
+                if (Shell.AnyModalOpen) return 0;
                 var delta = (short)((w >> 16) & 0xFFFF) / 120f;
                 if (W.AsyncKeyDown(W.VK_CONTROL))
                 {
@@ -702,11 +707,10 @@ internal static unsafe class VideoHost
                     Shell.StepVideoFrame(delta);
                     return 0;
                 }
-                // Optional wheel-volume over video: when disabled, wheel switches Shorts or scrolls the Watch page naturally!
+                // In Shorts, mouse wheel over the vertical video ALWAYS flips Shorts!
                 if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp)
                 {
-                    if (AppSettings.Current.WheelVolumeOnVideo) sp.AdjustVolume(delta > 0 ? 5 : -5);
-                    else sp.Step(delta > 0 ? -1 : 1);
+                    sp.Step(delta > 0 ? -1 : 1);
                     return 0;
                 }
                 if (AppSettings.Current.WheelVolumeOnVideo)

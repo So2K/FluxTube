@@ -469,15 +469,21 @@ public sealed class StreamProxy
                             break;
                         }
                         if (n <= 0) break;
-                        cache?.Write(pos, buf.AsSpan(0, n));
+                        try { cache?.Write(pos, buf.AsSpan(0, n)); }
+                        catch (IOException) { /* disk full or evicted: keep streaming cleanly without caching */ }
                         pos += n;
-                        // Downstream write to mpv: ONLY this IOException means mpv closed the connection (seek/stop)
-                        await net.WriteAsync(buf.AsMemory(0, n), cts.Token);
+                        // Downstream write to mpv: IOException here means mpv closed the socket (seek/stop/switch Short) —
+                        // exit immediately instead of falling into the upstream retry catch!
+                        try { await net.WriteAsync(buf.AsMemory(0, n), cts.Token); }
+                        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
+                        {
+                            return;
+                        }
                     }
                 }
                 catch (Exception ex) when (!cts.IsCancellationRequested && ex is HttpRequestException or IOException or SocketException or TimeoutException)
                 {
-                    Paths.Log($"proxy {key}: upstream error at {pos}, retrying ({ex.Message})");
+                    if (upstreamErrors < 3) Paths.Log($"proxy {key}: upstream error at {pos}, retrying ({ex.Message})");
                     upstreamFailed = true;
                 }
 

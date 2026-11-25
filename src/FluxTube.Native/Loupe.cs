@@ -157,7 +157,7 @@ internal static unsafe partial class Loupe
         vidRc = default;
         srcWin = Pip.Active && Pip.Hwnd != 0 ? Pip.Hwnd : App.Hwnd;
         if (srcWin == 0 || App.VideoHwnd == 0 || !W.IsWindowVisible(App.VideoHwnd)) return false;
-        if (Pip.Locked || Menus.Open || AccountMenu.Open) return false;
+        if (Pip.Locked || Shell.AnyModalOpen) return false;
         if (!W.AsyncKeyDown(W.VK_CONTROL)) return false;
         W.POINT p;
         if (!W.GetCursorPos(&p)) return false;
@@ -346,7 +346,7 @@ internal static unsafe partial class Loupe
                 W.SetBkMode(dc, 1 /*TRANSPARENT*/);
                 W.SetTextColor(dc, W.Rgb(215, 215, 224));
                 var oldF = W.SelectObject(dc, _font);
-                W.DrawTextW(dc, $"{_zoomTarget:0.0}×  ·  Ctrl + колесо", -1, &tr, 0x00000025 /*DT_CENTER|DT_VCENTER|DT_SINGLELINE*/);
+                W.DrawTextW(dc, $"{_zoomTarget:0.0}×  ·  {FluxTube.Services.L.T("Ctrl + колесо", "Ctrl + wheel")}", -1, &tr, 0x00000025 /*DT_CENTER|DT_VCENTER|DT_SINGLELINE*/);
                 W.SelectObject(dc, oldF);
 
                 W.EndPaint(h, &ps);
