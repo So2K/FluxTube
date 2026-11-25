@@ -335,7 +335,7 @@ public sealed class SettingsPage : IPage
         var r = new R(_x, _y, _w, h);
         if (Visible(_y, h))
         {
-            Gfx.Fill(r, Th.A(0.063f), 10);
+            Gfx.FillFrosted(r, Th.Card, 10, opacity: 0.46f, border: true);
             float maxTextW = MathF.Max(120, _w - reserveRight);
             var t = Gfx.Draw(label, _x + 16, _y + (hint == null ? (h - 19) / 2 : 8), 14, Th.Text, 400, maxTextW);
             if (hint != null) Gfx.Draw(hint, _x + 16, _y + 8 + t.H + 1, 12, Th.Sub, 400, maxTextW);
@@ -384,9 +384,13 @@ public sealed class SettingsPage : IPage
         var accTitle = logged
             ? (curAcc is { Name.Length: > 0 } ? $"Активный аккаунт: {curAcc.Name}" : "Вы вошли в YouTube")
             : "Вы не вошли в аккаунт";
+        var addLabel = logged ? $"Добавить ({BrowserLogin.DefaultBrowserName})" : $"Войти через {BrowserLogin.DefaultBrowserName}";
+        float accReserve = 36 + UI.PillWidth(logged ? Th.Add : Th.Globe, addLabel)
+            + (logged ? UI.PillWidth(null, "Выйти") + 8 : 0)
+            + (AccountMenu.Saved.Count > 0 ? UI.PillWidth(Th.Account, $"Аккаунты ({AccountMenu.Saved.Count})") + 8 : 0);
         var acc = Row(accTitle,
             logged ? $"Вход через {BrowserLogin.DefaultBrowserName}: добавляйте несколько аккаунтов и переключайте их в 1 клик."
-                   : $"Войдите в Google через {BrowserLogin.DefaultBrowserName} — подписки, история и рекомендации подтянутся автоматически.", 58, 430);
+                   : $"Войдите в Google через {BrowserLogin.DefaultBrowserName} — подписки, история и рекомендации подтянутся автоматически.", 58, accReserve);
         if (Visible(acc.Y, acc.H))
         {
             float bx = acc.Right - 14;
@@ -396,7 +400,6 @@ public sealed class SettingsPage : IPage
                 if (UI.Pill(UI.Id("set:logout"), bx, acc.Y + 12, 34, null, "Выйти", out _)) App.Post(Shell.Logout);
                 bx -= 8;
             }
-            var addLabel = logged ? $"Добавить ({BrowserLogin.DefaultBrowserName})" : $"Войти через {BrowserLogin.DefaultBrowserName}";
             var aw = UI.PillWidth(logged ? Th.Add : Th.Globe, addLabel); bx -= aw;
             if (UI.Pill(UI.Id("set:login"), bx, acc.Y + 12, 34, logged ? Th.Add : Th.Globe, addLabel, out _, accent: true))
                 App.Post(Shell.LoginNewAccount);

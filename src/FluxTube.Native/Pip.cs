@@ -16,7 +16,15 @@ public static unsafe class Pip
 {
     public static bool Active { get; private set; }
     public static bool Locked { get; private set; }
+    public static string? PinnedVideoId { get; private set; }
+    public static string? PinnedTabKey { get; private set; }
     public static nint Hwnd => _win;
+
+    public static void UpdatePinned(string? videoId, string? tabKey)
+    {
+        PinnedVideoId = videoId;
+        PinnedTabKey = tabKey;
+    }
 
     private static nint _win, _bar, _barFont, _barBgBr, _barHotBr;
     private static bool _registered, _lastPaused, _fastTimer;
@@ -75,6 +83,8 @@ public static unsafe class Pip
         int round = 2; // DWMWCP_ROUND
         W.DwmSetWindowAttribute(_win, 33, &round, 4);
         Active = true;
+        PinnedVideoId = PlaybackTracker.Instance.Current?.VideoId;
+        PinnedTabKey = Shell.MainTabKey;
         W.SetParent(App.VideoHwnd, _win);
         Layout();
         W.ShowWindow(_win, 4 /*SW_SHOWNOACTIVATE*/);
@@ -89,6 +99,8 @@ public static unsafe class Pip
         Loupe.Hide();
         SetLocked(false);
         Active = false;
+        PinnedVideoId = null;
+        PinnedTabKey = null;
         W.ShowWindow(App.VideoHwnd, W.SW_HIDE);
         W.SetParent(App.VideoHwnd, App.Hwnd);
         if (_win != 0)
@@ -103,13 +115,15 @@ public static unsafe class Pip
         App.Invalidate();
     }
 
-    /// <summary>Back into the app, on the video's own page, in front.</summary>
+    /// <summary>Back into the app, jumping cleanly to the pinned video's own tab without overwriting other tabs.</summary>
     public static void BackToApp()
     {
+        var tabKey = PinnedTabKey;
+        var vid = PinnedVideoId;
         Exit();
         if (W.IsIconic(App.Hwnd)) W.ShowWindow(App.Hwnd, 9 /*SW_RESTORE*/);
         W.SetForegroundWindow(App.Hwnd);
-        Shell.OpenCurrentVideo();
+        Shell.FocusVideoTab(tabKey, vid);
     }
 
     private static void Layout()

@@ -35,7 +35,7 @@ public sealed class StreamProxy
         public int HeadBytes;
         public byte[]? Head;       // only for streams that are not cached on disk
         public Task? HeadTask;
-        public long Chunk = 10 * 1024 * 1024;
+        public long Chunk = 3 * 1024 * 1024;
         public bool Fragile;       // no retries on refusal
         public int Retries = 3;    // 0 until a link from a quick request has proved itself on the first bytes
         // token-less link from the quick player request: serves the beginning of the stream at once, then answers 403
@@ -57,8 +57,9 @@ public sealed class StreamProxy
         {
             AutomaticDecompression = DecompressionMethods.None,
             MaxConnectionsPerServer = 16,
-            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(60),
-            ConnectTimeout = TimeSpan.FromSeconds(10),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
+            ConnectTimeout = TimeSpan.FromSeconds(6),
         };
         if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy)) { handler.Proxy = new WebProxy(AppSettings.Current.Proxy); handler.UseProxy = true; }
         _http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
@@ -266,23 +267,24 @@ public sealed class StreamProxy
         if (resp.Content.Headers.ContentRange?.Length is { } len) e.Length = len;
     }
 
-    /// <summary>Sends and waits for the response headers, 15 s at most (the body is read by the caller).</summary>
+    /// <summary>Sends and waits for the response headers, 10 s at most (the body is read by the caller).</summary>
     private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken ct)
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        limit.CancelAfter(15_000);
+        limit.CancelAfter(10_000);
         try { return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, limit.Token); }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new HttpRequestException("googlevideo did not answer"); }
     }
 
     /// <summary>
-    /// The link stopped working in the middle of a video (they live about six hours): ask for a new one for the same
-    /// formats. The answer lands in the same entries, so the stream carries on where it was.
+    /// The link stopped working or stalled in the middle of a video: ask for a fresh link for the same
+    /// formats (QuickStream first, yt-dlp Resolver fallback). The answer lands in the same entries, so the stream carries on seamlessly.
     /// </summary>
-    private static async Task<bool> RefreshLinkAsync(Entry e)
+    private static async Task<bool> RefreshLinkAsync(Entry e, bool force = false)
     {
         var dot = e.Key.IndexOf('.');
-        if (dot != 11 || DateTime.UtcNow - e.RefreshedAt < TimeSpan.FromMinutes(2)) return false;
+        var cooldown = force ? TimeSpan.FromSeconds(15) : TimeSpan.FromSeconds(30);
+        if (dot != 11 || DateTime.UtcNow - e.RefreshedAt < cooldown) return false;
         e.RefreshedAt = DateTime.UtcNow;
         var id = e.Key[..dot];
         if (Db.CacheVideo(id) is not { } known) return false;
@@ -290,14 +292,22 @@ public sealed class StreamProxy
         try
         {
             QuickStream.Forget(id);
-            var s = await QuickStream.GetExactAsync(id, known.Vitag, known.Aitag).WaitAsync(TimeSpan.FromSeconds(15));
-            Paths.Log($"proxy {e.Key}: link expired, {(s != null && e.Url != old ? "got a new one" : "no new link")}");
-            return s != null && e.Url != old;
+            StreamInfo? s = null;
+            try { s = await QuickStream.GetExactAsync(id, known.Vitag, known.Aitag).WaitAsync(TimeSpan.FromSeconds(10)); }
+            catch { }
+            if (s == null || e.Url == old)
+            {
+                try { s = await Resolver.Instance.GetExactAsync(id, known.Vitag, known.Aitag).WaitAsync(TimeSpan.FromSeconds(18)); }
+                catch { }
+            }
+            bool got = s != null && e.Url != old;
+            Paths.Log($"proxy {e.Key}: link refreshed -> {(got ? "new link ok" : "no new link")}");
+            return got;
         }
         catch (Exception ex) { Paths.Log($"proxy {e.Key}: link refresh failed: {ex.Message}"); return false; }
     }
 
-    private async Task<HttpResponseMessage> FetchAsync(Entry e, long from, long to, CancellationToken ct, bool starterOnly = false, bool mayRefresh = false)
+    private async Task<HttpResponseMessage> FetchAsync(Entry e, long from, long to, CancellationToken ct, bool starterOnly = false, bool mayRefresh = false, bool forceNewConnection = false)
     {
         // until the proper link exists and is allowed to be used, the quick link serves the beginning
         if ((e.Url == null || DateTime.UtcNow < e.AvailableAt) && e.StarterUrl != null && !e.StarterDead)
@@ -320,16 +330,18 @@ public sealed class StreamProxy
             var req = new HttpRequestMessage(HttpMethod.Get, e.Url);
             foreach (var (k, v) in e.Headers) req.Headers.TryAddWithoutValidation(k, v);
             req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(from, to);
+            if (forceNewConnection || attempt > 0) req.Headers.ConnectionClose = true;
             var resp = await SendAsync(req, ct);
             if (resp.IsSuccessStatusCode) return resp;
             var code = (int)resp.StatusCode;
             resp.Dispose();
-            if (e.Fragile || attempt >= e.Retries || code is not (403 or 429 or 500 or 503))
+            if (e.Fragile || attempt >= e.Retries || code is not (403 or 404 or 410 or 429 or 500 or 502 or 503))
             {
-                if (code == 403 && mayRefresh && !e.Fragile && await RefreshLinkAsync(e)) { attempt = -1; continue; }
+                if (code is (403 or 404 or 410 or 429 or 503) && mayRefresh && !e.Fragile && await RefreshLinkAsync(e)) { attempt = -1; continue; }
                 throw new HttpRequestException($"googlevideo {code}");
             }
-            await Task.Delay(400 * (attempt + 1), ct);
+            if (code is (403 or 410) && mayRefresh && !e.Fragile && attempt == 1 && await RefreshLinkAsync(e)) { attempt = -1; continue; }
+            await Task.Delay(300 * (attempt + 1), ct);
         }
     }
 
@@ -409,6 +421,7 @@ public sealed class StreamProxy
 
             var first = true;
             var stalls = 0;
+            var upstreamErrors = 0;
             while (pos <= end)
             {
                 // 1. whatever the disk has
@@ -422,31 +435,62 @@ public sealed class StreamProxy
                     pos += n;
                     continue;
                 }
-                // 2. the network, in bounded chunks, up to where the disk takes over again; stored as it passes through
-                var size = first && pos == 0 ? Math.Min(e.Chunk, 2 * 1024 * 1024) : e.Chunk;
+                // 2. the network, in bounded 3 MB chunks (fast, resists mid-request DPI/ISP throttling); stored as it passes through
+                var size = first && pos == 0 ? Math.Min(e.Chunk, 1024 * 1024) : e.Chunk;
                 first = false;
                 var to = Math.Min(end, pos + size - 1);
                 if (cache != null) to = Math.Min(to, cache.NextStart(pos) - 1);
-                using var resp = await FetchAsync(e, pos, to, cts.Token, mayRefresh: true);
-                // an answer that ignores the range would put the wrong bytes at this position, in the file and in the player
-                if (resp.StatusCode != HttpStatusCode.PartialContent && pos != 0) throw new HttpRequestException("range ignored");
-                await using var body = await resp.Content.ReadAsStreamAsync(cts.Token);
+
                 var before = pos;
-                using var idle = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-                while (pos <= to)
+                bool upstreamFailed = false;
+                try
                 {
-                    int n;
-                    idle.CancelAfter(20_000);
-                    try { n = await body.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, to - pos + 1)), idle.Token); }
-                    catch (OperationCanceledException) when (!cts.IsCancellationRequested) { n = -1; }
-                    if (n == -1) break; // stalled: ask again from here
-                    if (n <= 0) break;
-                    cache?.Write(pos, buf.AsSpan(0, n));
-                    pos += n;
-                    await net.WriteAsync(buf.AsMemory(0, n), cts.Token);
+                    using var resp = await FetchAsync(e, pos, to, cts.Token, mayRefresh: true, forceNewConnection: upstreamErrors > 0);
+                    // an answer that ignores the range would put the wrong bytes at this position, in the file and in the player
+                    if (resp.StatusCode != HttpStatusCode.PartialContent && pos != 0) throw new HttpRequestException($"range ignored ({(int)resp.StatusCode})");
+                    await using var body = await resp.Content.ReadAsStreamAsync(cts.Token);
+                    using var idle = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                    while (pos <= to)
+                    {
+                        int n;
+                        idle.CancelAfter(6_000); // detect stalled upstream in 6s instead of 20s and reconnect on a fresh socket!
+                        try { n = await body.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, to - pos + 1)), idle.Token); }
+                        catch (OperationCanceledException) when (!cts.IsCancellationRequested) { upstreamFailed = true; break; }
+                        catch (Exception ex) when (ex is IOException or SocketException or HttpRequestException)
+                        {
+                            // Upstream TCP reset/drop MUST be retried here — never let it kill mpv's local socket!
+                            Paths.Log($"proxy {key}: upstream read reset at {pos}, retrying ({ex.Message})");
+                            upstreamFailed = true;
+                            break;
+                        }
+                        if (n <= 0) break;
+                        cache?.Write(pos, buf.AsSpan(0, n));
+                        pos += n;
+                        // Downstream write to mpv: ONLY this IOException means mpv closed the connection (seek/stop)
+                        await net.WriteAsync(buf.AsMemory(0, n), cts.Token);
+                    }
                 }
-                if (pos > before) stalls = 0;
-                else if (++stalls > 3) throw new HttpRequestException("upstream gives no data"); // no progress: do not spin
+                catch (Exception ex) when (!cts.IsCancellationRequested && ex is HttpRequestException or IOException or SocketException or TimeoutException)
+                {
+                    Paths.Log($"proxy {key}: upstream error at {pos}, retrying ({ex.Message})");
+                    upstreamFailed = true;
+                }
+
+                if (pos > before)
+                {
+                    stalls = 0;
+                    upstreamErrors = 0;
+                }
+                else
+                {
+                    upstreamErrors++;
+                    stalls++;
+                    if (stalls >= 2 && !e.Fragile)
+                        await RefreshLinkAsync(e, force: stalls >= 3);
+                    if (stalls > 6) throw new HttpRequestException("upstream gives no data after retries");
+                    if (upstreamFailed || stalls > 1)
+                        await Task.Delay(Math.Min(1500, 250 * stalls), cts.Token);
+                }
             }
         }
         catch (Exception ex) when (ex is IOException or OperationCanceledException or SocketException or ObjectDisposedException)

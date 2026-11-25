@@ -1155,6 +1155,12 @@ public sealed class WatchPage : IPage
     {
         bool startPaused = _startPaused;
         _startPaused = false;
+        // Never hijack an active Picture-in-Picture window when browsing or switching to another video tab!
+        if (Pip.Active && PlaybackTracker.Instance.Current?.VideoId != Video.VideoId)
+        {
+            if (_info == null && !_infoLoading) LoadInfo(bypassCache: false);
+            return;
+        }
         if (!Shell.CurrentTabOwnsMainPlayer || PlaybackTracker.Instance.Current?.VideoId != Video.VideoId || !MpvPlayer.Instance.HasMedia)
         {
             Shell.Play(Video, _source, startPaused);
@@ -1628,6 +1634,25 @@ public sealed class WatchPage : IPage
                 Gfx.Draw(msg, video.X + (video.W - msg.W) / 2, video.Y + video.H / 2 - 40, 0xFFFFFFFF);
                 var bw = UI.PillWidth(Th.Mini, "Вернуть сюда");
                 if (UI.Pill(UI.Id("pipback", _infoScroll), video.X + (video.W - bw) / 2, video.Y + video.H / 2, 38, Th.Mini, "Вернуть сюда", out _, accent: true)) App.Post(Pip.Exit);
+            }
+            else if (Pip.Active)
+            {
+                Gfx.Fill(video, 0xFF0A0A0C, 12);
+                var img = Images.Get(Video.Thumb720, 640, 360);
+                var pw = MathF.Min(video.W, video.H * 16 / 9);
+                var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
+                if (img != null) { Gfx.Image(img.Bmp!, pr, 0.38f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
+                var msg = Gfx.Text("В окне поверх всех играет другое видео", 17, 600);
+                Gfx.Draw(msg, video.X + (video.W - msg.W) / 2, video.Y + video.H / 2 - 48, 0xFFFFFFFF);
+                var b1w = UI.PillWidth(Th.Play, "Смотреть здесь");
+                var b2w = UI.PillWidth(Th.Mini, "Заменить в мини-окне");
+                float totalW = b1w + 10 + b2w;
+                float bx0 = video.X + (video.W - totalW) / 2;
+                float by0 = video.Y + video.H / 2 - 6;
+                if (UI.Pill(UI.Id("piphere", _infoScroll), bx0, by0, 38, Th.Play, "Смотреть здесь", out _, accent: true))
+                    App.Post(() => { Pip.Exit(); Shell.Play(Video, _source, startPaused: false, forceReplacePip: true); });
+                if (UI.Pill(UI.Id("pipswap", _infoScroll), bx0 + b1w + 10, by0, 38, Th.Mini, "Заменить в мини-окне", out _, Gfx.Fade(0xFF1E1E26, 0.90f), 0xFFFFFFFF))
+                    App.Post(() => Shell.Play(Video, _source, startPaused: false, forceReplacePip: true));
             }
             else if (!Shell.VideoShown(id))
             {

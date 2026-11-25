@@ -54,6 +54,7 @@ public sealed class PlaybackTracker
             _clickAt2 = _clickAt != 0 ? _clickAt : _clickAt2; _clickAt = 0;
         };
         _p.LoadFailed += OnLoadFailed;
+        _p.BufferingChanged += OnBufferingChanged;
         _p.PlaybackStarted += () =>
         {
             if (Current == null || _p.CurrentVideoId != Current.VideoId) return;
@@ -67,10 +68,34 @@ public sealed class PlaybackTracker
     public bool Retrying { get; private set; }
     private string? _retried;
     private long _retriedAt;
+    private int _retryCount;
+    private int _bufGen;
+
+    /// <summary>Watchdog: if mpv gets stuck in paused-for-cache for >10s while playing, seamlessly refresh links and resume at the exact second.</summary>
+    private void OnBufferingChanged(bool buffering)
+    {
+        var bg = Interlocked.Increment(ref _bufGen);
+        if (!buffering || IsLocal || Current == null || _p.Paused) return;
+        var gen = _gen;
+        var id = Current.VideoId;
+        var posAtStart = _timeValid ? _p.TimePos : _startPos;
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(10_000);
+            UiThread.Post(() =>
+            {
+                if (bg != Volatile.Read(ref _bufGen) || gen != _gen || Current?.VideoId != id || IsLocal) return;
+                if (!_p.Buffering || _p.Paused) return;
+                if (Math.Abs(_p.TimePos - posAtStart) > 0.35) return; // making progress
+                Paths.Log($"buffer stall {id} at {_p.TimePos:0.0}s: forcing fresh stream recovery");
+                OnLoadFailed("prolonged buffer stall");
+            });
+        });
+    }
 
     /// <summary>
-    /// The player could not make sense of what we fed it (a half-written cache file, a link that died mid-stream).
-    /// Forget everything known about this video and start it again from fresh links; if that fails too, say so.
+    /// The player could not make sense of what we fed it (a half-written cache file, a link that died mid-stream, or a prolonged stall).
+    /// Forget everything known about this video and start it again from fresh links at the exact playback position.
     /// </summary>
     private void OnLoadFailed(string msg)
     {
@@ -78,12 +103,22 @@ public sealed class PlaybackTracker
         if (v == null || IsLocal) return;
         var id = v.VideoId;
         Paths.Log($"load failed {id}: {msg}");
-        // one retry per failure; a second failure right after it is reported, a failure some other day is retried again
-        if (_retried == id && Environment.TickCount64 - _retriedAt < 60_000) { Retrying = false; return; }
-        _retried = id;
-        _retriedAt = Environment.TickCount64;
+        var now = Environment.TickCount64;
+        if (_retried == id)
+        {
+            // Allow up to 3 automatic recoveries per video (spaced >= 18s apart) before giving up
+            if (now - _retriedAt < 18_000 || _retryCount >= 3) { Retrying = false; return; }
+            _retryCount++;
+        }
+        else
+        {
+            _retried = id;
+            _retryCount = 1;
+        }
+        _retriedAt = now;
         Retrying = true;
         var src = CurrentSource ?? "home";
+        var resumeAt = _timeValid && _p.TimePos > 0.5 ? _p.TimePos : (_lastPos > 0.5 ? _lastPos : (double?)null);
         var gen = _gen;
         ThreadPool.QueueUserWorkItem(_ =>
         {
@@ -94,8 +129,8 @@ public sealed class PlaybackTracker
             UiThread.Post(() =>
             {
                 if (gen != _gen) return;
-                Paths.Log($"retrying {id} with fresh links");
-                Play(v, src);
+                Paths.Log($"retrying {id} with fresh links at {resumeAt ?? 0:0.0}s (attempt {_retryCount})");
+                Play(v, src, resumeAt);
             });
         });
     }

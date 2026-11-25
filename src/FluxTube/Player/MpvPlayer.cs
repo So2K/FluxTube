@@ -26,6 +26,7 @@ public sealed class MpvPlayer : IDisposable
     public double TimePos { get; private set; }
     public double Duration { get; private set; }
     public bool Paused { get; private set; }
+    public bool Buffering { get; private set; }
     public bool Fullscreen { get; private set; }
     public double Volume { get; private set; } = AppSettings.Current.Volume;
     public bool Muted { get; private set; }
@@ -37,6 +38,7 @@ public sealed class MpvPlayer : IDisposable
     public event Action<double>? TimeChanged;
     public event Action<double>? DurationChanged;
     public event Action<bool>? PauseChanged;
+    public event Action<bool>? BufferingChanged;
     public event Action<bool>? FullscreenChanged;
     public event Action<double>? VolumeChanged;
     public event Action<bool>? MuteChanged;
@@ -89,8 +91,8 @@ public sealed class MpvPlayer : IDisposable
             Opt(ctx, "background-color", "#000000");
             Opt(ctx, "osd-font", "Segoe UI");
             Opt(ctx, "osd-font-size", "28");
-            Opt(ctx, "demuxer-max-bytes", "12MiB");
-            Opt(ctx, "demuxer-max-back-bytes", "4MiB");
+            Opt(ctx, "demuxer-max-bytes", "32MiB");
+            Opt(ctx, "demuxer-max-back-bytes", "8MiB");
             Opt(ctx, "cache", "yes");
             Opt(ctx, "demuxer-seekable-cache", "no");
             Opt(ctx, "volume-max", "150");
@@ -104,8 +106,9 @@ public sealed class MpvPlayer : IDisposable
             Opt(ctx, "script-opts", "ytdl_hook-ytdl_path=" + Paths.YtDlp.Replace('\\', '/') + (ScriptOpts.Length > 0 ? "," + ScriptOpts : ""));
             Opt(ctx, "cache-pause-initial", "no");
             Opt(ctx, "cache-pause-wait", "0.4");
-            Opt(ctx, "demuxer-readahead-secs", "20");
+            Opt(ctx, "demuxer-readahead-secs", "45");
             Opt(ctx, "network-timeout", "15");
+            Opt(ctx, "stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=2");
             Opt(ctx, "hr-seek", "yes");
             Opt(ctx, "vd-lavc-threads", "6");
             Opt(ctx, "ad-lavc-threads", "1");
@@ -123,6 +126,7 @@ public sealed class MpvPlayer : IDisposable
             mpv_observe_property(ctx, 6, "volume", Format.Double);
             mpv_observe_property(ctx, 7, "mute", Format.Flag);
             mpv_observe_property(ctx, 8, "speed", Format.Double);
+            mpv_observe_property(ctx, 9, "paused-for-cache", Format.Flag);
 
             // Publish _ctx only after full initialization so other threads never touch an uninitialized handle
             Volatile.Write(ref _ctx, ctx);
@@ -464,6 +468,17 @@ public sealed class MpvPlayer : IDisposable
                             Speed = v;
                             if (speedSeen) Ui(() => SpeedChanged?.Invoke(v));
                             speedSeen = true;
+                            break;
+                        }
+                        case 9:
+                        {
+                            var v = Marshal.ReadInt32(p.data) != 0;
+                            if (v != Buffering)
+                            {
+                                Buffering = v;
+                                var gen = Volatile.Read(ref _loadGen);
+                                Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) BufferingChanged?.Invoke(v); });
+                            }
                             break;
                         }
                     }

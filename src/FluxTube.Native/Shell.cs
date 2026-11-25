@@ -59,7 +59,11 @@ public static class Shell
     private static bool _wasLoggedIn;
     private static bool _awaitingLogin;
     private static long _helperExitedAt;
-    private static long _lastVolSfxAt, _volSaveDueAt;
+    private static long _lastVolSfxAt, _volSaveDueAt, _suppressVolSfxUntil;
+    private static bool _userMuted, _handoffMute;
+    public static bool UserMuted => _userMuted;
+    public static string? MainTabKey => _mainTabKey;
+    public static string? ActiveTabKey => _tab >= 0 && _tab < _tabs.Count ? _tabs[_tab].Key : null;
     private static string[] _args = [];
     private static int _benchStep = -1;
     private static double _testNextAt = -1, _testClickAt = -1;
@@ -80,6 +84,8 @@ public static class Shell
         public string Sub = "";
         public bool KeepInBg = true;
         public bool StartPaused;
+        public int CustomVolume = -1;
+        public bool CustomMuted;
         public double Position;
         public readonly string Key = Guid.NewGuid().ToString("N");
         public string PlayKey => Key + "|" + Arg;
@@ -263,6 +269,7 @@ public static class Shell
     /// </summary>
     private static void MaybeHandoffToBg(string newVideoId)
     {
+        if (Pip.Active) return;
         var cur = T.Current;
         if (cur == null || cur.VideoId == newVideoId || !P.HasMedia || T.CurrentSource == "shorts") return;
         var pos = CurrentLivePos();
@@ -280,7 +287,16 @@ public static class Shell
         }
         if (!allowBg) return;
         var owner = _tabs.FirstOrDefault(t => t.Key == _mainTabKey);
-        if (owner?.Kind == "video" && owner.Arg == cur.VideoId) BgPlayers.Play(owner.PlayKey, pos);
+        if (owner?.Kind == "video" && owner.Arg == cur.VideoId)
+        {
+            int handoffVol = owner.CustomVolume >= 0 ? owner.CustomVolume : Math.Clamp((int)Math.Round(P.Volume), 0, 150);
+            bool handoffMuted = App.Mute || _userMuted || owner.CustomMuted;
+            // Silence main player immediately before spawning BgPlayer so both never overlap (+6 dB spike eliminated)
+            _handoffMute = true;
+            P.Command("set", "mute", "yes");
+            P.SetPause(true);
+            BgPlayers.Play(owner.PlayKey, pos, handoffVol, handoffMuted);
+        }
     }
 
     public static void GoTab(int i)
@@ -289,7 +305,8 @@ public static class Shell
         Sfx.Tab();
         var target = _tabs[i];
         // Save exact live position of the tab we are leaving, and if it is playing + we're moving to another video tab, hand it off to BgPlayers!
-        if (_tab >= 0 && _tab < _tabs.Count)
+        // When PiP is active, leave the pinned PiP video completely untouched in its floating window.
+        if (!Pip.Active && _tab >= 0 && _tab < _tabs.Count)
         {
             var prev = _tabs[_tab];
             if (prev.Kind == "video" && _mainTabKey == prev.Key && T.Current?.VideoId == prev.Arg && P.HasMedia)
@@ -299,11 +316,18 @@ public static class Shell
                 prev.StartPaused = P.Paused;
                 SaveTabPos(prev.Arg, pos);
                 if (target.Kind == "video" && target.Key != prev.Key && !P.Paused && prev.KeepInBg && !BgPlayers.Has(prev.PlayKey))
-                    BgPlayers.Play(prev.PlayKey, pos);
+                {
+                    int handoffVol = prev.CustomVolume >= 0 ? prev.CustomVolume : Math.Clamp((int)Math.Round(P.Volume), 0, 150);
+                    bool handoffMuted = App.Mute || _userMuted || prev.CustomMuted;
+                    _handoffMute = true;
+                    P.Command("set", "mute", "yes");
+                    P.SetPause(true);
+                    BgPlayers.Play(prev.PlayKey, pos, handoffVol, handoffMuted);
+                }
             }
         }
-        // If target video tab is currently playing in background, capture its exact live position before switching
-        if (target.Kind == "video" && BgPlayers.Has(target.PlayKey))
+        // If target video tab is currently playing in background, capture its exact live position & audio state before switching
+        if (!Pip.Active && target.Kind == "video" && BgPlayers.Has(target.PlayKey))
         {
             var pos = BgPlayers.GetTimePos(target.PlayKey);
             target.Position = pos;
@@ -333,6 +357,7 @@ public static class Shell
             // If this closed tab was the last owner of the main player's video, stop main player cleanly (no ghost mini-player!)
             if (_mainTabKey == removed.Key && T.CurrentSource != "shorts")
             {
+                if (Pip.Active) Pip.Exit();
                 T.Stop();
                 _mainTabKey = null;
                 VideoReady = false;
@@ -570,14 +595,17 @@ public static class Shell
                 {
                     var nv = Math.Clamp((int)Math.Round(P.Volume) + delta, 0, 150);
                     AppSettings.Current.Volume = nv;
+                    t.CustomVolume = -1;
                     _volSaveDueAt = UI.Now + 450;
+                    _suppressVolSfxUntil = UI.Now + 260;
                     P.SetVolumeSmooth(nv);
                     PlayVolumeSfx(nv);
                 }
                 else if (isBg)
                 {
                     BgPlayers.AdjustVolume(t.PlayKey, delta);
-                    PlayVolumeSfx(BgPlayers.GetVolume(t.PlayKey));
+                    t.CustomVolume = BgPlayers.GetVolume(t.PlayKey);
+                    PlayVolumeSfx(t.CustomVolume);
                 }
             }
 
@@ -601,7 +629,9 @@ public static class Shell
                     if (!_draggingTab && !droppedDragThisFrame && UI.IconButton(UI.Id(id, 2), iconR, glyph, 10, col))
                     {
                         btnHandled = true;
-                        deferred ??= active && isMainPlaying ? P.TogglePause : () => GoTab(tabIdx);
+                        if (isMainPlaying) deferred ??= P.TogglePause;
+                        else if (isBg) deferred ??= () => { BgPlayers.TogglePause(t.PlayKey); t.StartPaused = BgPlayers.IsPaused(t.PlayKey); };
+                        else deferred ??= () => GoTab(tabIdx);
                     }
                     else if (_draggingTab || droppedDragThisFrame)
                     {
@@ -625,7 +655,7 @@ public static class Shell
                 if (!_draggingTab && !droppedDragThisFrame && UI.IconButton(UI.Id(id, 3), muteR, muted ? Th.Mute : Th.Volume, 10.5f, muted ? Th.Warn : Th.Brand))
                 {
                     btnHandled = true;
-                    deferred ??= () => BgPlayers.ToggleMute(t.PlayKey);
+                    deferred ??= () => { BgPlayers.ToggleMute(t.PlayKey); t.CustomMuted = BgPlayers.IsMuted(t.PlayKey); };
                 }
                 else if (_draggingTab || droppedDragThisFrame)
                 {
@@ -844,7 +874,9 @@ public static class Shell
         if (!P.IsReady) return;
         var nv = Math.Clamp((int)Math.Round(P.Volume) + delta, 0, 150);
         AppSettings.Current.Volume = nv;
+        if (_tab >= 0 && _tab < _tabs.Count && _tabs[_tab].Key == _mainTabKey) _tabs[_tab].CustomVolume = -1;
         _volSaveDueAt = Environment.TickCount64 + 450;
+        _suppressVolSfxUntil = Environment.TickCount64 + 260;
         P.SetVolumeSmooth(nv);
         PlayVolumeSfx(nv);
         App.Invalidate();
@@ -870,21 +902,31 @@ public static class Shell
         Suggest.Chosen = s => { _search.Text = s; Submit(s); };
 
         Downloader.Instance.Init();
+        _userMuted = App.Mute;
         P.FullscreenChanged += SetFullscreen;
         P.PlaybackStarted += () => { VideoReady = true; PushPlayerState(); };
         P.Message += OnPlayerMessage;
         P.VolumeChanged += v =>
         {
             var iv = Math.Clamp((int)Math.Round(v), 0, 150);
-            if (AppSettings.Current.Volume != iv)
+            if (Environment.TickCount64 >= _suppressVolSfxUntil)
             {
-                AppSettings.Current.Volume = iv;
-                _volSaveDueAt = Environment.TickCount64 + 500;
+                if (AppSettings.Current.Volume != iv)
+                {
+                    AppSettings.Current.Volume = iv;
+                    _volSaveDueAt = Environment.TickCount64 + 500;
+                }
+                PlayVolumeSfx(v);
             }
-            PlayVolumeSfx(v);
             App.Invalidate();
         };
-        P.MuteChanged += m => { Sfx.Toggle(!m); App.Invalidate(); };
+        P.MuteChanged += m =>
+        {
+            if (_handoffMute) return;
+            _userMuted = m;
+            Sfx.Toggle(!m);
+            App.Invalidate();
+        };
         T.PlaybackUnavailable += msg => Toast(msg, Th.Brand, 9000);
         T.VerificationRequired += VerifyYouTube;
         P.LoadFailed += msg =>
@@ -921,7 +963,11 @@ public static class Shell
             _pendingBgVideoId = null;
             var live = BgPlayers.Stop(id, saveToDb: false);
             if (live > 0.3 && Math.Abs(live - P.TimePos) > 0.2) P.SeekAbsolute(live);
-            P.Command("set", "mute", App.Mute ? "yes" : "no");
+            var activeTab = _tab >= 0 && _tab < _tabs.Count ? _tabs[_tab] : null;
+            bool wantMute = App.Mute || _userMuted || (activeTab is { CustomMuted: true });
+            _handoffMute = true;
+            P.Command("set", "mute", wantMute ? "yes" : "no");
+            App.After(120, () => _handoffMute = false);
         };
         _ = Task.Run(YtDlp.UpdateIfStaleAsync);
         _cookieStamp = CookieStamp();
@@ -1132,8 +1178,10 @@ public static class Shell
         catch (Exception e) { Paths.Log("mpv init: " + e); }
     });
 
-    public static void Play(VideoItem v, string source, bool startPaused = false)
+    public static void Play(VideoItem v, string source, bool startPaused = false, bool forceReplacePip = false)
     {
+        // Never silently hijack an active Picture-in-Picture window when user switches tabs or opens another video!
+        if (Pip.Active && !forceReplacePip && T.Current?.VideoId != v.VideoId) return;
         CancelSpace2x();
         MaybeHandoffToBg(v.VideoId);
         double? exactStart = null;
@@ -1165,10 +1213,30 @@ public static class Shell
         {
             if (reqGen != _playReqGen || !P.IsReady) return;
             _mainTabKey = tab?.Key;
+            if (Pip.Active && forceReplacePip) Pip.UpdatePinned(v.VideoId, tab?.Key);
             _pendingBgHandoff = fromBackground ? playKey : null;
             _pendingBgVideoId = fromBackground ? v.VideoId : null;
-            if (fromBackground) P.Command("set", "mute", "yes");
-            else P.Command("set", "mute", App.Mute ? "yes" : "no");
+
+            // Keep exact volume consistent across tab switches (zero jump, zero bogus SFX!)
+            int wantVol = tab is { CustomVolume: >= 0 } ? tab.CustomVolume : Math.Clamp(AppSettings.Current.Volume, 0, 150);
+            if (Math.Abs(P.Volume - wantVol) > 0.5)
+            {
+                _suppressVolSfxUntil = Environment.TickCount64 + 350;
+                P.SetVolumeSmooth(wantVol, 0);
+            }
+
+            if (fromBackground)
+            {
+                _handoffMute = true;
+                P.Command("set", "mute", "yes");
+            }
+            else
+            {
+                bool wantMute = App.Mute || _userMuted || (tab is { CustomMuted: true });
+                _handoffMute = true;
+                P.Command("set", "mute", wantMute ? "yes" : "no");
+                App.After(120, () => _handoffMute = false);
+            }
             if (v.IsShort && source == "shorts") P.Command("set", "loop-file", "inf");
             else if (T.Current?.VideoId != v.VideoId || T.CurrentSource == "shorts") P.Command("set", "loop-file", "no");
             T.Play(v, source, exactStart, startPaused);
@@ -1826,7 +1894,7 @@ public static class Shell
 
         var thumb = new R(r.X + 14, r.Y + 9, 78, 44);
         Cards.Thumb(thumb, cur, false, 7, badge: false, behind: Th.Panel);
-        if (UI.Click(UI.Id("np:thumb"), thumb)) App.Post(() => OpenVideo(cur, T.CurrentSource ?? "home"));
+        if (UI.Click(UI.Id("np:thumb"), thumb)) App.Post(OpenCurrentVideo);
 
         // Right controls: optional inline volume slider + transport buttons
         bool showVol = r.W > 740;
@@ -1839,7 +1907,7 @@ public static class Shell
         var titleRun = Gfx.Text(titleText, 14, 600, MathF.Max(40, tw));
         var titleR = new R(tx, r.Y + 8, MathF.Min(titleRun.W, MathF.Max(40, tw)), titleRun.H + 2);
         Gfx.Draw(titleRun, titleR.X, titleR.Y, UI.Hover(titleR) ? Th.Brand : Th.Text);
-        if (UI.Click(UI.Id("np:title"), titleR)) App.Post(() => OpenVideo(cur, T.CurrentSource ?? "home"));
+        if (UI.Click(UI.Id("np:title"), titleR)) App.Post(OpenCurrentVideo);
 
         var d = P.Duration;
         var shownPos = _npDragSeek ? _npDragSeekTarget : P.TimePos;
@@ -1921,8 +1989,8 @@ public static class Shell
         if (UI.IconButton(UI.Id("np:b"), new R(bx, by, 36, 36), Th.Rewind)) P.Command("seek", "-10");
         if (UI.IconButton(UI.Id("np:p"), new R(bx + 40, by, 36, 36), P.Paused ? Th.Play : Th.Pause)) P.TogglePause();
         if (UI.IconButton(UI.Id("np:f"), new R(bx + 80, by, 36, 36), Th.Forward)) P.Command("seek", "10");
-        if (UI.IconButton(UI.Id("np:o"), new R(bx + 120, by, 36, 36), Th.Expand)) App.Post(() => OpenVideo(cur, T.CurrentSource ?? "home"));
-        if (UI.IconButton(UI.Id("np:x"), new R(bx + 160, by, 36, 36), Th.Close)) App.Post(() => { T.Stop(); VideoReady = false; });
+        if (UI.IconButton(UI.Id("np:o"), new R(bx + 120, by, 36, 36), Th.Expand)) App.Post(OpenCurrentVideo);
+        if (UI.IconButton(UI.Id("np:x"), new R(bx + 160, by, 36, 36), Th.Close)) App.Post(() => { if (Pip.Active) Pip.Exit(); T.Stop(); _mainTabKey = null; VideoReady = false; });
     }
 
     private static void DrawToast(float w, float bottom)
@@ -1967,9 +2035,30 @@ public static class Shell
         W.SetWindowRgn(App.VideoHwnd, 0, false);
     }
 
+    /// <summary>Switches straight to the existing tab that owns the video instead of overwriting the current tab.</summary>
+    public static void FocusVideoTab(string? tabKey, string? videoId)
+    {
+        if (tabKey != null)
+        {
+            int idx = _tabs.FindIndex(t => t.Key == tabKey);
+            if (idx >= 0) { GoTab(idx); return; }
+        }
+        if (videoId != null)
+        {
+            int idx = _tabs.FindIndex(t => t.Kind == "video" && t.Arg == videoId);
+            if (idx >= 0) { GoTab(idx); return; }
+        }
+        OpenCurrentVideo();
+    }
+
     public static void OpenCurrentVideo()
     {
-        if (T.Current is { } cur && !(_cur is WatchPage wp && wp.Video.VideoId == cur.VideoId)) OpenVideo(cur, T.CurrentSource ?? "home");
+        if (T.Current is not { } cur) return;
+        if (_cur is WatchPage wp && wp.Video.VideoId == cur.VideoId) return;
+        int ownerIdx = _mainTabKey != null ? _tabs.FindIndex(t => t.Key == _mainTabKey) : -1;
+        if (ownerIdx < 0) ownerIdx = _tabs.FindIndex(t => t.Kind == "video" && t.Arg == cur.VideoId);
+        if (ownerIdx >= 0) { GoTab(ownerIdx); return; }
+        OpenVideo(cur, T.CurrentSource ?? "home");
     }
 
     public static void AfterFrame()

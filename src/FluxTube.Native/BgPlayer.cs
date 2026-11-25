@@ -39,14 +39,14 @@ public static class BgPlayers
         public volatile int Volume = 100;
         public long PausedSince;
 
-        public Instance(string key, string videoId, double initialPos)
+        public Instance(string key, string videoId, double initialPos, int? volumeOverride = null, bool? muteOverride = null)
         {
             Key = key;
             VideoId = videoId;
             Volatile.Write(ref _timePos, initialPos);
-            var liveVol = MpvPlayer.Instance.IsReady ? MpvPlayer.Instance.Volume : AppSettings.Current.Volume;
-            Volume = Math.Clamp((int)Math.Round(liveVol), 0, 150);
-            _wantMuted = App.Mute || (MpvPlayer.Instance.IsReady && MpvPlayer.Instance.Muted);
+            var liveVol = volumeOverride ?? (MpvPlayer.Instance.IsReady ? (int)Math.Round(MpvPlayer.Instance.Volume) : AppSettings.Current.Volume);
+            Volume = Math.Clamp(liveVol, 0, 150);
+            _wantMuted = muteOverride ?? (App.Mute || Shell.UserMuted);
             Muted = _wantMuted;
         }
 
@@ -91,6 +91,7 @@ public static class BgPlayers
                 Opt(ctx, "demuxer-seekable-cache", "no");
                 Opt(ctx, "cache-pause-initial", "no");
                 Opt(ctx, "network-timeout", "15");
+                Opt(ctx, "stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=2");
                 Opt(ctx, "ad-lavc-threads", "1");
                 Opt(ctx, "volume-max", "150");
 
@@ -106,6 +107,8 @@ public static class BgPlayers
                 }
                 Opt(ctx, "volume", vol.ToString(CultureInfo.InvariantCulture));
                 if (muted) Opt(ctx, "mute", "yes");
+                if (AppSettings.Current.PlayerAudio8D)
+                    Opt(ctx, "af", "lavfi=[apulsator=hz=0.14:width=1:amount=0.85,aecho=0.82:0.84:48|82:0.28|0.18]");
                 Opt(ctx, "ytdl", "yes");
                 Opt(ctx, "ytdl-format", "ba/b");
                 Opt(ctx, "script-opts", "ytdl_hook-ytdl_path=" + Paths.YtDlp.Replace('\\', '/'));
@@ -339,13 +342,14 @@ public static class BgPlayers
     public static int ActiveCount => _all.Values.Count(i => !i.Paused);
 
     /// <summary>Starts playing videoId in a background audio player (or resumes it if already loaded).</summary>
-    public static void Play(string key, double? startOverride = null)
+    public static void Play(string key, double? startOverride = null, int? volumeOverride = null, bool? muteOverride = null)
     {
         var split = key.IndexOf('|');
         var videoId = split >= 0 ? key[(split + 1)..] : key;
         if (string.IsNullOrEmpty(videoId)) return;
         if (_all.TryGetValue(key, out var existing))
         {
+            if (volumeOverride.HasValue) existing.SetVolumeSmooth(volumeOverride.Value);
             existing.SetPause(false);
             App.Invalidate();
             return;
@@ -359,7 +363,7 @@ public static class BgPlayers
             if (victimKey != null) Stop(victimKey);
         }
         var start = startOverride ?? Shell.GetSavedTabPos(videoId) ?? Db.ResumePosition(videoId) ?? 0;
-        var inst = new Instance(key, videoId, start);
+        var inst = new Instance(key, videoId, start, volumeOverride, muteOverride);
         if (!_all.TryAdd(key, inst)) return;
         App.Invalidate();
         _ = Task.Run(async () =>
@@ -428,6 +432,7 @@ public static class BgPlayers
             });
         }
         inst.Cmd("set", "mute", "yes");
+        inst.Cmd("set", "pause", "yes");
         ThreadPool.QueueUserWorkItem(_ => inst.Dispose());
         App.Invalidate();
         return pos;
