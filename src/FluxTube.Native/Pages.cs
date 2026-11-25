@@ -1535,21 +1535,18 @@ public sealed class WatchPage : IPage
         bool overL = UI.Hover(likeR), overD = UI.Hover(disR);
         bool isLike = _rating == "LIKE", isDis = _rating == "DISLIKE";
 
-        // Elevated crisp glass/card capsule with subtle border and per-half active highlight
+        // Keep the rating control visually consistent with the neighboring action pills.
         Gfx.Fill(pill, Th.Card, h / 2);
         Gfx.PushClip(pill);
-        if (isLike) Gfx.Fill(likeR, Gfx.Fade(Th.Brand, 0.22f));
-        else if (overL) Gfx.Fill(likeR, Th.Hover);
-        if (isDis) Gfx.Fill(disR, Gfx.Fade(Th.Brand, 0.22f));
-        else if (overD) Gfx.Fill(disR, Th.Hover);
+        if (overL) Gfx.Fill(likeR, Th.Hover);
+        if (overD) Gfx.Fill(disR, Th.Hover);
         Gfx.PopClip();
-        Gfx.Stroke(pill, (isLike || isDis) ? Gfx.Fade(Th.Brand, 0.45f) : Th.Line, h / 2, 1f);
 
         uint likeC = isLike ? Th.Brand : Th.Text;
         uint disC = isDis ? Th.Brand : Th.Text;
         Gfx.Icon(Th.Like, new R(likeR.X + 14, y, 18, h), 15.5f, likeC);
         Gfx.Draw(lr, likeR.X + 39, y + (h - lr.H) / 2, likeC);
-        Gfx.Fill(new R(x + leftW, y + 8, 1, h - 16), Th.Line);
+        Gfx.Fill(new R(x + leftW, y + 9, 1, h - 18), Th.Line);
         Gfx.Icon(Th.Dislike, new R(disR.X + 12, y, 18, h), 15.5f, disC);
         Gfx.Draw(dr, disR.X + 37, y + (h - dr.H) / 2, disC);
 
