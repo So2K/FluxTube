@@ -48,14 +48,29 @@ public static class Themes
         ("Фиолетовый", 0xFF9B6CFF), ("Розовый", 0xFFFF5FA2),
     ];
 
+    public static readonly (string Group, Theme[] Items)[] Groups =
+        All.GroupBy(t => t.Group).Select(g => (g.Key, g.ToArray())).ToArray();
+
     public static Theme Current { get; private set; } = All[0];
     public static bool IsNewYear => Current.Name == "Новогодняя";
 
     public static Theme ByName(string? name) => All.FirstOrDefault(t => t.Name == name) ?? All[0];
 
+    private static string? _cachedAccentStr;
+    private static uint? _cachedAccentVal;
+
     public static uint? AccentOverride
-        => AppSettings.Current.Accent is { Length: 7 } s && s[0] == '#' && uint.TryParse(s[1..], System.Globalization.NumberStyles.HexNumber, null, out var c)
-            ? 0xFF000000 | c : null;
+    {
+        get
+        {
+            var s = AppSettings.Current.Accent;
+            if (string.Equals(s, _cachedAccentStr, StringComparison.Ordinal)) return _cachedAccentVal;
+            _cachedAccentStr = s;
+            _cachedAccentVal = s is { Length: 7 } && s[0] == '#' && uint.TryParse(s[1..], System.Globalization.NumberStyles.HexNumber, null, out var c)
+                ? 0xFF000000 | c : null;
+            return _cachedAccentVal;
+        }
+    }
 
     private static Pal _from, _to;
     private static long _startedAt;
@@ -131,7 +146,14 @@ public static class Themes
     /// <summary>Switches theme and/or accent (null keeps the current one) and saves the choice.</summary>
     public static void Apply(string? theme = null, string? accent = null)
     {
-        if (theme != null) AppSettings.Current.Theme = theme;
+        if (theme != null)
+        {
+            var prev = AppSettings.Current.Theme;
+            AppSettings.Current.Theme = theme;
+            // Selecting "Новогодняя" enables snow once, while still allowing the user to toggle SeasonalEffect off afterwards
+            if (theme == "Новогодняя" && prev != "Новогодняя" && AppSettings.Current.SeasonalEffect == "none")
+                AppSettings.Current.SeasonalEffect = "newyear";
+        }
         if (accent != null) AppSettings.Current.Accent = accent;
         AppSettings.Current.Save();
         Current = ByName(AppSettings.Current.Theme);

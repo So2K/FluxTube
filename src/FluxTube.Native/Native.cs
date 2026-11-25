@@ -56,20 +56,20 @@ public sealed unsafe class Edit
         // a native control paints above everything the renderer draws: step aside for open overlays
         if (AccountMenu.Open && AccountMenu.Rect is { W: > 0 } m && box.Right > m.X && box.X < m.Right && box.Bottom > m.Y && box.Y < m.Bottom) { Hide(); return; }
         if (Menus.Open && Menus.Bounds is { W: > 0 } mb && box.Right > mb.X && box.X < mb.Right && box.Bottom > mb.Y && box.Y < mb.Bottom) { Hide(); return; }
+        if (Shell.TabPreviewRect is { W: > 0 } tp && box.Right > tp.X && box.X < tp.Right && box.Bottom > tp.Y && box.Y < tp.Bottom) { Hide(); return; }
         var s = Gfx.Scale;
         if (_fontScale != s)
         {
-            if (_font != 0) W.DeleteObject(_font);
+            var oldFont = _font;
             _font = W.CreateFontW(-(int)MathF.Round(14.5f * s), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5 /*CLEARTYPE*/, 0, Gfx.Font);
             _fontScale = s;
             W.SendMessageW(H, W.WM_SETFONT, (nuint)_font, 1);
+            if (oldFont != 0) W.DeleteObject(oldFont);
         }
         int h = (int)MathF.Round(21 * s);
-        var rc = new W.RECT
-        {
-            L = (int)MathF.Round((box.X + padLeft) * s), T = (int)MathF.Round((box.Y + box.H / 2) * s) - h / 2,
-            R = (int)MathF.Round((box.Right - padRight) * s),
-        };
+        int l = (int)MathF.Round((box.X + padLeft) * s);
+        int r = Math.Max(l + 1, (int)MathF.Round((box.Right - padRight) * s));
+        var rc = new W.RECT { L = l, T = (int)MathF.Round((box.Y + box.H / 2) * s) - h / 2, R = r };
         rc.B = rc.T + h;
         if (!_visible || rc.L != _last.L || rc.T != _last.T || rc.R != _last.R || rc.B != _last.B)
         {
@@ -239,7 +239,7 @@ public static unsafe class Suggest
                 static uint Rgb(uint c) => W.Rgb((byte)(c >> 16), (byte)(c >> 8), (byte)c);
                 if (_bgColor != Th.Menu) { W.DeleteObject(_bg); W.DeleteObject(_hot); _bgColor = Th.Menu; _bg = W.CreateSolidBrush(Rgb(Th.Menu)); _hot = W.CreateSolidBrush(Rgb(Gfx.Mix(Th.Menu, Th.Ink, 0.1f))); }
                 W.FillRect(dc, &rc, _bg);
-                W.SelectObject(dc, _font);
+                var oldF = _font != 0 ? W.SelectObject(dc, _font) : 0;
                 W.SetBkMode(dc, 1);
                 W.SetTextColor(dc, Rgb(Th.Text));
                 int rowH = (int)(34 * _scale), pad = (int)(4 * _scale);
@@ -250,15 +250,21 @@ public static unsafe class Suggest
                     r.L += (int)(14 * _scale);
                     W.DrawTextW(dc, _items[i], _items[i].Length, &r, 0x0004 | 0x0020 | 0x8000 | 0x0800 /*VCENTER|SINGLELINE|END_ELLIPSIS|NOPREFIX*/);
                 }
+                if (oldF != 0) W.SelectObject(dc, oldF);
                 W.EndPaint(h, &ps);
                 return 0;
             }
             case W.WM_MOUSEMOVE:
             {
-                var i = (int)((W.HiWord(l) - 4 * _scale) / (34 * _scale));
+                var i = (int)MathF.Floor((W.HiWord(l) - 4 * _scale) / (34 * _scale));
                 if (i != _sel && i >= 0 && i < _items.Count) { _sel = i; W.InvalidateRect(h, null, 0); }
+                var tme = new W.TRACKMOUSEEVENT { cbSize = (uint)sizeof(W.TRACKMOUSEEVENT), dwFlags = 2, hwndTrack = h };
+                W.TrackMouseEvent(&tme);
                 return 0;
             }
+            case W.WM_MOUSELEAVE:
+                if (_sel != -1) { _sel = -1; W.InvalidateRect(h, null, 0); }
+                return 0;
             case W.WM_LBUTTONUP:
                 if (_sel >= 0 && _sel < _items.Count) { var s = _items[_sel]; Hide(); Chosen?.Invoke(s); }
                 return 0;

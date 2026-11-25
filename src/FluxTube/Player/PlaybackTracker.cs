@@ -35,10 +35,17 @@ public sealed class PlaybackTracker
     private PlaybackTracker()
     {
         _p.TimeChanged += OnTime;
-        _p.EndOfFile += _ => Save(force: true);
+        _p.EndOfFile += _ =>
+        {
+            Save(force: true);
+            // Detect premature stream truncation (e.g. expired URL cutting off mid-video) and recover cleanly
+            if (!IsLocal && _timeValid && _p.Duration > 20 && _p.Duration - _p.TimePos > 4.0)
+                OnLoadFailed("stream truncated early");
+        };
         _p.FileLoaded += () =>
         {
-            if (_clickAt != 0) Paths.Log($"ttff {Current?.VideoId}: first frame data {Elapsed():0} ms after click");
+            if (Current == null || _p.CurrentVideoId != Current.VideoId) return;
+            if (_clickAt != 0) Paths.Log($"ttff {Current.VideoId}: first frame data {Elapsed():0} ms after click");
             Retrying = false;
             _fileLoaded = true;
             if (_clickAt != 0) _frameLogged = false;
@@ -47,9 +54,10 @@ public sealed class PlaybackTracker
         _p.LoadFailed += OnLoadFailed;
         _p.PlaybackStarted += () =>
         {
+            if (Current == null || _p.CurrentVideoId != Current.VideoId) return;
             if (_frameLogged || _clickAt2 == 0) return;
             _frameLogged = true;
-            Paths.Log($"frame {Current?.VideoId}: picture on screen {System.Diagnostics.Stopwatch.GetElapsedTime(_clickAt2).TotalMilliseconds:0} ms after click");
+            Paths.Log($"frame {Current.VideoId}: picture on screen {System.Diagnostics.Stopwatch.GetElapsedTime(_clickAt2).TotalMilliseconds:0} ms after click");
         };
     }
 
@@ -94,6 +102,7 @@ public sealed class PlaybackTracker
     {
         Flush();
         var gen = ++_gen;
+        Retrying = false;
         _fileLoaded = _timeValid = false;
         Current = v;
         CurrentSource = source;
@@ -158,7 +167,7 @@ public sealed class PlaybackTracker
                         UiThread.Post(() =>
                         {
                             if (gen != _gen) return;
-                            LoadFull(fresh, v.Title, _p.TimePos, _p.Paused);
+                            LoadFull(fresh, v.Title, _timeValid ? _p.TimePos : _startPos, _p.Paused);
                         });
                     });
             }
@@ -193,7 +202,7 @@ public sealed class PlaybackTracker
                             if (same) Paths.Log($"play {id}: proper link after {Elapsed():0} ms, same formats, nothing to switch");
                             else if (s != null)
                             {
-                                LoadFull(s, v.Title, _p.TimePos, _p.Paused);
+                                LoadFull(s, v.Title, _timeValid ? _p.TimePos : _startPos, _p.Paused);
                                 Paths.Log($"play {id}: switched formats after {Elapsed():0} ms");
                             }
                             else _p.ShowText("Полная ссылка не получена: видео может остановиться. Обновите страницу (F5).", 6000);
@@ -251,6 +260,7 @@ public sealed class PlaybackTracker
         var v = new VideoItem { VideoId = d.VideoId ?? d.File ?? d.Url, Title = d.Title, Channel = d.Channel };
         Flush();
         ++_gen;
+        Retrying = false;
         _fileLoaded = _timeValid = false;
         Current = v;
         CurrentSource = "downloads";
@@ -320,6 +330,7 @@ public sealed class PlaybackTracker
     {
         Flush();
         ++_gen;
+        Retrying = false;
         _fileLoaded = _timeValid = false;
         _p.Stop();
         MediaCache.Pinned = null;

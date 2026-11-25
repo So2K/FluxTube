@@ -191,30 +191,37 @@ public sealed class StreamProxy
     {
         var key = localUrl[(localUrl.LastIndexOf('/') + 1)..];
         if (!_entries.TryGetValue(key, out var e)) return Task.CompletedTask;
-        lock (e) e.HeadTask ??= Task.Run(async () =>
+        Task ht;
+        lock (e)
         {
-            // a connection that stalls must not hold the click (or a prefetch slot) forever
-            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            try
+            ht = e.HeadTask ??= Task.Run(async () =>
             {
-                if (e.Length <= 0) await ProbeLengthAsync(e, limit.Token);
-                var want = Math.Min(e.HeadBytes, e.Length > 0 ? e.Length : e.HeadBytes);
-                if (e.Cache != null)
+                using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try
                 {
-                    var have = e.Cache.Covered(0);
-                    if (have >= want) return;
-                    using var resp = await FetchAsync(e, have, want - 1, limit.Token, starterOnly: e.Url == null);
-                    e.Cache.Write(have, await resp.Content.ReadAsByteArrayAsync(limit.Token));
+                    if (e.Length <= 0) await ProbeLengthAsync(e, limit.Token);
+                    var want = Math.Min(e.HeadBytes, e.Length > 0 ? e.Length : e.HeadBytes);
+                    if (e.Cache != null)
+                    {
+                        var have = e.Cache.Covered(0);
+                        if (have >= want) return;
+                        using var resp = await FetchAsync(e, have, want - 1, limit.Token, starterOnly: e.Url == null);
+                        if (resp.StatusCode != HttpStatusCode.PartialContent && have > 0) return;
+                        var bytes = await resp.Content.ReadAsByteArrayAsync(limit.Token);
+                        if (bytes.Length <= want - have + 4096) e.Cache.Write(have, bytes);
+                    }
+                    else
+                    {
+                        using var resp = await FetchAsync(e, 0, want - 1, limit.Token, starterOnly: e.Url == null);
+                        if (resp.StatusCode != HttpStatusCode.PartialContent) return;
+                        var bytes = await resp.Content.ReadAsByteArrayAsync(limit.Token);
+                        if (bytes.Length <= want + 4096) e.Head = bytes;
+                    }
                 }
-                else
-                {
-                    using var resp = await FetchAsync(e, 0, want - 1, limit.Token, starterOnly: e.Url == null);
-                    e.Head = await resp.Content.ReadAsByteArrayAsync(limit.Token);
-                }
-            }
-            catch (Exception ex) { if (!e.Fragile && e.Url != null && e.Retries > 0) Paths.Log("prefill: " + ex.Message); }
-        });
-        return e.HeadTask;
+                catch (Exception ex) { if (!e.Fragile && e.Url != null && e.Retries > 0) Paths.Log("prefill: " + ex.Message); }
+            });
+        }
+        return ht;
     }
 
     /// <summary>The link served its first bytes: from now on a refusal is worth retrying.</summary>
@@ -235,13 +242,21 @@ public sealed class StreamProxy
     {
         if (_entries.Count <= MaxEntries) return;
         var pinned = MediaCache.Pinned;
-        foreach (var kv in _entries.OrderByDescending(k => k.Value.Touched).Skip(MaxEntries))
+        var snap = _entries.Select(kv => (kv.Key, kv.Value, Touched: kv.Value.Touched)).OrderByDescending(x => x.Touched).Skip(MaxEntries);
+        foreach (var (key, val, _) in snap)
         {
-            // never what is playing or being read right now
-            if (pinned != null && kv.Key.StartsWith(pinned, StringComparison.Ordinal)) continue;
-            if (kv.Value.Cache is { } cs && Volatile.Read(ref cs.Users) > 0) continue;
-            _entries.TryRemove(kv.Key, out _);
+            // never what is playing, in background tabs, or being read right now
+            var dot = key.IndexOf('.');
+            var vid = dot > 0 ? key[..dot] : key;
+            if ((pinned != null && vid == pinned) || (MediaCache.IsActive?.Invoke(vid) ?? false)) continue;
+            if (val.Cache is { } cs && Volatile.Read(ref cs.Users) > 0) continue;
+            _entries.TryRemove(key, out _);
         }
+    }
+
+    public void Dispose()
+    {
+        try { _listener?.Stop(); } catch { }
     }
 
     private async Task ProbeLengthAsync(Entry e, CancellationToken ct = default)
@@ -417,16 +432,13 @@ public sealed class StreamProxy
                 if (resp.StatusCode != HttpStatusCode.PartialContent && pos != 0) throw new HttpRequestException("range ignored");
                 await using var body = await resp.Content.ReadAsStreamAsync(cts.Token);
                 var before = pos;
+                using var idle = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
                 while (pos <= to)
                 {
                     int n;
-                    // the read may stall (a dead connection); writing to the player may rightly wait (it is paused): only the read is timed
-                    using (var idle = CancellationTokenSource.CreateLinkedTokenSource(cts.Token))
-                    {
-                        idle.CancelAfter(20_000);
-                        try { n = await body.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, to - pos + 1)), idle.Token); }
-                        catch (OperationCanceledException) when (!cts.IsCancellationRequested) { n = -1; }
-                    }
+                    idle.CancelAfter(20_000);
+                    try { n = await body.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, to - pos + 1)), idle.Token); }
+                    catch (OperationCanceledException) when (!cts.IsCancellationRequested) { n = -1; }
                     if (n == -1) break; // stalled: ask again from here
                     if (n <= 0) break;
                     cache?.Write(pos, buf.AsSpan(0, n));
@@ -455,9 +467,10 @@ public sealed class StreamProxy
     {
         var buf = new byte[8192];
         int len = 0;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         while (true)
         {
-            var n = await net.ReadAsync(buf.AsMemory(len));
+            var n = await net.ReadAsync(buf.AsMemory(len), timeout.Token);
             if (n == 0) throw new IOException("closed");
             len += n;
             var text = Encoding.ASCII.GetString(buf, 0, len);

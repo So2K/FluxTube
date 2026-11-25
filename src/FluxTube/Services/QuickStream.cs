@@ -28,6 +28,7 @@ public static class QuickStream
 
     private static readonly HttpClient Http = Make();
     private static readonly ConcurrentDictionary<string, Task<StreamInfo?>> _cache = new();
+    private static readonly object _visitorLock = new();
     private static Task<string?>? _visitor;
     private static DateTime _visitorAt;
 
@@ -47,43 +48,60 @@ public static class QuickStream
 
     private static Task<string?> VisitorAsync()
     {
-        if (_visitor != null && (DateTime.UtcNow - _visitorAt).TotalHours < 5 && !_visitor.IsFaulted && !(_visitor.IsCompleted && _visitor.Result == null)) return _visitor;
-        _visitorAt = DateTime.UtcNow;
-        return _visitor = Task.Run(async () =>
+        lock (_visitorLock)
         {
-            try
+            if (_visitor != null && (DateTime.UtcNow - _visitorAt).TotalHours < 5 && !_visitor.IsFaulted && !(_visitor.IsCompleted && _visitor.Result == null))
+                return _visitor;
+            _visitorAt = DateTime.UtcNow;
+            return _visitor = Task.Run(async () =>
             {
-                using var req = new HttpRequestMessage(HttpMethod.Get, "https://www.youtube.com/");
-                req.Headers.TryAddWithoutValidation("User-Agent", InnerTube.UserAgent);
-                req.Headers.TryAddWithoutValidation("Accept-Language", "ru,en;q=0.8");
-                req.Headers.TryAddWithoutValidation("Cookie", "SOCS=CAI");
-                using var resp = await Http.SendAsync(req);
-                var html = await resp.Content.ReadAsStringAsync();
-                const string mark = "\"VISITOR_DATA\":\"";
-                var i = html.IndexOf(mark, StringComparison.Ordinal);
-                if (i < 0) { Paths.Log($"quick visitor: no VISITOR_DATA in {html.Length} chars, http {(int)resp.StatusCode}"); return null; }
-                i += mark.Length;
-                return html[i..html.IndexOf('"', i)];
-            }
-            catch (Exception e) { Paths.Log("quick visitor: " + e.Message); return (string?)null; }
-        });
+                try
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Get, "https://www.youtube.com/");
+                    req.Headers.TryAddWithoutValidation("User-Agent", InnerTube.UserAgent);
+                    req.Headers.TryAddWithoutValidation("Accept-Language", "ru,en;q=0.8");
+                    req.Headers.TryAddWithoutValidation("Cookie", "SOCS=CAI");
+                    using var resp = await Http.SendAsync(req);
+                    var html = await resp.Content.ReadAsStringAsync();
+                    const string mark = "\"VISITOR_DATA\":\"";
+                    var i = html.IndexOf(mark, StringComparison.Ordinal);
+                    if (i < 0) { Paths.Log($"quick visitor: no VISITOR_DATA in {html.Length} chars, http {(int)resp.StatusCode}"); return null; }
+                    i += mark.Length;
+                    var end = html.IndexOf('"', i);
+                    return end > i ? html[i..end] : null;
+                }
+                catch (Exception e) { Paths.Log("quick visitor: " + e.Message); return (string?)null; }
+            });
+        }
     }
 
-    private static bool Good(Task<StreamInfo?> t) => !(t.IsCompleted && (t.IsFaulted || t.Result == null || (DateTime.UtcNow - t.Result.ResolvedAt).TotalHours >= 4));
+    private static bool Good(Task<StreamInfo?> t) => !(t.IsCompleted && (t.IsFaulted || t.IsCanceled || t.Result == null || (DateTime.UtcNow - t.Result.ResolvedAt).TotalHours >= 4));
 
     public static StreamInfo? TryGet(string videoId)
         => _cache.TryGetValue(videoId, out var t) && t.IsCompletedSuccessfully && Good(t) ? t.Result : null;
 
-    private static readonly SemaphoreSlim Gate = new(5, 5);
+    private static readonly SemaphoreSlim Gate = new(3, 3);
     private static readonly ConcurrentDictionary<string, byte> Waiting = new();
 
-    /// <summary>Background hint (a card in view, a card under the pointer). A handful at a time.</summary>
+    private static void TrimCache<T>(ConcurrentDictionary<string, T> dict, int cap)
+    {
+        if (dict.Count <= cap) return;
+        int remove = dict.Count - cap * 3 / 4;
+        foreach (var k in dict.Keys)
+        {
+            if (remove-- <= 0) break;
+            dict.TryRemove(k, out _);
+        }
+    }
+
+    /// <summary>Background hint (a card in view, a card under the pointer). Bounded concurrency so scrolling never storms.</summary>
     public static void Prefetch(string videoId)
     {
         if (!AppSettings.Current.QuickStart || videoId.Length != 11) return;
+        if (Waiting.Count >= 6) return;
         if (_cache.TryGetValue(videoId, out var t) && Good(t)) return;
-        if (_cache.Count > 300) _cache.Clear();
-        Waiting[videoId] = 0;
+        TrimCache(_cache, 240);
+        if (!Waiting.TryAdd(videoId, 0)) return;
         _cache[videoId] = Task.Run(async () =>
         {
             await Gate.WaitAsync();
@@ -266,7 +284,12 @@ public static class QuickStream
         return sb.ToString();
     }
 
-    public static void Forget(string videoId) { _cache.TryRemove(videoId, out _); _specs.TryRemove(videoId, out _); }
+    public static void Forget(string videoId)
+    {
+        _cache.TryRemove(videoId, out _);
+        _specs.TryRemove(videoId, out _);
+        _extras.TryRemove(videoId, out _);
+    }
 
     // the player response also carries the seek-bar frame previews ("storyboards")
     private static readonly ConcurrentDictionary<string, string> _specs = new();
@@ -289,8 +312,12 @@ public static class QuickStream
                 var visitor = await VisitorAsync();
                 if (visitor == null) return;
                 var n = await PlayerAsync(Vision, id, visitor);
-                if (n != null && n.S("playabilityStatus", "status") == "OK") Remember(Vision, id, n);
-                _specs[id] = n.S("storyboards", "playerStoryboardSpecRenderer", "spec") ?? "";
+                if (n != null && n.S("playabilityStatus", "status") == "OK")
+                {
+                    Remember(Vision, id, n);
+                    TrimCache(_specs, 180);
+                    _specs[id] = n.S("storyboards", "playerStoryboardSpecRenderer", "spec") ?? "";
+                }
             }
             catch (Exception e) { Paths.Log($"storyboard spec {id}: {e.Message}"); }
             finally { _specTasks.TryRemove(id, out _); }
@@ -305,7 +332,7 @@ public static class QuickStream
     {
         // a hint that is still waiting for its turn does not count: do it now
         if (_cache.TryGetValue(videoId, out var t) && Good(t) && !Waiting.ContainsKey(videoId)) return t;
-        if (_cache.Count > 300) _cache.Clear();
+        TrimCache(_cache, 240);
         return _cache[videoId] = Task.Run(() => ResolveAsync(videoId, 0, 0));
     }
 
@@ -407,8 +434,19 @@ public static class QuickStream
         if (wantV > 0)
         {
             videos = wantA > 0 ? usable.Where(f => Num(f, "itag") == wantV).Take(1).ToList() : [];
+            var prefLangExact = AppSettings.Current.AudioLanguage;
             audios = usable.Where(f => Num(f, "itag") == (wantA > 0 ? wantA : wantV))
-                .OrderByDescending(f => f?["audioTrack"] == null || (f.P("audioTrack", "audioIsDefault") is JsonValue ov && ov.TryGetValue<bool>(out var od) && od)).Take(1).ToList();
+                .OrderByDescending(f =>
+                {
+                    if (!string.IsNullOrEmpty(prefLangExact))
+                    {
+                        var lang = (f.S("audioTrack", "id") ?? "").Split('.')[0];
+                        if (lang.Equals(prefLangExact, StringComparison.OrdinalIgnoreCase)
+                            || lang.StartsWith(prefLangExact + "-", StringComparison.OrdinalIgnoreCase))
+                            return 2;
+                    }
+                    return f?["audioTrack"] == null || (f.P("audioTrack", "audioIsDefault") is JsonValue ov && ov.TryGetValue<bool>(out var od) && od) ? 1 : 0;
+                }).Take(1).ToList();
             if (audios.Count == 0 || (wantA > 0 && videos.Count == 0)) return null;
         }
         else

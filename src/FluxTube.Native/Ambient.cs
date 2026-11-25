@@ -24,8 +24,17 @@ public static class Ambient
 
     private static readonly ConcurrentDictionary<string, Palette> _thumbPalettes = new();
     private static readonly ConcurrentDictionary<string, byte> _thumbLoading = new();
-    private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(8) };
-    [ThreadStatic] private static IWICImagingFactory? t_wic;
+    private static readonly ConcurrentDictionary<string, long> _thumbFailedAt = new();
+    private static readonly HttpClient _http = MakeClient();
+
+    private static HttpClient MakeClient()
+    {
+        var h = new SocketsHttpHandler { AutomaticDecompression = System.Net.DecompressionMethods.All, MaxConnectionsPerServer = 4 };
+        if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy)) { h.Proxy = new System.Net.WebProxy(AppSettings.Current.Proxy); h.UseProxy = true; }
+        var c = new HttpClient(h) { Timeout = TimeSpan.FromSeconds(8) };
+        c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", InnerTube.UserAgent);
+        return c;
+    }
 
     private static string? _curId;
     private static long _lastSampleAt;
@@ -56,9 +65,16 @@ public static class Ambient
 
     private static Palette EnhanceAll(Palette p) => new(Enhance(p.TL), Enhance(p.TR), Enhance(p.BL), Enhance(p.BR), Enhance(p.C));
 
+    private static unsafe void CopyPixelsTo(IWICBitmapSource src, byte[] dst, int w, int h)
+    {
+        fixed (byte* p = dst) src.CopyPixels(new RectI(0, 0, w, h), (uint)(w * 4), (uint)(w * h * 4), (nint)p);
+    }
+
     private static void EnsureThumbPalette(string videoId, bool isShort)
     {
-        if (_thumbPalettes.ContainsKey(videoId) || !_thumbLoading.TryAdd(videoId, 0)) return;
+        if (_thumbPalettes.ContainsKey(videoId)) return;
+        if (_thumbFailedAt.TryGetValue(videoId, out var failAt) && Environment.TickCount64 - failAt < 60_000) return;
+        if (!_thumbLoading.TryAdd(videoId, 0)) return;
         _ = Task.Run(async () =>
         {
             try
@@ -69,36 +85,35 @@ public static class Ambient
                     try { data = await _http.GetByteArrayAsync($"https://i.ytimg.com/vi/{videoId}/oar2.jpg"); } catch { }
                 }
                 data ??= await _http.GetByteArrayAsync($"https://i.ytimg.com/vi/{videoId}/mqdefault.jpg");
-                if (t_wic == null) W.CoInitializeEx(0, 0);
-                var wic = t_wic ??= new IWICImagingFactory();
+                var wic = Wic.Factory;
                 using var stream = wic.CreateStream(data);
                 using var dec = wic.CreateDecoderFromStream(stream, DecodeOptions.CacheOnLoad);
                 using var frame = dec.GetFrame(0);
                 var sz = frame.Size;
                 using var conv = wic.CreateFormatConverter();
                 conv.Initialize(frame, PixelFormat.Format32bppBGRA);
-                var px = Copy(conv, sz.Width, sz.Height);
-                int w = sz.Width, h = sz.Height;
-                var pal = EnhanceAll(new Palette(
-                    Avg(px, w, 0, 0, w / 2, h / 2),
-                    Avg(px, w, w / 2, 0, w / 2, h / 2),
-                    Avg(px, w, 0, h / 2, w / 2, h / 2),
-                    Avg(px, w, w / 2, h / 2, w / 2, h / 2),
-                    Avg(px, w, w / 4, h / 4, w / 2, h / 2)));
+                int w = sz.Width, h = sz.Height, need = w * h * 4;
+                var px = System.Buffers.ArrayPool<byte>.Shared.Rent(need);
+                Palette pal;
+                try
+                {
+                    CopyPixelsTo(conv, px, w, h);
+                    pal = EnhanceAll(new Palette(
+                        Avg(px, w, 0, 0, w / 2, h / 2),
+                        Avg(px, w, w / 2, 0, w / 2, h / 2),
+                        Avg(px, w, 0, h / 2, w / 2, h / 2),
+                        Avg(px, w, w / 2, h / 2, w / 2, h / 2),
+                        Avg(px, w, w / 4, h / 4, w / 2, h / 2)));
+                }
+                finally { System.Buffers.ArrayPool<byte>.Shared.Return(px); }
+                if (_thumbPalettes.Count >= 64) _thumbPalettes.Clear();
                 _thumbPalettes[videoId] = pal;
-                if (_thumbPalettes.Count > 64) _thumbPalettes.Clear();
+                _thumbFailedAt.TryRemove(videoId, out _);
                 App.WakeUi();
             }
-            catch { }
+            catch { _thumbFailedAt[videoId] = Environment.TickCount64; if (_thumbFailedAt.Count > 128) _thumbFailedAt.Clear(); }
             finally { _thumbLoading.TryRemove(videoId, out _); }
         });
-    }
-
-    private static unsafe byte[] Copy(IWICBitmapSource src, int w, int h)
-    {
-        var px = new byte[w * h * 4];
-        fixed (byte* p = px) src.CopyPixels(new RectI(0, 0, w, h), (uint)(w * 4), (uint)px.Length, (nint)p);
-        return px;
     }
 
     private static (float R, float G, float B) Avg(byte[] px, int w, int x0, int y0, int rw, int rh)
@@ -162,8 +177,8 @@ public static class Ambient
         float delta = Diff(_cur.TL, _target.TL) + Diff(_cur.TR, _target.TR) + Diff(_cur.BL, _target.BL) + Diff(_cur.BR, _target.BR);
         if (delta > 0.008f) UI.Animate();
 
-        // Subtle organic breathing modulation (barely perceptible, feels alive)
-        float breath = 1f + 0.03f * MathF.Sin(UI.Now / 2600f);
+        // Subtle organic breathing modulation (uptime-safe elapsed seconds)
+        float breath = 1f + 0.03f * MathF.Sin((float)((UI.Now - UI.StartTick) / 2600.0));
         float baseAlpha = Th.Light ? 0.12f : (isShort ? 0.28f : 0.24f);
         float spreadX = (isShort ? 260f : 220f) * breath;
         float spreadY = (isShort ? 230f : 200f) * breath;
@@ -171,11 +186,11 @@ public static class Ambient
         float rx = videoRect.W * 0.62f + spreadX;
         float ry = videoRect.H * 0.56f + spreadY;
 
-        // 5 overlapping Gaussian radial light fields around the video edges
-        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.18f, videoRect.Y + videoRect.H * 0.18f, rx * 0.85f, ry * 0.85f, _cur.TL.R, _cur.TL.G, _cur.TL.B, baseAlpha);
-        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.82f, videoRect.Y + videoRect.H * 0.18f, rx * 0.85f, ry * 0.85f, _cur.TR.R, _cur.TR.G, _cur.TR.B, baseAlpha);
-        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.18f, videoRect.Y + videoRect.H * 0.85f, rx * 0.90f, ry * 0.90f, _cur.BL.R, _cur.BL.G, _cur.BL.B, baseAlpha * 1.05f);
-        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.82f, videoRect.Y + videoRect.H * 0.85f, rx * 0.90f, ry * 0.90f, _cur.BR.R, _cur.BR.G, _cur.BR.B, baseAlpha * 1.05f);
-        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.50f, videoRect.Y + videoRect.H * 0.50f, rx * 1.08f, ry * 1.04f, _cur.C.R, _cur.C.G, _cur.C.B, baseAlpha * 0.65f);
+        // 5 overlapping Gaussian radial light fields around the video edges (using cached per-zone GPU brushes)
+        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.18f, videoRect.Y + videoRect.H * 0.18f, rx * 0.85f, ry * 0.85f, _cur.TL.R, _cur.TL.G, _cur.TL.B, baseAlpha, 0);
+        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.82f, videoRect.Y + videoRect.H * 0.18f, rx * 0.85f, ry * 0.85f, _cur.TR.R, _cur.TR.G, _cur.TR.B, baseAlpha, 1);
+        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.18f, videoRect.Y + videoRect.H * 0.85f, rx * 0.90f, ry * 0.90f, _cur.BL.R, _cur.BL.G, _cur.BL.B, baseAlpha * 1.05f, 2);
+        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.82f, videoRect.Y + videoRect.H * 0.85f, rx * 0.90f, ry * 0.90f, _cur.BR.R, _cur.BR.G, _cur.BR.B, baseAlpha * 1.05f, 3);
+        Gfx.RadialGlow(videoRect.X + videoRect.W * 0.50f, videoRect.Y + videoRect.H * 0.50f, rx * 1.08f, ry * 1.04f, _cur.C.R, _cur.C.G, _cur.C.B, baseAlpha * 0.65f, 4);
     }
 }

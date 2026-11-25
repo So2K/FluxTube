@@ -12,7 +12,7 @@ namespace FluxTube.Pages;
 /// </summary>
 public sealed class HistoryPage : IPage
 {
-    private readonly TimelinePage _local = new(false);
+    private readonly TimelinePage _local = new(false, embedded: true);
     private bool _youtube = CookieStore.IsLoggedIn;
     private int _filter; // 0 all, 1 videos, 2 shorts
     private List<HistoryDay> _days = [];
@@ -28,11 +28,22 @@ public sealed class HistoryPage : IPage
     public string Tag => "history";
     public int MainScroll => _youtube ? _scroll : _local.MainScroll;
 
+    public void Invalidate()
+    {
+        _gen++;
+        _days = [];
+        _next = null;
+        _loadedAt = 0;
+        _loading = _loadingMore = _failed = false;
+        _shelfPage.Clear();
+        _youtube = CookieStore.IsLoggedIn;
+        UI.ScrollReset(_scroll);
+    }
+
     public void Shown()
     {
         if (_youtube && !CookieStore.IsLoggedIn) _youtube = false;
         if (!_youtube) { _local.Shown(); return; }
-        // the list changes whenever anything is watched anywhere: a visit after half a minute asks again
         if (_days.Count == 0 || UI.Now - _loadedAt > 30_000) Load();
     }
 
@@ -43,6 +54,7 @@ public sealed class HistoryPage : IPage
     {
         var gen = ++_gen;
         _loading = true; _failed = false; _loadingMore = false;
+        _shelfPage.Clear();
         _ = Task.Run(async () =>
         {
             try
@@ -135,7 +147,11 @@ public sealed class HistoryPage : IPage
         string[] names = ["Все", "Видео", "Shorts"];
         for (int i = 0; i < names.Length; i++)
         {
-            if (UI.Pill(UI.Id("hist:f", i), px, y0 + 2, 32, null, names[i], out var fw, _filter == i ? Gfx.Fade(Th.Brand, 0.85f) : Th.A(0.08f), _filter == i ? Th.OnBrand : Th.Text)) _filter = i;
+            if (UI.Pill(UI.Id("hist:f", i), px, y0 + 2, 32, null, names[i], out var fw, _filter == i ? Gfx.Fade(Th.Brand, 0.85f) : Th.A(0.08f), _filter == i ? Th.OnBrand : Th.Text) && _filter != i)
+            {
+                _filter = i;
+                UI.ScrollReset(_scroll);
+            }
             px += fw + 8;
         }
         var rw = UI.PillWidth(Th.Refresh, "Обновить");
@@ -157,6 +173,7 @@ public sealed class HistoryPage : IPage
         var scroll = UI.BeginScroll(_scroll, view, _contentH);
         var w = MathF.Min(view.W - 48, 1280);
         float y = view.Y + 6 - scroll;
+        int shownDays = 0;
         for (int di = 0; di < _days.Count; di++)
         {
             var d = _days[di];
@@ -164,6 +181,7 @@ public sealed class HistoryPage : IPage
             // a Short that was opened as an ordinary video is listed among the videos, like on the site
             var showVideos = _filter switch { 1 => d.Videos.Any(v => !v.IsShort), 2 => d.Videos.Any(v => v.IsShort), _ => d.Videos.Count > 0 };
             if (!showShorts && !showVideos) continue;
+            shownDays++;
             Gfx.Draw(d.Title, x0, y, 19, Th.Text, 700);
             y += 40;
             if (showShorts) y = DrawShorts(d, di, x0, y, w, view);
@@ -177,9 +195,15 @@ public sealed class HistoryPage : IPage
                 }
             y += 18;
         }
+        if (shownDays == 0 && !_loadingMore)
+        {
+            Gfx.Draw(_filter == 2 ? "В загруженной истории Shorts не найдены." : "По этому фильтру ничего нет.", x0, y + 10, 14, Th.Sub);
+            y += 44;
+        }
         if (_loadingMore) UI.Spinner(x0 + w / 2, y + 16, 10, Th.Sub);
         if (_next != null && y < view.Bottom + 700) LoadMore();
-        _contentH = y + scroll - view.Y + 60;
+        var needH = y + scroll - view.Y + 60;
+        if (MathF.Abs(needH - _contentH) > 1f) { _contentH = needH; UI.Animate(); }
         UI.EndScroll();
     }
 

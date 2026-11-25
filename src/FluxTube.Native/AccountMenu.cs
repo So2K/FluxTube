@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using FluxTube.Models;
 using FluxTube.Pages;
@@ -8,8 +10,8 @@ namespace FluxTube;
 /// <summary>
 /// Multi-account manager & top-right account menu:
 /// - Remembers multiple YouTube accounts in %USERPROFILE%\.fluxtube\accounts\ (each with its own cookies file).
-/// - Supports instant 1-click switching between saved accounts without re-entering passwords.
-/// - Sub-pages inside the dropdown: saved accounts, theme, language.
+/// - Clean sign-in via the built-in browser login window (add as many accounts as you want) + 1-click swap.
+/// - Sub-pages inside the dropdown (with proper scroll support): saved accounts, theme, language.
 /// </summary>
 public static class AccountMenu
 {
@@ -24,6 +26,7 @@ public static class AccountMenu
 
     public static Account? Current { get; private set; }
     public static bool Open { get; private set; }
+    public static bool SessionExpired { get; private set; }
     /// <summary>Where the panel was drawn last frame: input outside it is blocked while it is open.</summary>
     public static R Rect { get; private set; }
 
@@ -37,6 +40,9 @@ public static class AccountMenu
     private static float _mainH = 380;     // measured while drawing, used for the next frame
     private static long _openedAt, _pageAt;
     private static float _anchorRight, _anchorTop;
+    private static readonly int _scrollAcc = UI.Id("am:scr:acc");
+    private static readonly int _scrollTheme = UI.Id("am:scr:theme");
+    private static readonly int _scrollLang = UI.Id("am:scr:lang");
     private static readonly string File_ = Path.Combine(Paths.Data, "account.json");
     private static readonly string AccountsDir = Path.Combine(Paths.Data, "accounts");
     private static readonly string IndexFile = Path.Combine(AccountsDir, "index.json");
@@ -47,13 +53,16 @@ public static class AccountMenu
 
     private static string CookiePath(string id) => Path.Combine(AccountsDir, id + ".cookies.txt");
 
+    /// <summary>Deterministic cross-process account ID (never relies on randomized string.GetHashCode).</summary>
     private static string MakeId(Account a)
     {
         var raw = !string.IsNullOrWhiteSpace(a.ChannelId) ? a.ChannelId
             : !string.IsNullOrWhiteSpace(a.Handle) ? a.Handle
             : a.Name;
         var clean = new string(raw.Where(c => char.IsLetterOrDigit(c) || c is '_' or '-').ToArray());
-        return clean.Length > 0 ? clean : "acc_" + Math.Abs(raw.GetHashCode());
+        if (clean.Length >= 3) return clean;
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(raw.Length > 0 ? raw : "yt-account"));
+        return "acc_" + Convert.ToHexString(hash)[..12].ToLowerInvariant();
     }
 
     // ---------------- persistence & multi-account switching ----------------
@@ -72,6 +81,7 @@ public static class AccountMenu
                     {
                         var id = n.S("id");
                         if (string.IsNullOrEmpty(id) || !File.Exists(CookiePath(id))) continue;
+                        if (_saved.Any(x => x.Id == id)) continue;
                         _saved.Add(new SavedAccount
                         {
                             Id = id,
@@ -110,9 +120,27 @@ public static class AccountMenu
                 });
             }
             var root = new JsonObject { ["active"] = _activeId, ["items"] = arr };
-            File.WriteAllText(IndexFile, root.ToJsonString());
+            var tmp = IndexFile + ".tmp";
+            File.WriteAllText(tmp, root.ToJsonString());
+            File.Move(tmp, IndexFile, overwrite: true);
         }
         catch (Exception e) { Paths.Log("accounts index: " + e.Message); }
+    }
+
+    /// <summary>Persists the currently active account's cookies to its vault slot before signing into a new account.</summary>
+    public static void SaveActiveToVault()
+    {
+        if (!CookieStore.IsLoggedIn || !File.Exists(Paths.Cookies)) return;
+        if (Current != null) { SaveCurrentToVault(Current); return; }
+        if (_activeId != null)
+        {
+            try
+            {
+                Directory.CreateDirectory(AccountsDir);
+                File.Copy(Paths.Cookies, CookiePath(_activeId), overwrite: true);
+            }
+            catch { }
+        }
     }
 
     private static void SaveCurrentToVault(Account a)
@@ -122,12 +150,23 @@ public static class AccountMenu
         {
             Directory.CreateDirectory(AccountsDir);
             var id = MakeId(a);
-            File.Copy(Paths.Cookies, CookiePath(id), overwrite: true);
-            var existing = _saved.FirstOrDefault(x => x.Id == id);
+            var tmp = CookiePath(id) + ".tmp";
+            File.Copy(Paths.Cookies, tmp, overwrite: true);
+            File.Move(tmp, CookiePath(id), overwrite: true);
+
+            // Match by Id, ChannelId, or Handle to avoid duplicates across migrations
+            var existing = _saved.FirstOrDefault(x => x.Id == id
+                || (!string.IsNullOrEmpty(a.ChannelId) && x.ChannelId == a.ChannelId)
+                || (!string.IsNullOrEmpty(a.Handle) && x.Handle == a.Handle));
             if (existing == null)
             {
                 existing = new SavedAccount { Id = id };
                 _saved.Add(existing);
+            }
+            else if (existing.Id != id)
+            {
+                try { if (File.Exists(CookiePath(existing.Id))) File.Delete(CookiePath(existing.Id)); } catch { }
+                existing.Id = id;
             }
             existing.Name = a.Name;
             existing.Handle = a.Handle;
@@ -139,19 +178,32 @@ public static class AccountMenu
         catch (Exception e) { Paths.Log("account vault: " + e.Message); }
     }
 
-    /// <summary>1-click switch to another saved YouTube account.</summary>
+    /// <summary>Instant 1-click switch to another saved YouTube account.</summary>
     public static void SwitchTo(string id)
     {
         var target = _saved.FirstOrDefault(x => x.Id == id);
         if (target == null || !File.Exists(CookiePath(id))) return;
         try
         {
-            // Persist any rotated cookies of the outgoing active account first
+            // Persist any rotated cookies of the outgoing active account first (only if it matches activeId)
             if (_activeId != null && _activeId != id && CookieStore.IsLoggedIn && File.Exists(Paths.Cookies))
-                try { File.Copy(Paths.Cookies, CookiePath(_activeId), overwrite: true); } catch { }
+            {
+                try
+                {
+                    var outTmp = CookiePath(_activeId) + ".tmp";
+                    File.Copy(Paths.Cookies, outTmp, overwrite: true);
+                    File.Move(outTmp, CookiePath(_activeId), overwrite: true);
+                }
+                catch { }
+            }
 
-            File.Copy(CookiePath(id), Paths.Cookies, overwrite: true);
+            var inTmp = Paths.Cookies + ".tmp";
+            File.Copy(CookiePath(id), inTmp, overwrite: true);
+            File.Move(inTmp, Paths.Cookies, overwrite: true);
+            Shell.SyncCookieStamp();
+
             _activeId = id;
+            SessionExpired = false;
             WriteIndex();
             Current = new Account { Name = target.Name, Handle = target.Handle, Photo = target.Photo, ChannelId = target.ChannelId };
             try
@@ -175,25 +227,6 @@ public static class AccountMenu
         }
     }
 
-    /// <summary>Adds or updates an imported account in the vault without forcing a switch.</summary>
-    public static void AddToVault(string id, string name, string handle, string? photo, string? channelId, string[] cookieLines)
-    {
-        try
-        {
-            Directory.CreateDirectory(AccountsDir);
-            File.WriteAllLines(CookiePath(id), new[] { "# Netscape HTTP Cookie File" }.Concat(cookieLines));
-            var existing = _saved.FirstOrDefault(x => x.Id == id);
-            if (existing == null) { existing = new SavedAccount { Id = id }; _saved.Add(existing); }
-            existing.Name = name;
-            existing.Handle = handle;
-            existing.Photo = photo;
-            existing.ChannelId = channelId;
-            WriteIndex();
-            App.Invalidate();
-        }
-        catch (Exception e) { Paths.Log("add vault: " + e.Message); }
-    }
-
     public static void RemoveSaved(string id)
     {
         var idx = _saved.FindIndex(x => x.Id == id);
@@ -207,9 +240,10 @@ public static class AccountMenu
         else App.Invalidate();
     }
 
-    /// <summary>Asks YouTube who is signed in (after start-up and after every sign-in or sign-out).</summary>
+    /// <summary>Asks YouTube who is signed in (after start-up and after every sign-in, switch, or sign-out).</summary>
     public static void Refresh()
     {
+        SessionExpired = false;
         if (!CookieStore.IsLoggedIn)
         {
             _refreshGen++;
@@ -226,10 +260,17 @@ public static class AccountMenu
             try
             {
                 var a = await InnerTube.Instance.AccountAsync();
-                if (a == null) return;
                 App.Post(() =>
                 {
                     if (gen != _refreshGen || !CookieStore.IsLoggedIn) return;
+                    if (a == null)
+                    {
+                        SessionExpired = true;
+                        Current = null;
+                        App.Invalidate();
+                        return;
+                    }
+                    SessionExpired = false;
                     Current = a;
                     try { File.WriteAllText(File_, new JsonObject { ["n"] = a.Name, ["h"] = a.Handle, ["p"] = a.Photo, ["c"] = a.ChannelId }.ToJsonString()); } catch { }
                     SaveCurrentToVault(a);
@@ -259,21 +300,29 @@ public static class AccountMenu
         App.Invalidate();
     }
 
-    private static void Go(string page) { _page = page; _pageAt = UI.Now; App.Invalidate(); }
+    private static void Go(string page)
+    {
+        _page = page;
+        _pageAt = UI.Now;
+        UI.ScrollReset(_scrollAcc);
+        UI.ScrollReset(_scrollTheme);
+        UI.ScrollReset(_scrollLang);
+        App.Invalidate();
+    }
 
     /// <summary>Called at the very end of the frame, above everything.</summary>
     public static void Draw()
     {
         if (!Open) return;
-        const float w = 310;
+        const float w = 316;
         var h = _page switch
         {
-            "accounts" => 54 + _saved.Count * 54 + (_saved.Count > 0 ? 10 : 30) + 166,
+            "accounts" => 54 + _saved.Count * 54 + (_saved.Count > 0 ? 12 : 34) + 126,
             "theme" => 52 + (Themes.All.Length + 1) * 38 + 10,
             "lang" => 52 + Langs.Length * 38 + 10,
             _ => _mainH,
         };
-        h = MathF.Min(h, Gfx.H - _anchorTop - 20);
+        h = MathF.Min(h, MathF.Max(180, Gfx.H - _anchorTop - 20));
         var t = Math.Clamp((UI.Now - _openedAt) / 140f, 0, 1);
         if (t < 1) UI.Animate();
         var ease = 1 - (1 - t) * (1 - t);
@@ -325,38 +374,33 @@ public static class AccountMenu
         else if (CookieStore.IsLoggedIn)
         {
             Cards.Avatar(x + 16, y + 2, 40, null, "?");
-            Gfx.Draw("Вы вошли в YouTube", x + 70, y + 4, 15, Th.Text, 600);
-            Gfx.Draw("Загружаю профиль…", x + 70, y + 25, 13, Th.Sub);
+            Gfx.Draw(SessionExpired ? "Сессия YouTube устарела" : "Вы вошли в YouTube", x + 70, y + 4, 15, Th.Text, 600);
+            Gfx.Draw(SessionExpired ? "Войдите снова через окно входа" : "Загружаю профиль…", x + 70, y + 25, 13, SessionExpired ? Th.Warn : Th.Sub);
             y += 62;
         }
         else
         {
-            var def = BrowserLogin.DetectDefault();
             Gfx.Draw("Вы не вошли", x + 16, y, 15, Th.Text, 600);
-            Gfx.Draw($"Вход подхватывается прямо из {def.Name} — без повторного ввода пароля", x + 16, y + 22, 12.5f, Th.Sub, 400, r.W - 32, 2);
-            if (UI.Pill(UI.Id("am:login"), x + 16, y + 58, 34, Th.Globe, $"Войти через {def.Name}", out _, accent: true)) { Close(); App.Post(Shell.Login); }
-            y += 104;
+            Gfx.Draw("Войдите в свой аккаунт Google во встроенном окне — можно добавить несколько аккаунтов и быстро их менять.", x + 16, y + 22, 12.5f, Th.Sub, 400, r.W - 32, 3);
+            if (UI.Pill(UI.Id("am:login"), x + 16, y + 66, 34, Th.Account, "Войти в YouTube", out _, accent: true)) { Close(); App.Post(Shell.LoginNewAccount); }
+            y += 110;
         }
         Sep(r, ref y);
         var accLabel = _saved.Count > 1 ? $"Сменить аккаунт ({_saved.Count})" : "Аккаунты и вход";
-        if (Item(r, x, ref y, "", accLabel, null, true)) Go("accounts");
+        if (Item(r, x, ref y, "\uE748", accLabel, true)) Go("accounts");
         if (CookieStore.IsLoggedIn)
         {
-            if (Item(r, x, ref y, "", "Выйти (гостевой режим)", null, false)) { Close(); App.Post(Shell.Logout); }
+            if (Item(r, x, ref y, Th.Add, "Добавить ещё аккаунт", false)) { Close(); App.Post(Shell.LoginNewAccount); }
+            if (Item(r, x, ref y, "\uE7E8", "Выйти (гостевой режим)", false)) { Close(); App.Post(Shell.Logout); }
             Sep(r, ref y);
-            if (Item(r, x, ref y, "", "Творческая студия YouTube", null, false)) { Close(); W.Open("https://studio.youtube.com/"); }
-            Sep(r, ref y);
-        }
-        else
-        {
-            if (Item(r, x, ref y, Th.Globe, "Открыть YouTube в браузере", null, false)) { Close(); W.Open("https://www.youtube.com/"); }
+            if (Item(r, x, ref y, "\uE8A7", "Творческая студия YouTube", false)) { Close(); W.Open("https://studio.youtube.com/"); }
             Sep(r, ref y);
         }
-        if (Item(r, x, ref y, "", "Тема: " + Themes.Current.Name, null, true)) Go("theme");
+        if (Item(r, x, ref y, "\uE790", "Тема: " + Themes.Current.Name, true)) Go("theme");
         var lang = Langs.FirstOrDefault(l => l.Code == AppSettings.Current.Hl).Name ?? AppSettings.Current.Hl;
-        if (Item(r, x, ref y, "", "Язык YouTube: " + lang, null, true)) Go("lang");
+        if (Item(r, x, ref y, "\uF2B7", "Язык YouTube: " + lang, true)) Go("lang");
         Sep(r, ref y);
-        if (Item(r, x, ref y, Th.Settings, "Настройки", null, false)) { Close(); App.Post(() => Shell.OpenRoot("settings")); }
+        if (Item(r, x, ref y, Th.Settings, "Настройки", false)) { Close(); App.Post(() => Shell.OpenRoot("settings")); }
         var need = y + 8 - r.Y;
         if (MathF.Abs(need - _mainH) > 0.5f) { _mainH = need; UI.Animate(); }
     }
@@ -365,10 +409,15 @@ public static class AccountMenu
     {
         float x = r.X + slide, y = r.Y + 8;
         Header(r, x, ref y, "Аккаунты YouTube");
+        var view = new R(r.X, y, r.W, MathF.Max(40, r.Bottom - y - 4));
+        float totalH = (_saved.Count == 0 ? 34 : _saved.Count * 54 + 12) + 122;
+        var scroll = UI.BeginScroll(_scrollAcc, view, totalH);
+        y -= scroll;
+
         if (_saved.Count == 0)
         {
-            Gfx.Draw("Пока нет сохранённых аккаунтов", x + 16, y + 4, 13, Th.Sub);
-            y += 30;
+            Gfx.Draw("Пока нет сохранённых аккаунтов", x + 16, y + 6, 13, Th.Sub);
+            y += 34;
         }
         else
         {
@@ -384,13 +433,12 @@ public static class AccountMenu
                 Gfx.Draw(acc.Handle, x + 62, y + 27, 12, Gfx.Fade(Th.Sub, a), 400, r.W - 118);
 
                 var delR = new R(r.Right - 36, y + 14, 24, 24);
-                bool delClicked = false;
+                bool overDel = over && UI.Hover(delR);
                 if (over || !active)
                 {
                     if (active) Gfx.Icon(Th.Check, new R(r.Right - 60, y, 22, 52), 12, Th.Brand);
                     if (over && UI.IconButton(UI.Id("am:accdel:" + acc.Id), delR, Th.Close, 9.5f, Th.Sub))
                     {
-                        delClicked = true;
                         var rid = acc.Id;
                         App.Post(() => RemoveSaved(rid));
                     }
@@ -400,7 +448,8 @@ public static class AccountMenu
                     Gfx.Icon(Th.Check, new R(r.Right - 36, y, 22, 52), 12, Th.Brand);
                 }
 
-                if (!delClicked && !active && UI.Click(UI.Id("am:acc:" + acc.Id), row))
+                // Guard against clicking the delete × button accidentally switching accounts
+                if (!overDel && !active && UI.Click(UI.Id("am:acc:" + acc.Id), row))
                 {
                     var tid = acc.Id;
                     Close();
@@ -411,73 +460,87 @@ public static class AccountMenu
             Sep(r, ref y);
         }
 
-        if (Item(r, x, ref y, Th.Download, "Импортировать все аккаунты", null, false)) { Close(); App.Post(BrowserLogin.ImportAllAccounts); }
-        if (Item(r, x, ref y, Th.Add, "Добавить аккаунт (браузер)…", null, false))
+        if (Item(r, x, ref y, Th.Add, "Добавить новый аккаунт…", false)) { Close(); App.Post(Shell.LoginNewAccount); }
+        if (Item(r, x, ref y, Th.Folder, "Импорт из cookies.txt…", false))
         {
             Close();
-            var list = BrowserLogin.Supported.Select(b => new MenuItem(b.Name, () => BrowserLogin.ImportFromBrowser(b), icon: Th.Globe)).ToList();
-            list.Add(MenuItem.Sep);
-            list.Add(new("Импорт cookies.txt…", () => { if (Dialogs.PickFile("cookies.txt\0*.txt\0\0") is { } f) BrowserLogin.ImportFromFile(f); }, icon: Th.Folder));
-            Menus.Popup(list);
+            App.Post(() => { if (Dialogs.PickFile("cookies.txt\0*.txt\0\0") is { } f) BrowserLogin.ImportFromFile(f); });
         }
-        if (Item(r, x, ref y, Th.OpenNew, "Добавить через окно входа", null, false)) { Close(); App.Post(Shell.LoginWebView); }
-        if (Item(r, x, ref y, Th.Globe, "Открыть YouTube в браузере", null, false)) { Close(); W.Open("https://www.youtube.com/"); }
+        if (Item(r, x, ref y, Th.Globe, "Открыть YouTube в браузере", false)) { Close(); W.Open("https://www.youtube.com/"); }
+        UI.EndScroll();
     }
 
     private static void ThemePage(R r, float slide, float a)
     {
         float x = r.X + slide, y = r.Y + 8;
         Header(r, x, ref y, "Тема");
+        var view = new R(r.X, y, r.W, MathF.Max(40, r.Bottom - y - 4));
+        float totalH = Themes.All.Length * 38 + 44;
+        var scroll = UI.BeginScroll(_scrollTheme, view, totalH);
+        y -= scroll;
+
         foreach (var t in Themes.All)
         {
-            var p = Themes.Preview(t);
-            var row = new R(r.X, y, r.W, 38);
-            UI.Glow(UI.Id("am:t:" + t.Name), row.Inset(6, 1), 8, UI.Hover(row));
-            // three dots of the palette: background, card, accent
-            Gfx.Circle(x + 24, y + 19, 8, p.Bg);
-            Gfx.Stroke(new R(x + 16, y + 11, 16, 16), Th.A(0.3f), 8);
-            Gfx.Circle(x + 40, y + 19, 6, p.Card);
-            Gfx.Circle(x + 54, y + 19, 6, p.Brand);
-            var on = Themes.Current.Name == t.Name;
-            Gfx.Draw(t.Name, x + 72, y + 9, 14, Gfx.Fade(Th.Text, a), on ? 600 : 400, r.W - 110);
-            if (on) Gfx.Icon(Th.Check, new R(r.Right - 40, y, 30, 38), 12, Th.Text);
-            if (UI.Click(UI.Id("am:t:" + t.Name), row) && !on) { var n = t.Name; App.Post(() => Themes.Apply(theme: n)); }
+            if (y + 38 >= view.Y - 4 && y <= view.Bottom + 4)
+            {
+                var p = Themes.Preview(t);
+                var row = new R(r.X, y, r.W, 38);
+                UI.Glow(UI.Id("am:t:" + t.Name), row.Inset(6, 1), 8, UI.Hover(row));
+                Gfx.Circle(x + 24, y + 19, 8, p.Bg);
+                Gfx.Stroke(new R(x + 16, y + 11, 16, 16), Th.A(0.3f), 8);
+                Gfx.Circle(x + 40, y + 19, 6, p.Card);
+                Gfx.Circle(x + 54, y + 19, 6, p.Brand);
+                var on = Themes.Current.Name == t.Name;
+                Gfx.Draw(t.Name, x + 72, y + 9, 14, Gfx.Fade(Th.Text, a), on ? 600 : 400, r.W - 110);
+                if (on) Gfx.Icon(Th.Check, new R(r.Right - 40, y, 30, 38), 12, Th.Text);
+                if (UI.Click(UI.Id("am:t:" + t.Name), row) && !on) { var n = t.Name; App.Post(() => Themes.Apply(theme: n)); }
+            }
             y += 38;
         }
-        if (Item(r, x, ref y, Th.Settings, "Цвет акцента и все темы…", null, false)) { Close(); App.Post(() => Shell.OpenRoot("settings")); }
+        if (Item(r, x, ref y, Th.Settings, "Цвет акцента и все темы…", false)) { Close(); App.Post(() => Shell.OpenRoot("settings")); }
+        UI.EndScroll();
     }
 
     private static void LangPage(R r, float slide, float a)
     {
         float x = r.X + slide, y = r.Y + 8;
         Header(r, x, ref y, "Язык YouTube");
+        var view = new R(r.X, y, r.W, MathF.Max(40, r.Bottom - y - 4));
+        float totalH = Langs.Length * 38 + 8;
+        var scroll = UI.BeginScroll(_scrollLang, view, totalH);
+        y -= scroll;
+
         foreach (var (code, name) in Langs)
         {
-            var on = AppSettings.Current.Hl == code;
-            var row = new R(r.X, y, r.W, 38);
-            UI.Glow(UI.Id("am:l:" + code), row.Inset(6, 1), 8, UI.Hover(row));
-            if (on) Gfx.Icon(Th.Check, new R(x + 12, y, 24, 38), 12, Th.Text);
-            Gfx.Draw(name, x + 48, y + 9, 14, Gfx.Fade(Th.Text, a), on ? 600 : 400);
-            if (UI.Click(UI.Id("am:l:" + code), row) && !on)
+            if (y + 38 >= view.Y - 4 && y <= view.Bottom + 4)
             {
-                var c = code;
-                Close();
-                App.Post(() =>
+                var on = AppSettings.Current.Hl == code;
+                var row = new R(r.X, y, r.W, 38);
+                UI.Glow(UI.Id("am:l:" + code), row.Inset(6, 1), 8, UI.Hover(row));
+                if (on) Gfx.Icon(Th.Check, new R(x + 12, y, 24, 38), 12, Th.Text);
+                Gfx.Draw(name, x + 48, y + 9, 14, Gfx.Fade(Th.Text, a), on ? 600 : 400);
+                if (UI.Click(UI.Id("am:l:" + code), row) && !on)
                 {
-                    AppSettings.Current.Hl = c;
-                    AppSettings.Current.Save();
-                    InnerTube.Instance.ResetSession();
-                    Shell.OnAccountChanged();
-                    Shell.Toast("Названия и ленты будут на языке: " + Langs.First(l => l.Code == c).Name);
-                });
+                    var c = code;
+                    Close();
+                    App.Post(() =>
+                    {
+                        AppSettings.Current.Hl = c;
+                        AppSettings.Current.Save();
+                        InnerTube.Instance.ResetSession();
+                        Shell.OnAccountChanged();
+                        Shell.Toast("Названия и ленты будут на языке: " + Langs.First(l => l.Code == c).Name);
+                    });
+                }
             }
             y += 38;
         }
+        UI.EndScroll();
     }
 
     private static void Header(R r, float x, ref float y, string title)
     {
-        if (UI.IconButton(UI.Id("am:back"), new R(x + 8, y + 2, 36, 36), Th.Back, 13)) Go("");
+        if (UI.IconButton(UI.Id("am:back"), new R(x + 8, y + 2, 36, 36), Th.Back, 13)) { Sfx.Back(); Go(""); }
         Gfx.Draw(title, x + 52, y + 10, 15, Th.Text, 600);
         y += 44;
         Gfx.Fill(new R(r.X, y - 2, r.W, 1), Th.Line);
@@ -490,14 +553,14 @@ public static class AccountMenu
         y += 9;
     }
 
-    private static bool Item(R r, float x, ref float y, string glyph, string text, string? hint, bool sub)
+    private static bool Item(R r, float x, ref float y, string glyph, string text, bool sub)
     {
         var row = new R(r.X, y, r.W, 40);
         var id = UI.Id("am:" + text);
         UI.Glow(id, row.Inset(6, 1), 8, UI.Hover(row));
         Gfx.Icon(glyph, new R(x + 12, y, 28, 40), 16, Th.Text);
         Gfx.Draw(text, x + 52, y + 10, 14, Th.Text, 400, r.W - 90);
-        if (sub) Gfx.Icon("", new R(r.Right - 38, y, 28, 40), 11, Th.Sub);
+        if (sub) Gfx.Icon(Th.ChevronRight, new R(r.Right - 38, y, 28, 40), 11, Th.Sub);
         y += 40;
         return UI.Click(id, row);
     }

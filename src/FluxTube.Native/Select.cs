@@ -150,7 +150,7 @@ public static partial class Sel
 
     public static uint LinkColor => Th.Light ? 0xFF065FD4 : 0xFF3EA6FF;
 
-    [GeneratedRegex(@"https?://[^\s<>""]+|(?<![\w/])#[\p{L}\p{Nd}_]{2,}|(?<![\d:])(?:\d{1,2}:)?\d{1,2}:\d{2}(?![\d:])")]
+    [GeneratedRegex(@"https?://[^\s<>""]+|(?<![\w/])#[\p{L}\p{Nd}_]{2,}|(?<![0-9:])(?:[0-9]{1,2}:)?[0-9]{1,2}:[0-9]{2}(?![0-9:])")]
     private static partial Regex LinkRx();
 
     private static readonly Dictionary<string, TextLink[]> _links = new();
@@ -173,24 +173,29 @@ public static partial class Sel
             else
             {
                 double sec = 0;
-                foreach (var part in v.Split(':')) sec = sec * 60 + int.Parse(part);
-                list.Add(new TextLink(m.Index, v.Length, 't', v, sec));
+                bool ok = true;
+                var parts = v.Split(':');
+                foreach (var part in parts)
+                {
+                    if (!int.TryParse(part, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var num))
+                    { ok = false; break; }
+                    sec = sec * 60 + num;
+                }
+                if (ok) list.Add(new TextLink(m.Index, v.Length, 't', v, sec));
             }
         }
         return _links[text] = list.ToArray();
     }
 
-    // layouts are shared through the text cache: remember which ones already carry link colours, and for which theme
+    // layouts are shared through the text cache: remember which ones already carry link colours, and for which theme + device generation
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<TextRun, object> _coloured = new();
 
     private static void Colour(TextRun run, TextLink[] links)
     {
-        object stamp = Th.Light ? Boxed.Light : Boxed.Dark;
-        if (_coloured.TryGetValue(run, out var have) && ReferenceEquals(have, stamp)) return;
+        var stamp = (Th.Light, Gfx.DeviceGeneration);
+        if (_coloured.TryGetValue(run, out var have) && have is ValueTuple<bool, int> prev && prev == stamp) return;
         var brush = Gfx.Brush(LinkColor);
         foreach (var l in links) run.Layout!.SetDrawingEffect(brush, new TextRange { StartPosition = (uint)l.Start, Length = (uint)l.Length });
         _coloured.AddOrUpdate(run, stamp);
     }
-
-    private static class Boxed { public static readonly object Light = new(), Dark = new(); }
 }

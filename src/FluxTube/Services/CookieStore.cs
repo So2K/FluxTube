@@ -13,22 +13,53 @@ public static class CookieStore
 
     private static List<Cookie> _cache = [];
     private static DateTime _mtime;
+    private static volatile bool _isLoggedIn;
+    private static volatile bool _initialized;
     private static readonly object Lock = new();
 
     public static event Action? Changed;
 
-    public static bool IsLoggedIn => Get("youtube.com", "SAPISID") != null || Get("youtube.com", "__Secure-3PAPISID") != null;
+    /// <summary>Zero-syscall cached login state (safe to read inside every UI paint frame).</summary>
+    public static bool IsLoggedIn
+    {
+        get
+        {
+            if (!_initialized) All();
+            return _isLoggedIn;
+        }
+    }
+
+    private static bool ComputeLoggedIn(List<Cookie> list)
+        => list.Any(c => (c.Name is "SAPISID" or "__Secure-3PAPISID") && c.Domain.TrimStart('.').EndsWith("youtube.com", StringComparison.OrdinalIgnoreCase));
 
     public static IReadOnlyList<Cookie> All()
     {
         lock (Lock)
         {
             var path = Paths.Cookies;
-            if (!File.Exists(path)) { _cache = []; return _cache; }
-            var mt = File.GetLastWriteTimeUtc(path);
-            if (mt == _mtime) return _cache;
-            _mtime = mt;
-            _cache = Parse(File.ReadAllLines(path));
+            if (!File.Exists(path)) { _cache = []; _mtime = default; _isLoggedIn = false; _initialized = true; return _cache; }
+            DateTime mt;
+            try { mt = File.GetLastWriteTimeUtc(path); }
+            catch { return _cache; }
+            if (_initialized && mt == _mtime) return _cache;
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var sr = new StreamReader(fs, Encoding.UTF8);
+                    var lines = new List<string>();
+                    string? l;
+                    while ((l = sr.ReadLine()) != null) lines.Add(l);
+                    _cache = Parse(lines);
+                    _mtime = mt;
+                    _isLoggedIn = ComputeLoggedIn(_cache);
+                    _initialized = true;
+                    return _cache;
+                }
+                catch (IOException) when (attempt < 2) { Thread.Sleep(15); }
+                catch (Exception e) { Paths.Log("cookies read: " + e.Message); _initialized = true; return _cache; }
+            }
             return _cache;
         }
     }
@@ -86,16 +117,21 @@ public static class CookieStore
         }
         lock (Lock)
         {
-            File.WriteAllText(Paths.Cookies, sb.ToString());
+            var tmp = Paths.Cookies + ".tmp";
+            File.WriteAllText(tmp, sb.ToString());
+            File.Move(tmp, Paths.Cookies, overwrite: true);
             _mtime = default;
+            _initialized = false;
         }
+        All();
         Changed?.Invoke();
     }
 
     /// <summary>cookies.txt was rewritten by another process (the login helper).</summary>
     public static void NotifyExternalChange()
     {
-        lock (Lock) _mtime = default;
+        lock (Lock) { _mtime = default; _initialized = false; }
+        All();
         Changed?.Invoke();
     }
 
@@ -104,12 +140,12 @@ public static class CookieStore
         lock (Lock)
         {
             if (File.Exists(Paths.Cookies)) File.Delete(Paths.Cookies);
-            _cache = []; _mtime = default;
+            _cache = []; _mtime = default; _isLoggedIn = false; _initialized = true;
         }
         Changed?.Invoke();
     }
 
-    private static List<Cookie> Parse(string[] lines)
+    private static List<Cookie> Parse(IEnumerable<string> lines)
     {
         var list = new List<Cookie>();
         foreach (var raw in lines)

@@ -165,17 +165,25 @@ public sealed class Resolver
     public Task<StreamInfo?> GetAsync(string videoId)
     {
         TaskCompletionSource<StreamInfo?> tcs;
-        if (_cache.TryGetValue(videoId, out var t) && Usable(t))
+        lock (_qLock)
         {
-            if (t.IsCompleted || !_pending.TryGetValue(videoId, out tcs!)) return t;
+            if (_cache.TryGetValue(videoId, out var t) && Usable(t))
+            {
+                if (t.IsCompleted || !_pending.TryGetValue(videoId, out tcs!)) return t;
+            }
+            else
+            {
+                if (_cache.Count > 256)
+                {
+                    foreach (var k in _cache.Keys.Take(64).ToList())
+                        if (!_pending.ContainsKey(k)) _cache.TryRemove(k, out _);
+                }
+                tcs = new TaskCompletionSource<StreamInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _cache[videoId] = tcs.Task;
+                _pending[videoId] = tcs;
+            }
+            _queue.Remove(videoId); // not started in the background yet: no need to do it twice
         }
-        else
-        {
-            tcs = new TaskCompletionSource<StreamInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _cache[videoId] = tcs.Task;
-            _pending[videoId] = tcs;
-        }
-        lock (_qLock) _queue.Remove(videoId); // not started in the background yet: no need to do it twice
         if (_onClickServer.TryAdd(videoId, 0))
             _ = Task.Run(async () =>
             {

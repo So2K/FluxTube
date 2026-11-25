@@ -21,10 +21,11 @@ public sealed class VideoItem
 
     public string Thumb => _thumb ??= $"https://i.ytimg.com/vi/{VideoId}/mqdefault.jpg";
     public string ThumbHq => _thumbHq ??= $"https://i.ytimg.com/vi/{VideoId}/hqdefault.jpg";
+    public string Thumb720 => _thumb720 ??= $"https://i.ytimg.com/vi/{VideoId}/hq720.jpg";
     public string Url => $"https://www.youtube.com/watch?v={VideoId}";
     private string? _channelMeta;
     public string ChannelMeta => _channelMeta ??= string.IsNullOrEmpty(Meta) ? Channel : $"{Channel} · {Meta}";
-    private string? _thumb, _thumbHq;
+    private string? _thumb, _thumbHq, _thumb720;
     public bool HasDuration => !string.IsNullOrEmpty(Duration) || IsLive;
     public string DurationBadge => IsLive ? "LIVE" : Duration;
 }
@@ -95,6 +96,8 @@ public sealed class CommentPage
     public List<Comment> Items { get; } = [];
     public string? Continuation { get; set; }
     public string? Count { get; set; }
+    /// <summary>Params token for InnerTube comment/create_comment when signed in.</summary>
+    public string? CreateCommentParams { get; set; }
 }
 
 /// <summary>One of the account's playlists, as the "save to playlist" list shows it.</summary>
@@ -138,6 +141,7 @@ public sealed class WatchInfo
     public FeedPage Related { get; set; } = new();
     public string? CommentsToken { get; set; }
     public string? CommentsCount { get; set; }
+    public string? CreateCommentParams { get; set; }
     /// <summary>Comment orders ("popular first", "newest"): each is a token that reloads the list.</summary>
     public List<(string Title, string Token, bool Selected)> CommentSorts { get; } = [];
     public List<(double Start, string Title)> Chapters { get; } = [];

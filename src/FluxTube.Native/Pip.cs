@@ -18,8 +18,9 @@ public static unsafe class Pip
     public static bool Locked { get; private set; }
     public static nint Hwnd => _win;
 
-    private static nint _win, _bar, _barFont;
-    private static bool _registered, _lastPaused;
+    private static nint _win, _bar, _barFont, _barBgBr, _barHotBr;
+    private static bool _registered, _lastPaused, _fastTimer;
+    private static int _barDown = -1;
     // locked: how visible the window is (0..255). It dissolves while the pointer is over it and comes back after.
     private static float _alpha = 255;
     private static int _alphaSet = 255;
@@ -78,7 +79,6 @@ public static unsafe class Pip
         Layout();
         W.ShowWindow(_win, 4 /*SW_SHOWNOACTIVATE*/);
         W.ShowWindow(App.VideoHwnd, W.SW_SHOW);
-        W.SetTimer(_win, 1, 40, 0);
         Shell.PushPlayerState();
         App.Invalidate();
     }
@@ -86,12 +86,18 @@ public static unsafe class Pip
     public static void Exit()
     {
         if (!Active) return;
+        Loupe.Hide();
         SetLocked(false);
         Active = false;
         W.ShowWindow(App.VideoHwnd, W.SW_HIDE);
         W.SetParent(App.VideoHwnd, App.Hwnd);
-        W.DestroyWindow(_win);
-        _win = 0;
+        if (_win != 0)
+        {
+            W.KillTimer(_win, 1);
+            var old = _win;
+            _win = 0;
+            W.DestroyWindow(old);
+        }
         Shell.VideoHostReturned();
         Shell.PushPlayerState();
         App.Invalidate();
@@ -129,15 +135,22 @@ public static unsafe class Pip
             _alpha = _alphaSet = 255;
             W.SetLayeredWindowAttributes(_win, 0, 255, 2 /*LWA_ALPHA*/);
             _lastTick = Environment.TickCount64;
-            W.SetTimer(_win, 1, 15, 0); // the fade wants a frame's pace
+            _fastTimer = false;
+            W.SetTimer(_win, 1, 60, 0);
         }
         else
         {
+            if (_win != 0) W.KillTimer(_win, 1);
+            _fastTimer = false;
+            _barHot = _barDown = -1;
             if (_bar != 0) { W.DestroyWindow(_bar); _bar = 0; }
-            W.SetLayeredWindowAttributes(_win, 0, 255, 2);
-            W.SetWindowLongPtrW(_win, W.GWL_EXSTYLE, (nint)(ex & ~(W.WS_EX_LAYERED | W.WS_EX_TRANSPARENT)));
+            if (_barFont != 0) { W.DeleteObject(_barFont); _barFont = 0; }
+            if (_win != 0)
+            {
+                W.SetLayeredWindowAttributes(_win, 0, 255, 2);
+                W.SetWindowLongPtrW(_win, W.GWL_EXSTYLE, (nint)(ex & ~(W.WS_EX_LAYERED | W.WS_EX_TRANSPARENT)));
+            }
             _alpha = _alphaSet = 255;
-            W.SetTimer(_win, 1, 40, 0);
         }
     }
 
@@ -197,6 +210,13 @@ public static unsafe class Pip
         _alpha = MathF.Abs(diff) < 2 ? target : _alpha + diff * (1 - MathF.Exp(-dt * 13));
         var a = (int)MathF.Round(_alpha);
         if (a != _alphaSet) { _alphaSet = a; W.SetLayeredWindowAttributes(_win, 0, (byte)a, 2); }
+        // Fast 16ms timer only while opacity is actively fading; relax to 60ms once settled!
+        bool needFast = MathF.Abs(target - _alpha) >= 1f;
+        if (needFast != _fastTimer)
+        {
+            _fastTimer = needFast;
+            W.SetTimer(_win, 1, needFast ? 16u : 60u, 0);
+        }
         var paused = MpvPlayer.Instance.Paused;
         if (paused != _lastPaused && _bar != 0) { _lastPaused = paused; W.InvalidateRect(_bar, null, 0); }
     }
@@ -206,6 +226,15 @@ public static unsafe class Pip
     {
         switch (m)
         {
+            case W.WM_CLOSE: Exit(); return 0;
+            case W.WM_DESTROY:
+                if (Active && h == _win)
+                {
+                    W.SetParent(App.VideoHwnd, App.Hwnd);
+                    Active = false;
+                    _win = 0;
+                }
+                return 0;
             case W.WM_MOUSEACTIVATE: return 3; // MA_NOACTIVATE: the app being worked in keeps the keyboard
             case W.WM_SIZE: if (Active && h == _win) Layout(); return 0;
             case W.WM_TIMER: Tick(); return 0;
@@ -245,10 +274,10 @@ public static unsafe class Pip
                 var dc = W.BeginPaint(h, &ps);
                 W.RECT rc;
                 W.GetClientRect(h, &rc);
-                var bg = W.CreateSolidBrush(W.Rgb(0x1C, 0x1C, 0x20));
-                W.FillRect(dc, &rc, bg);
-                W.DeleteObject(bg);
-                W.SelectObject(dc, _barFont);
+                if (_barBgBr == 0) _barBgBr = W.CreateSolidBrush(W.Rgb(0x1C, 0x1C, 0x20));
+                if (_barHotBr == 0) _barHotBr = W.CreateSolidBrush(W.Rgb(0x3A, 0x3A, 0x42));
+                W.FillRect(dc, &rc, _barBgBr);
+                var oldFont = _barFont != 0 ? W.SelectObject(dc, _barFont) : 0;
                 W.SetBkMode(dc, 1);
                 int pad = (int)(4 * Scale), bw = (int)BtnW;
                 string[] glyphs = ["", MpvPlayer.Instance.Paused ? "" : "", ""]; // locked, play/pause, back to the app
@@ -257,37 +286,46 @@ public static unsafe class Pip
                     var r = new W.RECT { L = pad + i * bw, T = 0, R = pad + (i + 1) * bw, B = rc.B };
                     if (i == _barHot)
                     {
-                        var hb = W.CreateSolidBrush(W.Rgb(0x3A, 0x3A, 0x42));
                         var hr = new W.RECT { L = r.L + 2, T = r.T + 4, R = r.R - 2, B = r.B - 4 };
-                        W.FillRect(dc, &hr, hb);
-                        W.DeleteObject(hb);
+                        W.FillRect(dc, &hr, _barHotBr);
                     }
                     var c = Th.Brand;
                     W.SetTextColor(dc, i == 0 ? W.Rgb((byte)(c >> 16), (byte)(c >> 8), (byte)c) : W.Rgb(0xF2, 0xF2, 0xF4));
                     W.DrawTextW(dc, glyphs[i], 1, &r, 0x0001 | 0x0004 | 0x0020 /*CENTER|VCENTER|SINGLELINE*/);
                 }
+                if (oldFont != 0) W.SelectObject(dc, oldFont);
                 W.EndPaint(h, &ps);
                 return 0;
             }
             case W.WM_MOUSEMOVE:
             {
-                var i = (int)(((short)(l & 0xFFFF) - 4 * Scale) / BtnW);
+                var i = (int)MathF.Floor(((short)(l & 0xFFFF) - 4 * Scale) / BtnW);
+                if (i < 0 || i >= Buttons) i = -1;
                 if (i != _barHot) { _barHot = i; W.InvalidateRect(h, null, 0); }
                 var tme = new W.TRACKMOUSEEVENT { cbSize = (uint)sizeof(W.TRACKMOUSEEVENT), dwFlags = 2, hwndTrack = h };
                 W.TrackMouseEvent(&tme);
                 return 0;
             }
             case 0x02A3: // WM_MOUSELEAVE
-                _barHot = -1; W.InvalidateRect(h, null, 0); return 0;
+                _barHot = _barDown = -1; W.InvalidateRect(h, null, 0); return 0;
+            case W.WM_LBUTTONDOWN:
+            {
+                var i = (int)MathF.Floor(((short)(l & 0xFFFF) - 4 * Scale) / BtnW);
+                _barDown = i >= 0 && i < Buttons ? i : -1;
+                return 0;
+            }
             case W.WM_LBUTTONUP:
             {
-                var i = (int)(((short)(l & 0xFFFF) - 4 * Scale) / BtnW);
+                var i = (int)MathF.Floor(((short)(l & 0xFFFF) - 4 * Scale) / BtnW);
+                int hit = i >= 0 && i < Buttons && i == _barDown ? i : -1;
+                _barDown = -1;
+                if (hit < 0) return 0;
                 App.Post(() =>
                 {
-                    switch (i)
+                    switch (hit)
                     {
                         case 0: SetLocked(false); break;
-                        case 1: MpvPlayer.Instance.TogglePause(); W.InvalidateRect(_bar, null, 0); break;
+                        case 1: MpvPlayer.Instance.TogglePause(); if (_bar != 0) W.InvalidateRect(_bar, null, 0); break;
                         case 2: BackToApp(); break;
                     }
                 });

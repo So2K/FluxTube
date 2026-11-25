@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Runtime.InteropServices;
-using FluxTube.Models;
 using FluxTube.Player;
 using FluxTube.Services;
 using static FluxTube.Player.MpvNative;
@@ -8,101 +8,167 @@ using static FluxTube.Player.MpvNative;
 namespace FluxTube;
 
 /// <summary>
-/// Lightweight audio-only libmpv instances for background tabs so 2+ videos can play
-/// simultaneously, be paused/muted directly from the tab strip, and seamlessly hand off
-/// their playback position when switching back to the main video player.
+/// Lightweight audio-only libmpv instances for background tabs so up to 4 videos can play
+/// simultaneously, be paused/muted/volume-adjusted smoothly directly from the tab strip,
+/// and seamlessly hand off their exact playback position when switching back to the main player.
 /// </summary>
 public static class BgPlayers
 {
+    private const int MaxInstances = 4;
+
     private sealed class Instance : IDisposable
     {
         public readonly string VideoId;
+        public readonly long CreatedAt = Environment.TickCount64;
+        private readonly object _stateLock = new();
         private IntPtr _ctx;
         private Thread? _thread;
         private volatile bool _disposed;
         private volatile bool _fileLoaded;
+        private bool _wantPaused;
+        private bool _wantMuted;
+        private int _wantVol = -1;
+        private int _volRampGen;
+        private double _timePos;
+        private double _duration;
+
         public volatile bool Paused;
         public volatile bool Muted;
         public volatile bool Loading = true;
         public volatile int Volume = 100;
         public long PausedSince;
-        public double TimePos;
-        public double Duration;
 
-        public Instance(string videoId, double initialPos) { VideoId = videoId; TimePos = initialPos; }
-
-        public double LivePos()
+        public Instance(string videoId, double initialPos)
         {
-            var c = _ctx;
-            if (c != IntPtr.Zero && !_disposed && _fileLoaded && mpv_get_property(c, "time-pos", Format.Double, out double v) >= 0 && v > 0.1)
-                return v;
-            return TimePos;
+            VideoId = videoId;
+            Volatile.Write(ref _timePos, initialPos);
+            var liveVol = MpvPlayer.Instance.IsReady ? MpvPlayer.Instance.Volume : AppSettings.Current.Volume;
+            Volume = Math.Clamp((int)Math.Round(liveVol), 0, 150);
+            _wantMuted = App.Mute || (MpvPlayer.Instance.IsReady && MpvPlayer.Instance.Muted);
+            Muted = _wantMuted;
         }
+
+        public double TimePos => Volatile.Read(ref _timePos);
+        public double Duration => Volatile.Read(ref _duration);
+
+        /// <summary>Non-blocking cached live position (updated continuously by mpv's event thread).</summary>
+        public double LivePos() => Volatile.Read(ref _timePos);
 
         public void Start(string? localFile, StreamInfo? stream, string fallbackUrl, double startSeconds)
         {
-            _ctx = mpv_create();
-            if (_ctx == IntPtr.Zero) return;
-            Opt("vid", "no");
-            Opt("vo", "null");
-            Opt("idle", "yes");
-            Opt("keep-open", "yes");
-            Opt("osc", "no");
-            Opt("osd-bar", "no");
-            Opt("cache", "yes");
-            Opt("demuxer-max-bytes", "4MiB");
-            Opt("demuxer-max-back-bytes", "1MiB");
-            Opt("demuxer-seekable-cache", "no");
-            Opt("cache-pause-initial", "no");
-            Opt("network-timeout", "15");
-            Opt("ad-lavc-threads", "1");
-            var liveVol = MpvPlayer.Instance.IsReady ? MpvPlayer.Instance.GetDouble("volume") : 0;
-            var vol = (int)Math.Round(liveVol > 1 ? liveVol : Math.Clamp(AppSettings.Current.Volume, 1, 150));
-            Volume = vol;
-            Opt("volume", vol.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            if (App.Mute) Opt("mute", "yes");
-            var proxy = AppSettings.Current.Proxy;
-            if (!string.IsNullOrWhiteSpace(proxy)) Opt("http-proxy", proxy);
-            Opt("ytdl", "yes");
-            Opt("ytdl-format", "ba/b");
-            Opt("script-opts", "ytdl_hook-ytdl_path=" + Paths.YtDlp.Replace('\\', '/'));
-            foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
-                Opt("ytdl-raw-options-append", kv);
-
-            if (mpv_initialize(_ctx) < 0) { mpv_terminate_destroy(_ctx); _ctx = IntPtr.Zero; return; }
-            mpv_observe_property(_ctx, 1, "time-pos", Format.Double);
-            mpv_observe_property(_ctx, 2, "duration", Format.Double);
-            mpv_observe_property(_ctx, 3, "pause", Format.Flag);
-            mpv_observe_property(_ctx, 4, "mute", Format.Flag);
-
-            var startOpt = startSeconds > 0.3 ? "start=" + startSeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) : "start=0";
-            if (!string.IsNullOrEmpty(localFile))
-                Cmd("loadfile", localFile, "replace", "-1", startOpt);
-            else if (stream != null)
+            IntPtr ctx;
+            lock (_stateLock)
             {
-                var url = stream.Audio ?? stream.Video;
-                Cmd("loadfile", url, "replace", "-1", startOpt);
+                if (_disposed) return;
+                ctx = mpv_create();
+                if (ctx == IntPtr.Zero) return;
             }
-            else
-                Cmd("loadfile", fallbackUrl, "replace", "-1", startOpt);
-            Set("pause", "no");
-            Paused = false;
-            Loading = false;
+            try
+            {
+                Opt(ctx, "vid", "no");
+                Opt(ctx, "vo", "null");
+                Opt(ctx, "idle", "yes");
+                Opt(ctx, "keep-open", "yes");
+                Opt(ctx, "osc", "no");
+                Opt(ctx, "osd-bar", "no");
+                Opt(ctx, "cache", "yes");
+                Opt(ctx, "demuxer-max-bytes", "4MiB");
+                Opt(ctx, "demuxer-max-back-bytes", "1MiB");
+                Opt(ctx, "demuxer-seekable-cache", "no");
+                Opt(ctx, "cache-pause-initial", "no");
+                Opt(ctx, "network-timeout", "15");
+                Opt(ctx, "ad-lavc-threads", "1");
+                Opt(ctx, "volume-max", "150");
 
-            _thread = new Thread(Loop) { IsBackground = true, Name = "mpv-bg-" + VideoId };
-            _thread.Start();
-            App.WakeUi();
+                int vol;
+                bool muted, paused;
+                lock (_stateLock)
+                {
+                    if (_disposed) { mpv_terminate_destroy(ctx); return; }
+                    vol = _wantVol >= 0 ? _wantVol : Volume;
+                    Volume = vol;
+                    muted = _wantMuted;
+                    paused = _wantPaused;
+                }
+                Opt(ctx, "volume", vol.ToString(CultureInfo.InvariantCulture));
+                if (muted) Opt(ctx, "mute", "yes");
+                var proxy = AppSettings.Current.Proxy;
+                if (!string.IsNullOrWhiteSpace(proxy)) Opt(ctx, "http-proxy", proxy);
+                Opt(ctx, "ytdl", "yes");
+                Opt(ctx, "ytdl-format", "ba/b");
+                Opt(ctx, "script-opts", "ytdl_hook-ytdl_path=" + Paths.YtDlp.Replace('\\', '/'));
+                foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
+                    Opt(ctx, "ytdl-raw-options-append", kv);
+
+                if (mpv_initialize(ctx) < 0)
+                {
+                    mpv_terminate_destroy(ctx);
+                    return;
+                }
+                mpv_observe_property(ctx, 1, "time-pos", Format.Double);
+                mpv_observe_property(ctx, 2, "duration", Format.Double);
+                mpv_observe_property(ctx, 3, "pause", Format.Flag);
+                mpv_observe_property(ctx, 4, "mute", Format.Flag);
+
+                lock (_stateLock)
+                {
+                    if (_disposed)
+                    {
+                        mpv_terminate_destroy(ctx);
+                        return;
+                    }
+                    Volatile.Write(ref _ctx, ctx);
+                    Paused = paused;
+                    Muted = muted;
+                    Loading = false;
+                }
+
+                var startOpt = startSeconds > 0.3 ? "start=" + startSeconds.ToString("0.00", CultureInfo.InvariantCulture) : "start=0";
+                if (!string.IsNullOrEmpty(localFile))
+                    Cmd("loadfile", localFile, "replace", "-1", startOpt);
+                else if (stream != null)
+                    Cmd("loadfile", stream.Audio ?? stream.Video, "replace", "-1", startOpt);
+                else
+                    Cmd("loadfile", fallbackUrl, "replace", "-1", startOpt);
+                Cmd("set", "pause", paused ? "yes" : "no");
+
+                _thread = new Thread(Loop) { IsBackground = true, Name = "mpv-bg-" + VideoId };
+                _thread.Start();
+                App.WakeUi();
+            }
+            catch
+            {
+                lock (_stateLock)
+                {
+                    if (Volatile.Read(ref _ctx) == IntPtr.Zero)
+                        try { mpv_terminate_destroy(ctx); } catch { }
+                }
+                throw;
+            }
         }
 
         private void Loop()
         {
-            while (!_disposed && _ctx != IntPtr.Zero)
+            while (!_disposed)
             {
-                var evPtr = mpv_wait_event(_ctx, 0.5);
+                var ctx = Volatile.Read(ref _ctx);
+                if (ctx == IntPtr.Zero) return;
+                var evPtr = mpv_wait_event(ctx, 0.5);
                 if (evPtr == IntPtr.Zero) continue;
                 var ev = Marshal.PtrToStructure<MpvEvent>(evPtr);
                 if (ev.event_id == EventId.Shutdown) return;
                 if (ev.event_id == EventId.FileLoaded) { _fileLoaded = true; continue; }
+                if (ev.event_id == EventId.EndFile)
+                {
+                    var ef = Marshal.PtrToStructure<MpvEventEndFile>(ev.data);
+                    if (ef.reason == 4)
+                    {
+                        var vid = VideoId;
+                        App.Post(() => Stop(vid, saveToDb: false));
+                        return;
+                    }
+                    continue;
+                }
                 if (ev.event_id == EventId.PropertyChange)
                 {
                     var p = Marshal.PtrToStructure<MpvEventProperty>(ev.data);
@@ -110,62 +176,133 @@ public static class BgPlayers
                     switch (ev.reply_userdata)
                     {
                         case 1:
-                            if (_fileLoaded) TimePos = Marshal.PtrToStructure<double>(p.data);
+                            if (_fileLoaded) Volatile.Write(ref _timePos, Marshal.PtrToStructure<double>(p.data));
                             break;
-                        case 2: Duration = Marshal.PtrToStructure<double>(p.data); break;
+                        case 2:
+                            Volatile.Write(ref _duration, Marshal.PtrToStructure<double>(p.data));
+                            break;
                         case 3:
                             Paused = Marshal.ReadInt32(p.data) != 0;
                             PausedSince = Paused ? Environment.TickCount64 : 0;
                             App.WakeUi();
                             break;
-                        case 4: Muted = Marshal.ReadInt32(p.data) != 0; App.WakeUi(); break;
+                        case 4:
+                            Muted = Marshal.ReadInt32(p.data) != 0;
+                            App.WakeUi();
+                            break;
                     }
                 }
             }
         }
 
-        private void Opt(string n, string v) => mpv_set_option_string(_ctx, n, v);
-        public void Set(string n, string v) { if (_ctx != IntPtr.Zero && !_disposed) mpv_set_property_string(_ctx, n, v); }
+        private static void Opt(IntPtr ctx, string n, string v) => mpv_set_option_string(ctx, n, v);
+
         public void Cmd(params string[] args)
         {
-            if (_ctx == IntPtr.Zero || _disposed) return;
-            var ptrs = new IntPtr[args.Length + 1];
-            try
+            lock (_stateLock)
             {
-                for (int i = 0; i < args.Length; i++) ptrs[i] = Marshal.StringToCoTaskMemUTF8(args[i]);
-                mpv_command_async(_ctx, 0, ptrs);
-            }
-            finally
-            {
-                for (int i = 0; i < args.Length; i++) Marshal.FreeCoTaskMem(ptrs[i]);
+                var ctx = Volatile.Read(ref _ctx);
+                if (ctx == IntPtr.Zero || _disposed) return;
+                var ptrs = new IntPtr[args.Length + 1];
+                try
+                {
+                    for (int i = 0; i < args.Length; i++) ptrs[i] = Marshal.StringToCoTaskMemUTF8(args[i]);
+                    mpv_command_async(ctx, 0, ptrs);
+                }
+                finally
+                {
+                    for (int i = 0; i < args.Length; i++) Marshal.FreeCoTaskMem(ptrs[i]);
+                }
             }
         }
 
-        public void TogglePause() => Cmd("cycle", "pause");
-        public void SetPause(bool p) => Set("pause", p ? "yes" : "no");
-        public void ToggleMute() => Cmd("cycle", "mute");
-        public void SetVolume(int v)
+        public void TogglePause()
         {
-            v = Math.Clamp(v, 0, 150);
-            Volume = v;
-            if (v > 0 && Muted) { Muted = false; Set("mute", "no"); }
-            Set("volume", v.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            lock (_stateLock)
+            {
+                _wantPaused = !Paused;
+                if (Volatile.Read(ref _ctx) == IntPtr.Zero) { Paused = _wantPaused; return; }
+            }
+            Cmd("cycle", "pause");
+        }
+
+        public void SetPause(bool p)
+        {
+            lock (_stateLock)
+            {
+                _wantPaused = p;
+                if (Volatile.Read(ref _ctx) == IntPtr.Zero) { Paused = p; return; }
+            }
+            Cmd("set", "pause", p ? "yes" : "no");
+        }
+
+        public void ToggleMute()
+        {
+            lock (_stateLock)
+            {
+                _wantMuted = !Muted;
+                if (Volatile.Read(ref _ctx) == IntPtr.Zero) { Muted = _wantMuted; return; }
+            }
+            Cmd("cycle", "mute");
+        }
+
+        public void SetVolumeSmooth(int target)
+        {
+            target = Math.Clamp(target, 0, 150);
+            int start;
+            lock (_stateLock)
+            {
+                start = Volume;
+                _wantVol = target;
+                Volume = target;
+                if (target > 0 && Muted)
+                {
+                    Muted = false;
+                    _wantMuted = false;
+                    if (Volatile.Read(ref _ctx) != IntPtr.Zero) Cmd("set", "mute", "no");
+                }
+                if (Volatile.Read(ref _ctx) == IntPtr.Zero) { App.WakeUi(); return; }
+            }
+            var delta = target - start;
+            if (Math.Abs(delta) <= 2)
+            {
+                Interlocked.Increment(ref _volRampGen);
+                Cmd("set", "volume", target.ToString(CultureInfo.InvariantCulture));
+                App.WakeUi();
+                return;
+            }
+            var gen = Interlocked.Increment(ref _volRampGen);
+            _ = Task.Run(async () =>
+            {
+                const int steps = 5;
+                for (int i = 1; i <= steps; i++)
+                {
+                    if (gen != Volatile.Read(ref _volRampGen) || _disposed) return;
+                    double t = (double)i / steps;
+                    double v = i == steps ? target : Math.Round(start + delta * (1.0 - (1.0 - t) * (1.0 - t)), 1);
+                    Cmd("set", "volume", v.ToString("0.#", CultureInfo.InvariantCulture));
+                    if (i < steps) await Task.Delay(16);
+                }
+            });
             App.WakeUi();
         }
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
-            var c = _ctx;
-            _ctx = IntPtr.Zero;
-            if (c != IntPtr.Zero)
+            IntPtr ctx;
+            lock (_stateLock)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                ctx = Interlocked.Exchange(ref _ctx, IntPtr.Zero);
+            }
+            if (ctx != IntPtr.Zero)
             {
                 try
                 {
-                    mpv_wakeup(c);
+                    mpv_wakeup(ctx);
                     _thread?.Join(800);
-                    mpv_terminate_destroy(c);
+                    mpv_terminate_destroy(ctx);
                 }
                 catch { }
             }
@@ -184,7 +321,7 @@ public static class BgPlayers
     public static double GetDuration(string videoId) => _all.TryGetValue(videoId, out var i) ? i.Duration : 0;
     public static void AdjustVolume(string videoId, int delta)
     {
-        if (_all.TryGetValue(videoId, out var i)) i.SetVolume(i.Volume + delta);
+        if (_all.TryGetValue(videoId, out var i)) i.SetVolumeSmooth(i.Volume + delta);
     }
     public static int ActiveCount => _all.Values.Count(i => !i.Paused);
 
@@ -197,6 +334,13 @@ public static class BgPlayers
             existing.SetPause(false);
             App.Invalidate();
             return;
+        }
+        // Keep RAM bounded: cap simultaneous background mpv instances
+        while (_all.Count >= MaxInstances)
+        {
+            var victim = _all.Values.OrderByDescending(i => i.Paused).ThenBy(i => i.CreatedAt).FirstOrDefault();
+            if (victim == null) break;
+            Stop(victim.VideoId);
         }
         var start = startOverride ?? Shell.GetSavedTabPos(videoId) ?? Db.ResumePosition(videoId) ?? 0;
         var inst = new Instance(videoId, start);
@@ -221,13 +365,20 @@ public static class BgPlayers
                         try { stream = await Resolver.Instance.GetAsync(videoId); } catch { }
                     }
                 }
-                if (!_all.ContainsKey(videoId)) { inst.Dispose(); return; }
+                if (!_all.TryGetValue(videoId, out var current) || !ReferenceEquals(current, inst))
+                {
+                    inst.Dispose();
+                    return;
+                }
                 inst.Start(local, stream, "https://www.youtube.com/watch?v=" + videoId, start);
             }
             catch (Exception e)
             {
                 Paths.Log($"bg play {videoId}: {e.Message}");
-                Stop(videoId);
+                if (_all.TryGetValue(videoId, out var current) && ReferenceEquals(current, inst))
+                    Stop(videoId, saveToDb: false);
+                else
+                    inst.Dispose();
             }
         });
     }
@@ -245,7 +396,7 @@ public static class BgPlayers
         App.Invalidate();
     }
 
-    /// <summary>Stops the background player for videoId and optionally saves its last position to DB. Returns its exact live TimePos.</summary>
+    /// <summary>Stops the background player for videoId and optionally saves its position to DB (without creating ghost rows).</summary>
     public static double Stop(string videoId, bool saveToDb = true)
     {
         if (!_all.TryRemove(videoId, out var inst)) return 0;
@@ -256,11 +407,7 @@ public static class BgPlayers
             var id = videoId;
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                try
-                {
-                    var sid = Db.StartWatch(new VideoItem { VideoId = id }, "tab");
-                    Db.UpdateWatch(sid, null, null, pos, dur, 0);
-                }
+                try { Db.UpdateLatestPosition(id, pos, dur); }
                 catch { }
             });
         }

@@ -16,7 +16,7 @@ public static unsafe class App
 
     private static readonly ConcurrentQueue<Action> _posts = new();
     private static readonly List<(long Due, Action Act)> _timers = new();
-    private static bool _inFrame, _tracking, _wakePending;
+    private static bool _inFrame, _tracking, _wakePending, _occludedTimer;
     private static long _lastFrameTick;
     private static nint _arrow, _hand, _ibeam;
     private const uint WM_POST = W.WM_APP + 1, WM_WAKE = W.WM_APP + 2;
@@ -28,6 +28,7 @@ public static unsafe class App
     /// <summary>Runs a on the UI thread after the current message; safe from any thread.</summary>
     public static void Post(Action a)
     {
+        if (Hwnd == 0) return;
         _posts.Enqueue(a);
         W.PostMessageW(Hwnd, WM_POST, 0, 0);
     }
@@ -35,16 +36,27 @@ public static unsafe class App
     /// <summary>Cheap "something changed" from worker threads; many calls collapse into one frame.</summary>
     public static void WakeUi()
     {
+        if (Hwnd == 0) return;
         if (Interlocked.Exchange(ref _wakePending, true)) return;
         W.PostMessageW(Hwnd, WM_WAKE, 0, 0);
     }
 
-    public static void Invalidate() => W.InvalidateRect(Hwnd, null, 0);
+    public static void Invalidate() { if (Hwnd != 0) W.InvalidateRect(Hwnd, null, 0); }
 
     public static void After(int ms, Action a)
     {
-        _timers.Add((Environment.TickCount64 + ms, a));
-        W.SetTimer(Hwnd, 2, 30, 0);
+        if (Hwnd == 0) return;
+        _timers.Add((Environment.TickCount64 + Math.Max(1, ms), a));
+        RescheduleAfterTimer();
+    }
+
+    private static void RescheduleAfterTimer()
+    {
+        if (_timers.Count == 0) { W.KillTimer(Hwnd, 2); return; }
+        long now = Environment.TickCount64, earliest = long.MaxValue;
+        for (int i = 0; i < _timers.Count; i++) if (_timers[i].Due < earliest) earliest = _timers[i].Due;
+        uint delay = (uint)Math.Clamp(earliest - now, 15, 60_000);
+        W.SetTimer(Hwnd, 2, delay, 0);
     }
 
     [STAThread]
@@ -211,7 +223,15 @@ public static unsafe class App
                 case W.WM_PAINT:
                     Frame();
                     W.ValidateRect(h, null);
-                    if (UI.TakeAnimate()) W.InvalidateRect(h, null, 0);
+                    if (UI.TakeAnimate())
+                    {
+                        if (Gfx.Occluded)
+                        {
+                            // Window is occluded (covered/locked): Present(1,0) does not wait for VSync, so pause spin!
+                            if (!_occludedTimer) { _occludedTimer = true; W.SetTimer(h, 3, 250, 0); }
+                        }
+                        else W.InvalidateRect(h, null, 0);
+                    }
                     return 0;
                 case W.WM_ERASEBKGND:
                     return 1;
@@ -256,6 +276,7 @@ public static unsafe class App
                     return 1;
                 }
                 case W.WM_SIZE:
+                    Suggest.Hide();
                     if (Gfx.DC != null && (int)w != 1)
                     {
                         Gfx.Resize();
@@ -266,6 +287,7 @@ public static unsafe class App
                 {
                     var rc = (W.RECT*)l;
                     W.SetWindowPos(h, 0, rc->L, rc->T, rc->R - rc->L, rc->B - rc->T, W.SWP_NOZORDER | W.SWP_NOACTIVATE);
+                    if (Gfx.DC != null) { Gfx.Resize(); Invalidate(); }
                     return 0;
                 }
                 case W.WM_GETMINMAXINFO:
@@ -302,8 +324,8 @@ public static unsafe class App
                     return 0;
                 case W.WM_LBUTTONUP:
                     UpdateMouse(l);
-                    W.ReleaseCapture();
                     UI.Down = false;
+                    if (!UI.MiddleDown) W.ReleaseCapture();
                     UI.Released = true;
                     Invalidate();
                     return 0;
@@ -321,12 +343,13 @@ public static unsafe class App
                     UI.MiddleDownX = UI.MX;
                     UI.MiddleDownY = UI.MY;
                     UI.MiddleDownAt = Environment.TickCount64;
+                    After(225, Invalidate);
                     Invalidate();
                     return 0;
                 case W.WM_MBUTTONUP:
                     UpdateMouse(l);
-                    W.ReleaseCapture();
                     UI.MiddleDown = false;
+                    if (!UI.Down) W.ReleaseCapture();
                     if (UI.AutoScrollActive && UI.AutoScrollHold)
                     {
                         UI.StopAutoScroll();
@@ -337,6 +360,16 @@ public static unsafe class App
                     }
                     UI.LastInput = Environment.TickCount64;
                     Invalidate();
+                    return 0;
+                case W.WM_CAPTURECHANGED:
+                case W.WM_CANCELMODE:
+                    if (UI.Down || UI.MiddleDown || UI.AutoScrollActive)
+                    {
+                        UI.Down = UI.MiddleDown = false;
+                        UI.Released = true;
+                        UI.StopAutoScroll();
+                        Invalidate();
+                    }
                     return 0;
                 case W.WM_XBUTTONUP:
                 {
@@ -374,6 +407,7 @@ public static unsafe class App
                     if (Shell.Key((int)w, W.KeyDown(W.VK_CONTROL), W.KeyDown(W.VK_MENU))) return 0;
                     break;
                 case W.WM_KEYUP:
+                case W.WM_SYSKEYUP:
                     if ((int)w == W.VK_CONTROL) Loupe.Poll();
                     if ((int)w == W.VK_SPACE && Shell.SpaceUp()) return 0;
                     break;
@@ -410,15 +444,26 @@ public static unsafe class App
                     else if (w == 2)
                     {
                         var now = Environment.TickCount64;
+                        bool fired = false;
                         for (int i = _timers.Count - 1; i >= 0; i--)
                         {
                             if (_timers[i].Due > now) continue;
                             var act = _timers[i].Act;
                             _timers.RemoveAt(i);
+                            fired = true;
                             try { act(); } catch (Exception e) { Paths.Log("timer: " + e); }
                         }
-                        if (_timers.Count == 0) W.KillTimer(h, 2);
-                        Invalidate();
+                        RescheduleAfterTimer();
+                        if (fired) Invalidate();
+                    }
+                    else if (w == 3)
+                    {
+                        if (!Gfx.TestOccluded())
+                        {
+                            _occludedTimer = false;
+                            W.KillTimer(h, 3);
+                            Invalidate();
+                        }
                     }
                     return 0;
                 case W.WM_ACTIVATE:
@@ -458,12 +503,28 @@ internal static unsafe class VideoHost
 
     // in the separate window a press on the picture may become a drag of the whole window
     private static int _pipDownX = -1, _pipDownY;
+    private static bool _lmbSent;
+
+    private static void StopTimers(nint h)
+    {
+        if (_tracking)
+        {
+            _tracking = false;
+            W.KillTimer(h, 1);
+            W.KillTimer(h, 2);
+        }
+        _lastX = _lastY = -1;
+        _cursorHidden = false;
+    }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
     public static nint Proc(nint h, uint m, nuint w, nint l)
     {
         switch (m)
         {
+            case W.WM_SHOWWINDOW:
+                if (w == 0) { StopTimers(h); Loupe.Hide(); }
+                return 0;
             case W.WM_MOUSEMOVE:
             {
                 int x = W.LoWord(l), y = W.HiWord(l);
@@ -492,16 +553,14 @@ internal static unsafe class VideoHost
             }
             case W.WM_MOUSELEAVE:
             {
-                _tracking = false;
-                _lastX = _lastY = -1;
+                StopTimers(h);
                 Loupe.Poll();
-                W.KillTimer(h, 1);
-                W.KillTimer(h, 2);
                 // (scripted checks post mouse messages without a real pointer, which would read as an instant leave)
                 if (!App.Test) Cmd("script-message-to", "fluxosc", "flux-leave"); // the controls hide like on YouTube when the pointer leaves
                 return 0;
             }
             case W.WM_TIMER:
+                if (!W.IsWindowVisible(h)) { StopTimers(h); return 0; }
                 if (w == 2)
                 {
                     Loupe.Poll();
@@ -509,8 +568,13 @@ internal static unsafe class VideoHost
                 }
                 if (!_cursorHidden && Environment.TickCount64 - _lastMove > 1600 && !MpvPlayer.Instance.Paused)
                 {
-                    _cursorHidden = true;
-                    W.SetCursor(0);
+                    W.POINT cp; W.RECT vr;
+                    if (W.GetCursorPos(&cp) && W.GetWindowRect(h, &vr) && cp.X >= vr.L && cp.X < vr.R && cp.Y >= vr.T && cp.Y < vr.B)
+                    {
+                        _cursorHidden = true;
+                        W.SetCursor(0);
+                    }
+                    else StopTimers(h);
                 }
                 return 0;
             case W.WM_SETCURSOR:
@@ -527,6 +591,7 @@ internal static unsafe class VideoHost
                     int px = W.LoWord(l), py = W.HiWord(l);
                     var s = W.GetDpiForWindow(h) / 96f;
                     if (py > 52 * s && py < rc.B - 72 * s) { _pipDownX = px; _pipDownY = py; return 0; }
+                    _lmbSent = true;
                     Cmd("keydown", "MBTN_LEFT");
                     return 0;
                 }
@@ -534,12 +599,18 @@ internal static unsafe class VideoHost
                 Suggest.Hide();
                 if (Menus.Open) { Menus.Close(); return 0; }
                 if (AccountMenu.Open) { AccountMenu.Close(); return 0; } // a click outside the menu only closes it
+                _lmbSent = true;
                 Cmd("keydown", "MBTN_LEFT");
                 return 0;
             case W.WM_LBUTTONUP:
                 W.ReleaseCapture();
-                if (_pipDownX >= 0) { _pipDownX = -1; Cmd("keydown", "MBTN_LEFT"); }
-                Cmd("keyup", "MBTN_LEFT");
+                if (_pipDownX >= 0) { _pipDownX = -1; _lmbSent = true; Cmd("keydown", "MBTN_LEFT"); }
+                if (_lmbSent) { _lmbSent = false; Cmd("keyup", "MBTN_LEFT"); }
+                return 0;
+            case W.WM_CAPTURECHANGED:
+            case W.WM_CANCELMODE:
+                _pipDownX = -1;
+                if (_lmbSent) { _lmbSent = false; Cmd("keyup", "MBTN_LEFT"); }
                 return 0;
             case W.WM_RBUTTONDOWN:
                 if (Menus.Open) { Menus.Close(); return 0; }

@@ -75,10 +75,20 @@ public sealed class AppSettings
 
     public static readonly string[] Qualities = ["best", "2160", "1440", "1080", "720", "480", "360", "audio"];
 
+    private static readonly object _saveLock = new();
+
     public void Save()
     {
-        try { File.WriteAllText(Paths.SettingsFile, JsonSerializer.Serialize(this, SettingsJson.Default.AppSettings)); }
-        catch (Exception e) { Paths.Log("settings save: " + e.Message); }
+        lock (_saveLock)
+        {
+            try
+            {
+                var tmp = Paths.SettingsFile + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(this, SettingsJson.Default.AppSettings));
+                File.Move(tmp, Paths.SettingsFile, overwrite: true);
+            }
+            catch (Exception e) { Paths.Log("settings save: " + e.Message); }
+        }
     }
 
     private static AppSettings Load()

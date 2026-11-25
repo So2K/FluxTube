@@ -16,6 +16,7 @@ public static class Db
         Exec("""
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA busy_timeout=5000;
             CREATE TABLE IF NOT EXISTS watch (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 video_id TEXT NOT NULL, title TEXT, channel TEXT, channel_id TEXT,
@@ -106,6 +107,32 @@ public static class Db
               title=COALESCE(NULLIF($t,''),title), channel=COALESCE(NULLIF($c,''),channel)
             WHERE id=$id
             """, ("$p", position), ("$d", duration), ("$w", watchedDelta), ("$n", Now), ("$t", title), ("$c", channel), ("$id", id));
+
+    /// <summary>Updates the latest watch row for videoId without inserting blank ghost rows in History.</summary>
+    public static void UpdateLatestPosition(string videoId, double position, double duration)
+    {
+        if (string.IsNullOrEmpty(videoId) || position <= 1) return;
+        lock (Lock)
+        {
+            var id = Scalar("SELECT id FROM watch WHERE video_id=$v ORDER BY last_at DESC LIMIT 1", ("$v", videoId));
+            if (id is long rowId)
+                Exec("UPDATE watch SET position_s=$p, duration_s=CASE WHEN $d>0 THEN $d ELSE duration_s END, last_at=$n WHERE id=$id",
+                    ("$p", position), ("$d", duration), ("$n", Now), ("$id", rowId));
+        }
+    }
+
+    public static void Shutdown()
+    {
+        lock (Lock)
+        {
+            try
+            {
+                Exec("PRAGMA wal_checkpoint(TRUNCATE);");
+                Conn.Close();
+            }
+            catch { }
+        }
+    }
 
     /// <summary>Last saved position for resume; null when finished or never watched.</summary>
     public static double? ResumePosition(string videoId)

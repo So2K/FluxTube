@@ -43,6 +43,7 @@ public static class UI
     private static int _active;
     private static bool _animate;
     private static int _cursorHand;
+    public static readonly long StartTick = Environment.TickCount64;
     public static double Dt = 1 / 60.0;
     public static long Now = Environment.TickCount64;
     /// <summary>Last time the user did anything (for work that should only happen while idle).</summary>
@@ -74,13 +75,13 @@ public static class UI
         => !BlockInput && r.Contains(MX, MY) && Gfx.Clip.Contains(MX, MY) && (Modal is not { } m || m.Contains(MX, MY));
 
     /// <summary>Press-inside then release-inside, like a real button.</summary>
-    public static bool Click(int id, R r, bool hand = true)
+    public static bool Click(int id, R r, bool hand = true, bool playSfx = true)
     {
         var over = Hover(r);
         if (over && hand) _cursorHand++;
         if (over && Pressed) _active = id;
         var hit = Released && _active == id && over;
-        if (hit) Sfx.Click();
+        if (hit && playSfx) Sfx.Click();
         return hit;
     }
 
@@ -115,7 +116,21 @@ public static class UI
 
     /// <summary>Like Anim, but a value seen for the first time starts at its target (a switch that is already on does not slide in).</summary>
     public static float Smooth(int id, float target, float rate = 20f)
-        => _anims.TryGetValue(id, out var v) ? Step(id, v, target, rate) : (_anims[id] = target);
+    {
+        if (_anims.TryGetValue(id, out var v)) return Step(id, v, target, rate);
+        if (target == 0) return 0;
+        return _anims[id] = target;
+    }
+
+    public static void PruneCaches()
+    {
+        if (_scrolls.Count > 48)
+        {
+            var stale = _scrolls.Where(kv => kv.Key != _autoScrollId && kv.Key != _dragScroll && Now - kv.Value.LastTouch > 300_000).Select(kv => kv.Key).ToList();
+            foreach (var k in stale) _scrolls.Remove(k);
+        }
+        if (_anims.Count > 512) _anims.Clear();
+    }
 
     private static float Step(int id, float v, float target, float rate)
     {
@@ -182,7 +197,7 @@ public static class UI
         if (enabled) Glow(id, new R(r.X - 6, r.Y, r.W + 12, r.H), 8, over);
         Gfx.Fill(box, Gfx.Mix(Th.Brand & 0xFFFFFF, Th.Brand, t), 5);
         if (t < 0.99f) Gfx.Stroke(box, Gfx.Fade(Th.A(enabled ? 0.5f : 0.25f), 1 - t), 5, 1.4f);
-        if (t > 0.01f) Gfx.Icon(Th.Check, box, 12 * (0.6f + 0.4f * t), Gfx.Fade(Th.OnBrand, t));
+        if (t > 0.01f) Gfx.Icon(Th.Check, box, 12, Gfx.Fade(Th.OnBrand, t));
         var run = Gfx.Text(label, 13.5f, 400, r.W - 30);
         Gfx.Draw(run, box.Right + 10, Gfx.Snap(r.Y + (r.H - run.H) / 2), enabled ? Th.Text : Th.Dim);
         return enabled && Click(id, r);
@@ -240,8 +255,8 @@ public static class UI
         s.Max = MathF.Max(0, contentH - view.H);
         if (s.Max > 0)
         {
-            // Hold-and-drag autoscroll: activates as soon as middle button is held and moved > 10px
-            if (_autoScrollId == 0 && MiddleDown && view.Contains(MiddleDownX, MiddleDownY)
+            // Hold-and-drag autoscroll: activates as soon as middle button is held and moved > 10px (never behind open menus)
+            if (_autoScrollId == 0 && Modal == null && MiddleDown && view.Contains(MiddleDownX, MiddleDownY) && Gfx.Clip.Contains(MiddleDownX, MiddleDownY)
                 && (MathF.Abs(MY - MiddleDownY) > 10 || Now - MiddleDownAt > 220))
             {
                 _autoScrollId = id;
@@ -258,14 +273,19 @@ public static class UI
                     float mag = MathF.Abs(dy) - 10;
                     // Smooth progressive speed like Chrome (gentle near center, fast further away)
                     float speed = sign * (mag * 5.5f + mag * mag * 0.045f);
+                    float prev = s.Pos;
                     s.Target = s.Pos = Math.Clamp(s.Pos + speed * (float)Dt, 0, s.Max);
                     s.LastTouch = Now;
+                    if (MathF.Abs(s.Pos - prev) > 0.01f) Animate();
                 }
-                Animate();
             }
-            _lastScrollCandidate = (id, view);
+            _scrollCandStack[_scrollDepth] = (id, view);
         }
-        else if (_autoScrollId == id) StopAutoScroll();
+        else
+        {
+            if (_autoScrollId == id) StopAutoScroll();
+            _scrollCandStack[_scrollDepth] = default;
+        }
 
         if (Wheel != 0 && Hover(view))
         {
@@ -298,9 +318,10 @@ public static class UI
                 }
             }
             var hot = overTrack || _dragScroll == id;
-            _pendingBar = (id, thumb, hot, Now - s.LastTouch < 900 || hot);
+            long since = Now - s.LastTouch;
+            _pendingBarStack[_scrollDepth] = (id, thumb, hot, since < 900 || hot, s.LastTouch + 900);
         }
-        else _pendingBar = default;
+        else _pendingBarStack[_scrollDepth] = default;
 
         // critically damped approach: quick, no overshoot, frame-rate independent
         var diff = s.Target - s.Pos;
@@ -312,41 +333,54 @@ public static class UI
         }
         else s.Pos = s.Target;
 
+        _scrollDepth++;
         Gfx.PushClip(view);
         return Gfx.Snap(s.Pos);
     }
 
-    private static (int Id, R View) _lastScrollCandidate;
-    private static (int Id, R Thumb, bool Hot, bool Visible) _pendingBar;
+    private static readonly (int Id, R View)[] _scrollCandStack = new (int, R)[8];
+    private static readonly (int Id, R Thumb, bool Hot, bool Visible, long HideAt)[] _pendingBarStack = new (int, R, bool, bool, long)[8];
+    private static int _scrollDepth;
+    private static long _barHideScheduledAt;
 
     public static void EndScroll()
     {
         Gfx.PopClip();
+        if (_scrollDepth <= 0) return;
+        _scrollDepth--;
+        var cand = _scrollCandStack[_scrollDepth];
+        var bar = _pendingBarStack[_scrollDepth];
+        _scrollCandStack[_scrollDepth] = default;
+        _pendingBarStack[_scrollDepth] = default;
+
         // If user clicked MMB inside this scroll view and no card/tab consumed it, toggle browser autoscroll!
-        if (MiddleClicked && _autoScrollId == 0 && _lastScrollCandidate.Id != 0 && _lastScrollCandidate.View.Contains(MX, MY))
+        if (MiddleClicked && Modal == null && _autoScrollId == 0 && cand.Id != 0 && cand.View.Contains(MX, MY) && Gfx.Clip.Contains(MX, MY))
         {
-            _autoScrollId = _lastScrollCandidate.Id;
+            _autoScrollId = cand.Id;
             _autoScrollX = MX;
             _autoScrollY = MY;
             AutoScrollHold = false;
             MiddleClicked = false;
             Animate();
         }
-        _lastScrollCandidate = default;
-        if (_pendingBar.Id != 0)
+        if (bar.Id != 0)
         {
             // the bar fades in when the view moves and out a moment after it stops; it thickens under the pointer
-            var a = Anim(_pendingBar.Id ^ 0x3C3C, _pendingBar.Visible ? 1 : 0, 10);
-            var wide = Anim(_pendingBar.Id ^ 0x3D3D, _pendingBar.Hot ? 1 : 0, 22);
+            var a = Anim(bar.Id ^ 0x3C3C, bar.Visible ? 1 : 0, 10);
+            var wide = Anim(bar.Id ^ 0x3D3D, bar.Hot ? 1 : 0, 22);
             if (a > 0.01f)
             {
-                var t = _pendingBar.Thumb;
+                var t = bar.Thumb;
                 t = new R(t.X - 3 * wide, t.Y, t.W + 3 * wide, t.H);
                 Gfx.Fill(t, Th.A((0.27f + 0.33f * wide) * a), t.W / 2);
             }
-            if (_pendingBar.Visible && !_pendingBar.Hot) Animate(); // keep ticking until the hide timeout
+            // Schedule a single wake-up when the 900ms hide timeout expires instead of spinning 60 FPS!
+            if (bar.Visible && !bar.Hot && bar.HideAt > Now && _barHideScheduledAt < bar.HideAt)
+            {
+                _barHideScheduledAt = bar.HideAt;
+                App.After((int)Math.Clamp(bar.HideAt - Now + 16, 30, 1000), App.Invalidate);
+            }
         }
-        _pendingBar = default;
     }
 
     // ---------------- small drawing helpers ----------------
@@ -373,7 +407,7 @@ public static class UI
     public static uint Pulse(uint color)
     {
         Animate();
-        var p = 0.5f + 0.5f * MathF.Sin(Now / 320f);
+        var p = 0.5f + 0.5f * MathF.Sin((float)((Now - StartTick) / 320.0));
         return Gfx.Mix(color, Gfx.Mix(Th.Card, Th.Ink, 0.06f), p * 0.6f);
     }
 }

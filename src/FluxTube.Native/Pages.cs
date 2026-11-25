@@ -23,7 +23,7 @@ public static class Cards
 
     public static void Thumb(R r, VideoItem v, bool hq, float radius, bool badge = true, uint? behind = null)
     {
-        ThumbUrl(r, v.VideoId.Length == 11 ? (hq ? v.ThumbHq : v.Thumb) : null, radius, behind);
+        ThumbUrl(r, v.VideoId.Length == 11 ? (hq ? v.Thumb720 : v.Thumb) : null, radius, behind);
         if (badge && v.HasDuration)
         {
             var run = Gfx.Text(v.DurationBadge, 11.5f, 600);
@@ -45,7 +45,8 @@ public static class Cards
         Gfx.Circle(x + size / 2, y + size / 2, size / 2, Th.Track);
         if (name.Length > 0)
         {
-            var run = Gfx.Text(name[..1].ToUpperInvariant(), size * 0.42f, 600);
+            var first = System.Globalization.StringInfo.GetNextTextElement(name).ToUpperInvariant();
+            var run = Gfx.Text(first, size * 0.42f, 600);
             Gfx.Draw(run, x + (size - run.W) / 2, y + (size - run.H) / 2, Th.Sub);
         }
     }
@@ -121,7 +122,7 @@ public static class Cards
         return items;
     }
 
-    private static string? _previewId;
+    private static int _previewCardId;
     private static long _previewSince;
 
     /// <summary>
@@ -135,19 +136,17 @@ public static class Cards
         var glow = UI.Glow(id, card.Inset(-7, -7), 14, over);
         if (v.IsChannel)
         {
-            // a channel in search results: its picture in the middle, name and subscribers under it
             var d = MathF.Min(thumbH - 12, cardW * 0.5f);
             Avatar(x + (cardW - d) / 2, y + (thumbH - d) / 2, d, v.AvatarUrl, v.Title);
             var nr = Gfx.Text(v.Title, 15, 600, cardW, 1);
             Gfx.Draw(nr, x + (cardW - nr.W) / 2, y + thumbH + 8, Th.Text);
             var mr = Gfx.Text(v.Meta, 12.5f, 400, cardW, 1);
             Gfx.Draw(mr, x + (cardW - mr.W) / 2, y + thumbH + 12 + nr.H, Th.Sub);
-            if (UI.Click(id, card)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Title));
+            if (UI.Click(id, card, playSfx: false)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Title));
             return;
         }
         if (v.PlaylistId != null)
         {
-            // a stack of cards behind the cover says "list"
             Gfx.Fill(new R(x + 16, y - 6, cardW - 32, 8), Th.Track, 6);
             Gfx.Fill(new R(x + 8, y - 3, cardW - 16, 8), Gfx.Mix(Th.Track, Th.Card, 0.5f), 7);
         }
@@ -156,20 +155,29 @@ public static class Cards
         bool previewing = false;
         if (over && v.PlaylistId == null && !v.IsLive && v.VideoId.Length == 11)
         {
-            if (_previewId != v.VideoId) { _previewId = v.VideoId; _previewSince = UI.Now; }
+            if (_previewCardId != id) { _previewCardId = id; _previewSince = UI.Now; }
             double hSec = (UI.Now - _previewSince) / 1000.0;
             if (hSec < 0.40) UI.Animate();
             if (hSec >= 0.35)
             {
+                // Draw HD thumbnail once (without duration badge while storyboard fades in over it)
                 Thumb(thumbR, v, true, 12, badge: false, behind: behind);
                 previewing = Storyboard.TryDrawCardPreview(v.VideoId, thumbR, 12, behind, hSec);
+                if (!previewing && v.HasDuration)
+                {
+                    var run = Gfx.Text(v.DurationBadge, 11.5f, 600);
+                    var b = new R(thumbR.Right - run.W - 15, thumbR.Bottom - run.H - 10, run.W + 9, run.H + 3);
+                    Gfx.Fill(b, Th.Badge, 4);
+                    Gfx.Draw(run, b.X + 4.5f, b.Y + 1, 0xFFFFFFFF);
+                }
             }
+            else Thumb(thumbR, v, true, 12, behind: behind);
         }
-        else if (_previewId == v.VideoId && !over)
+        else
         {
-            _previewId = null;
+            if (_previewCardId == id && !over) _previewCardId = 0;
+            Thumb(thumbR, v, true, 12, behind: behind);
         }
-        if (!previewing) Thumb(thumbR, v, true, 12, behind: behind);
 
         float tx = x, tw = cardW;
         if (v.AvatarUrl != null) { Avatar(x, y + thumbH + 11, 34, v.AvatarUrl, v.Channel); tx += 44; tw -= 44; }
@@ -177,7 +185,7 @@ public static class Cards
         var cy = y + thumbH + 12 + t.H;
         Gfx.Draw(channelLine ? v.ChannelMeta : v.Meta, tx, cy, 12.5f, Th.Sub, 400, tw, 2);
         var overChannel = false;
-        if (channelLine && over && !string.IsNullOrEmpty(v.ChannelId) && v.Channel.Length > 0)
+        if (channelLine && v.PlaylistId == null && over && !string.IsNullOrEmpty(v.ChannelId) && v.Channel.Length > 0)
         {
             var name = Gfx.Text(v.Channel, 12.5f, 400, tw);
             var chRect = new R(tx, cy, name.W, name.H);
@@ -186,9 +194,8 @@ public static class Cards
             overChannel = overName || (v.AvatarUrl != null && UI.Hover(avRect));
             if (overChannel)
             {
-                Gfx.Draw(name, tx, cy, Th.Text);
                 Gfx.Fill(new R(tx, cy + name.H - 1.5f, name.W, 1), Th.Text);
-                if (UI.Click(UI.Id(id, 9), overName ? chRect : avRect)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Channel));
+                if (UI.Click(UI.Id(id, 9), overName ? chRect : avRect, playSfx: false)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Channel));
             }
         }
 
@@ -200,7 +207,7 @@ public static class Cards
         if (over) hover.Over(v);
         if (UI.MiddleClick(card)) Shell.OpenVideoInNewTab(v);
         else if (overChannel) { }
-        else if (UI.Click(id, card)) App.Post(() => Shell.OpenVideo(v, source));
+        else if (UI.Click(id, card, playSfx: false)) App.Post(() => Shell.OpenVideo(v, source));
         else if (UI.RightClick(card)) Menus.Popup(MenuFor(v));
     }
 
@@ -262,7 +269,19 @@ public static class Cards
 /// <summary>The last feed of each section on disk: the window opens with content, the fresh feed replaces it a moment later.</summary>
 public static class FeedCache
 {
-    private static string File_(string kind) => Path.Combine(Paths.Data, "feeds", kind + ".json");
+    private static string Dir_ => Path.Combine(Paths.Data, "feeds");
+    private static string File_(string kind) => Path.Combine(Dir_, kind + ".json");
+
+    public static void ClearAll()
+    {
+        try
+        {
+            if (Directory.Exists(Dir_))
+                foreach (var f in Directory.GetFiles(Dir_, "*.json"))
+                    try { File.Delete(f); } catch { }
+        }
+        catch { }
+    }
 
     public static void Save(string kind, List<VideoItem> items)
     {
@@ -274,8 +293,11 @@ public static class FeedCache
                 {
                     ["id"] = v.VideoId, ["t"] = v.Title, ["c"] = v.Channel, ["ci"] = v.ChannelId, ["d"] = v.Duration, ["m"] = v.Meta, ["a"] = v.AvatarUrl, ["l"] = v.IsLive,
                 });
-            Directory.CreateDirectory(Path.GetDirectoryName(File_(kind))!);
-            File.WriteAllText(File_(kind), arr.ToJsonString());
+            Directory.CreateDirectory(Dir_);
+            var dest = File_(kind);
+            var tmp = dest + ".tmp";
+            File.WriteAllText(tmp, arr.ToJsonString());
+            File.Move(tmp, dest, overwrite: true);
         }
         catch (Exception e) { Paths.Log("feed cache save: " + e.Message); }
     }
@@ -335,10 +357,19 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     public void Hidden() { }
     public void Refresh()
     {
-        if (_fresh is { } p) { _fresh = null; _message = null; Replace(p); }
+        _chipIdx = 0;
+        if (_fresh is { } p) { _fresh = null; _message = null; Replace(p, saveCache: true); }
         else Load();
     }
-    public void Invalidate() => _loaded = false;
+    public void Invalidate()
+    {
+        _loaded = false;
+        _fresh = null;
+        _chipIdx = 0;
+        _chips = [];
+        _items = [];
+        _ids.Clear();
+    }
 
     private bool Cacheable => kind is "home" or "subs" or "wl" or "liked";
 
@@ -371,7 +402,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
             : u.StartsWith("ч") || u.StartsWith("hour") ? 3600
             : u.StartsWith("д") || u.StartsWith("day") ? 86400
             : u.StartsWith("н") || u.StartsWith("week") ? 604800
-            : u.StartsWith("м") || u.StartsWith("month") ? 2629800
+            : u.StartsWith("мес") || u.StartsWith("month") ? 2629800
             : u.StartsWith("г") || u.StartsWith("л") || u.StartsWith("year") ? 31557600 : 0;
         return n * unit;
     }
@@ -471,21 +502,46 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     private List<(string Title, string Token, bool Selected)> _chips = [];
     private int _chipIdx;
     private float _chipScroll;
-    private static readonly (string Title, string Token, bool Selected)[] FallbackHomeChips =
+
+    // Curated Top-5 most popular & useful Home categories (mapped to real YouTube personalized filter tokens when available!)
+    private static readonly (string Title, string[] MatchKeys, string FallbackToken)[] Top5HomeSpecs =
     [
-        ("Все", "", true),
-        ("Видеоигры", "search:видеоигры", false),
-        ("Подкасты", "search:подкасты", false),
-        ("Музыка", "search:музыка", false),
-        ("Джемы", "search:music mix", false),
-        ("Сейчас в эфире", "search:прямой эфир", false),
-        ("Недавно опубликованные", "search:новые видео", false),
-        ("Новое для вас", "search:популярные видео", false),
+        ("Рекомендации", ["все", "all", "рекомендац"], ""),
+        ("Музыка", ["музык", "music"], "search:музыка"),
+        ("Видеоигры", ["видеоигр", "игр", "gaming", "games"], "search:видеоигры"),
+        ("Новое для вас", ["новое для вас", "new to you", "недавно опубликован", "recently uploaded"], "search:новые видео"),
+        ("Подкасты", ["подкаст", "podcast", "прямой эфир", "live", "в тренде"], "search:подкасты"),
     ];
+
+    private static List<(string Title, string Token, bool Selected)> BuildTop5HomeChips(List<(string Title, string Token, bool Selected)> raw)
+    {
+        var list = new List<(string Title, string Token, bool Selected)>(5);
+        for (int s = 0; s < Top5HomeSpecs.Length; s++)
+        {
+            var (title, keys, fallback) = Top5HomeSpecs[s];
+            string tok = fallback;
+            if (s == 0) tok = ""; // Рекомендации always loads the exact 1-to-1 personalized Home feed
+            else if (raw.Count > 0)
+            {
+                foreach (var c in raw)
+                {
+                    var low = c.Title.ToLowerInvariant();
+                    if (keys.Any(k => low.Contains(k, StringComparison.Ordinal)) && !string.IsNullOrEmpty(c.Token))
+                    {
+                        tok = c.Token;
+                        break;
+                    }
+                }
+            }
+            list.Add((title, tok, s == 0));
+        }
+        return list;
+    }
 
     private void SelectChip(int idx)
     {
         if (idx < 0 || idx >= _chips.Count || idx == _chipIdx) return;
+        var prevIdx = _chipIdx;
         _chipIdx = idx;
         var chip = _chips[idx];
         var gen = ++_gen;
@@ -510,14 +566,15 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 {
                     if (gen != _gen) return;
                     _loading = false;
-                    Replace(page);
+                    // Only overwrite disk Home cache when back on Рекомендации (idx == 0)
+                    Replace(page, saveCache: idx == 0);
                     if (_items.Count == 0) Say("По этой категории пока ничего не нашлось.", Th.Sub);
                 });
             }
             catch (Exception e)
             {
                 Paths.Log($"home chip {chip.Title}: {e.Message}");
-                App.Post(() => { if (gen == _gen) { _loading = false; Say("Не удалось загрузить категорию: " + e.Message, Th.Brand); } });
+                App.Post(() => { if (gen == _gen) { _chipIdx = prevIdx; _loading = false; Say("Не удалось загрузить категорию: " + e.Message, Th.Brand); } });
             }
         });
     }
@@ -528,12 +585,11 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         const float h = 32, gap = 8;
         var barR = new R(x0, y, w, h);
 
-        // Compute total chip strip width for clean horizontal scrolling
         float totalW = 0;
         var widths = new float[_chips.Count];
         for (int i = 0; i < _chips.Count; i++)
         {
-            widths[i] = Gfx.Text(_chips[i].Title, 13, 600).W + 24;
+            widths[i] = Gfx.Text(_chips[i].Title, 13, 600).W + 26;
             totalW += widths[i] + (i > 0 ? gap : 0);
         }
         float maxScroll = MathF.Max(0, totalW - w);
@@ -545,6 +601,10 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         }
         _chipScroll = Math.Clamp(_chipScroll, 0, maxScroll);
 
+        var lb = _chipScroll > 2 ? new R(x0, y, 28, h) : default;
+        var rb = _chipScroll < maxScroll - 2 ? new R(x0 + w - 28, y, 28, h) : default;
+        bool overChev = (lb.W > 0 && UI.Hover(lb)) || (rb.W > 0 && UI.Hover(rb));
+
         Gfx.PushClip(barR);
         float cx = x0 - _chipScroll;
         for (int i = 0; i < _chips.Count; i++)
@@ -555,45 +615,38 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
             {
                 bool active = i == _chipIdx;
                 int id = UI.Id("hchip:" + i, _scroll);
-                bool over = UI.Hover(r);
-                if (active)
-                    Gfx.Fill(r, Th.Text, 8);
-                else
-                {
-                    Gfx.Fill(r, Th.A(over ? 0.16f : 0.085f), 8);
-                }
+                bool over = !overChev && UI.Hover(r);
+                if (active) Gfx.Fill(r, Th.Text, 8);
+                else Gfx.Fill(r, Th.A(over ? 0.16f : 0.085f), 8);
                 var tr = Gfx.Text(_chips[i].Title, 13, active ? 600 : 500);
                 Gfx.Draw(tr, Gfx.Snap(r.X + (r.W - tr.W) / 2), Gfx.Snap(r.Y + (r.H - tr.H) / 2), active ? Th.Bg : Th.Text);
-                if (UI.Click(id, r)) SelectChip(i);
+                if (!overChev && UI.Click(id, r)) SelectChip(i);
             }
             cx += pw + gap;
         }
         Gfx.PopClip();
 
-        // Right/left scroll chevrons when chips overflow horizontally
-        if (_chipScroll > 2)
+        if (lb.W > 0)
         {
-            var lb = new R(x0, y, 28, h);
             Gfx.Fill(lb, Gfx.Fade(Th.Bg, 0.92f), 6);
             if (UI.IconButton(UI.Id("hchip:l", _scroll), lb, Th.Back, 11, Th.Text)) _chipScroll = MathF.Max(0, _chipScroll - 220);
         }
-        if (_chipScroll < maxScroll - 2)
+        if (rb.W > 0)
         {
-            var rb = new R(x0 + w - 28, y, 28, h);
             Gfx.Fill(rb, Gfx.Fade(Th.Bg, 0.92f), 6);
             if (UI.IconButton(UI.Id("hchip:r", _scroll), rb, Th.ChevronRight, 11, Th.Text)) _chipScroll = MathF.Min(maxScroll, _chipScroll + 220);
         }
         return h + 14;
     }
 
-    private void Replace(FeedPage_ page)
+    private void Replace(FeedPage_ page, bool saveCache = true)
     {
         _items = []; _ids.Clear();
         _hidden = 0; _autoMore = 0;
         Append(page);
         UI.ScrollReset(_scroll);
         _settleAt = UI.Now + 100; _settled = false;
-        if (Cacheable && page.Items.Count > 0) { var copy = page.Items.ToList(); var k = kind; ThreadPool.QueueUserWorkItem(_ => FeedCache.Save(k, copy)); }
+        if (saveCache && Cacheable && page.Items.Count > 0) { var copy = page.Items.ToList(); var k = kind; ThreadPool.QueueUserWorkItem(_ => FeedCache.Save(k, copy)); }
     }
 
     private void Load()
@@ -650,9 +703,8 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                     _loading = false;
                     var wasDisk = _fromDisk;
                     _fromDisk = false;
-                    if (wasDisk && page.Items.Count > 0 && Shell.Current == this && UI.ScrollTarget(_scroll) > 60)
+                    if (wasDisk && page.Items.Count > 0 && Shell.Current == this && UI.ScrollTarget(_scroll) > 120)
                     {
-                        // the user is already reading the saved feed: do not pull it from under them
                         _fresh = page;
                         if (!_items.Take(8).Select(i => i.VideoId).SequenceEqual(page.Items.Take(8).Select(i => i.VideoId)))
                             Say("Лента обновилась. Нажмите «Обновить», чтобы показать новую.", Th.Sub);
@@ -660,10 +712,10 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                     }
                     if (kind == "home")
                     {
-                        if (page.Chips.Count > 0) { _chips = page.Chips; _chipIdx = Math.Max(0, _chips.FindIndex(c => c.Selected)); }
-                        else if (_chips.Count == 0) { _chips = [.. FallbackHomeChips]; _chipIdx = 0; }
+                        _chips = BuildTop5HomeChips(page.Chips);
+                        _chipIdx = 0;
                     }
-                    if (page.Items.Count > 0 || !wasDisk) Replace(page);
+                    Replace(page, saveCache: true);
                     if (note != null) Say(note, Th.Sub, inline: page.Items.Count > 0);
                     else if (_items.Count == 0 && _cont == null) Say("Здесь пока пусто.", Th.Sub);
                 });
@@ -880,24 +932,29 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 var v = _items[i];
                 float x = view.X + col * (cardW + gap), y = view.Y + row * rowH - scroll;
                 Cards.GridCard(new R(x, y, cardW, rowH - 14), thumbH, v, UI.Id(_scroll, i), _hover, Source);
-                if (v.PlaylistId == null && _seen.Add(v.VideoId)) LogSeen(v);
+                if (v.PlaylistId == null && !v.IsChannel && _seen.Add(v.VideoId)) LogSeen(v);
             }
         if (_loadingMore) UI.Spinner(view.X + usable / 2, view.Y + rows * rowH - scroll + 26, 10, Th.Sub);
         UI.EndScroll();
 
-        if (_cont != null && UI.ScrollTarget(_scroll) > UI.ScrollMax(_scroll) - rowH * 2) LoadMore();
+        if (_cont != null && (UI.ScrollMax(_scroll) > 0 && UI.ScrollTarget(_scroll) > UI.ScrollMax(_scroll) - rowH * 2
+            || UI.ScrollMax(_scroll) == 0 && _autoMore < 5))
+        {
+            if (UI.ScrollMax(_scroll) == 0) _autoMore++;
+            LoadMore();
+        }
 
-        // when scrolling stops, resolve the streams of the first visible cards ahead of the click
-        if (scroll != _lastScroll) { _lastScroll = scroll; _settleAt = UI.Now + 160; _settled = false; }
+        // when scrolling stops, resolve the streams of the top 6 visible cards ahead of the click (no 20-card storm)
+        if (scroll != _lastScroll) { _lastScroll = scroll; _settleAt = UI.Now + 180; _settled = false; }
         if (!_settled)
         {
             if (UI.Now < _settleAt) UI.Animate();
             else
             {
                 _settled = true;
-                // quick links are one small request each: the cards in view start instantly when clicked
-                // every card in view plus the next row; newest request first, so the top-left card resolves first
-                for (int i = Math.Min(_items.Count - 1, Math.Min((last + 2) * cols, first * cols + 20) - 1); i >= first * cols && i >= 0; i--)
+                int startIdx = first * cols;
+                int endIdx = Math.Min(_items.Count - 1, startIdx + 5);
+                for (int i = endIdx; i >= startIdx && i >= 0; i--)
                     QuickStream.Prefetch(_items[i].VideoId);
             }
         }
@@ -950,10 +1007,11 @@ public sealed class WatchPage : IPage
 
     private string _rating = ""; // "LIKE" / "DISLIKE" / "" for the signed-in account
 
-    /// <summary>Like or dislike; pressing the active one takes the mark back. Shows at once, undone if YouTube refuses.</summary>
+    /// <summary>Like or dislike; pressing the active one takes the mark back. Plays dedicated Like SFX.</summary>
     private void Rate(bool like)
     {
         if (!CookieStore.IsLoggedIn) { Shell.Toast("Чтобы ставить оценки, войдите в аккаунт YouTube", Th.Warn); return; }
+        Sfx.Like();
         var want = like ? "LIKE" : "DISLIKE";
         var before = _rating;
         var action = _rating == want ? "removelike" : like ? "like" : "dislike";
@@ -1021,64 +1079,100 @@ public sealed class WatchPage : IPage
     public string Speed => _speed;
     public void ToggleTheater() { AppSettings.Current.TheaterMode = !AppSettings.Current.TheaterMode; AppSettings.Current.Save(); App.Invalidate(); }
 
+    private int _infoGen;
+    private int _relPrewarmed;
+
     public void Shown()
     {
         if (PlaybackTracker.Instance.Current?.VideoId != Video.VideoId || !MpvPlayer.Instance.HasMedia)
         {
             Shell.Play(Video, _source);
-            _subKey = ""; _audioId = ""; // a fresh load starts with the original sound and no subtitles
+            _subKey = ""; _audioId = "";
         }
-        if (_info == null && !_infoLoading) LoadInfo();
+        var sp = MpvPlayer.Instance.Speed;
+        if (sp > 0.1) _speed = sp.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "×";
+        if (_info == null && !_infoLoading) LoadInfo(bypassCache: false);
     }
 
-    public void Hidden() => SharePanel.Close();
-    public void Refresh() { _info = null; LoadInfo(); }
+    public void Hidden()
+    {
+        SharePanel.Close();
+        _commentEdit?.Hide();
+        if (_comments.Count > 120) _comments.RemoveRange(120, _comments.Count - 120);
+    }
+
+    public void Refresh()
+    {
+        _info = null;
+        _note = null;
+        _commentGen++;
+        _comments.Clear();
+        _commentTok = null;
+        _commentCount = null;
+        _createCommentParams = null;
+        _commentsStarted = _commentsLoading = _commentsOff = false;
+        LoadInfo(bypassCache: true);
+    }
 
     private string RelSource => $"related:{Video.VideoId}|{Title}";
 
-    private void LoadInfo()
+    private void LoadInfo(bool bypassCache = false)
     {
+        var gen = ++_infoGen;
         _infoLoading = true;
         var id = Video.VideoId;
         _ = Task.Run(async () =>
         {
             try
             {
-                var info = await InnerTube.Instance.WatchCachedAsync(id, _playlistId);
+                var info = bypassCache
+                    ? await InnerTube.Instance.WatchAsync(id, default, _playlistId)
+                    : await InnerTube.Instance.WatchCachedAsync(id, _playlistId);
                 Cards.WithProgress(info.Related);
                 App.Post(() =>
                 {
+                    if (gen != _infoGen) return;
                     _info = info;
-                    _related = info.Related.Items;
+                    _note = null;
+                    var blocked = AppSettings.Current.BlockedChannels;
+                    _related = [];
                     _relIds.Clear();
-                    foreach (var rv in _related) _relIds.Add(rv.VideoId);
+                    foreach (var rv in info.Related.Items)
+                    {
+                        if (!_relIds.Add(rv.VideoId)) continue;
+                        if (blocked.Length > 0 && rv.ChannelId != null && Array.IndexOf(blocked, rv.ChannelId) >= 0) continue;
+                        _related.Add(rv);
+                    }
                     _relCont = info.Related.Continuation;
                     _relLoadingMore = false;
+                    _relPrewarmed = 0;
                     _list = info.Playlist;
                     _listJump = _list != null;
-                    _relTextW = 0; // shape the new list off-thread on the next frame
+                    _relTextW = 0;
                     _likes = string.IsNullOrEmpty(info.Likes) ? "—" : info.Likes;
                     _rating = info.LikeStatus is "LIKE" or "DISLIKE" ? info.LikeStatus : "";
+                    _createCommentParams ??= info.CreateCommentParams;
                     _infoLoading = false;
                     if (string.IsNullOrEmpty(Video.Title))
                         Video = new VideoItem { VideoId = id, Title = info.Title, Channel = info.Channel, ChannelId = info.ChannelId };
                     if (PlaybackTracker.Instance.Current?.VideoId == id) PlaybackTracker.Instance.UpdateMeta(info.Title, info.Channel);
                     Shell.UpdateTabTitle("video", id, info.Title, info.Channel);
                     Shell.PushPlayerState();
-                    // the likely next clicks: resolve them while this one plays
-                    for (int i = Math.Min(7, _related.Count - 1); i >= 0; i--) QuickStream.Prefetch(_related[i].VideoId);
+                    for (int i = Math.Min(4, _related.Count - 1); i >= 0; i--) QuickStream.Prefetch(_related[i].VideoId);
                 });
                 if (AppSettings.Current.ReturnDislikes && await Extras.DislikesAsync(id) is { } votes)
                     App.Post(() =>
                     {
+                        if (gen != _infoGen) return;
                         _dislikes = Extras.Compact(votes.Dislikes);
                         if (_likes == "—") _likes = Extras.Compact(votes.Likes);
+                        App.Invalidate();
                     });
             }
             catch (Exception e)
             {
                 Paths.Log("watch info: " + e);
-                App.Post(() => { _infoLoading = false; _note = "Описание и похожие не загрузились: " + e.Message; });
+                App.Post(() => { if (gen != _infoGen) return; _infoLoading = false; _note = "Описание и похожие не загрузились: " + e.Message; App.Invalidate(); });
             }
         });
     }
@@ -1105,26 +1199,79 @@ public sealed class WatchPage : IPage
         }
     }
 
-    public void OpenShare() => SharePanel.Show(Video.VideoId, MpvPlayer.Instance.TimePos);
+    public void OpenShare()
+    {
+        var at = PlaybackTracker.Instance.Current?.VideoId == Video.VideoId ? MpvPlayer.Instance.TimePos : 0;
+        SharePanel.Show(Video.VideoId, at);
+    }
 
-    // ---- comments: nothing is asked for until the section scrolls near; one page (20) at a time ----
+    // ---- comments: nothing is asked for until the section scrolls near; one page (20) at a time + comment composer ----
     private sealed class CRow
     {
+        public int RowId;
         public required Comment C;
         public bool Open;                 // long text expanded
         public float W, H; public bool SizedOpen; // measured height for this width and state
         public readonly List<CRow> Replies = [];
-        public bool Shown, Loading;
+        public bool Shown, Loading, RepliesLoaded;
         public string? More;              // token for the next replies
     }
 
     private long _dlCheckedAt;
     private bool _isDownloaded;
     private readonly List<CRow> _comments = [];
-    private string? _commentTok, _commentCount, _sortTitle;
-    private bool _commentsStarted, _commentsLoading, _commentsOff;
-    private float _commentsH = 60;
-    private int _commentGen;
+    private string? _commentTok, _commentCount, _sortTitle, _createCommentParams;
+    private bool _commentsStarted, _commentsLoading, _commentsOff, _postingComment;
+    private float _commentsH = 120;
+    private int _commentGen, _nextRowId;
+    private Edit? _commentEdit;
+
+    private void SubmitComment()
+    {
+        if (_postingComment || _commentEdit == null) return;
+        var text = _commentEdit.Text.Trim();
+        if (text.Length == 0) return;
+        if (!CookieStore.IsLoggedIn) { Shell.Toast("Войдите в аккаунт YouTube, чтобы оставлять комментарии", Th.Warn); return; }
+        var createParams = _createCommentParams ?? _info?.CreateCommentParams;
+        if (string.IsNullOrEmpty(createParams))
+        {
+            Shell.Toast("Токен отправки ещё загружается — подождите секунду и попробуйте снова", Th.Warn);
+            if (!_commentsStarted) LoadComments();
+            return;
+        }
+        _postingComment = true;
+        var vid = Video.VideoId;
+        var gen = _commentGen;
+        _ = Task.Run(async () =>
+        {
+            var (ok, err) = await InnerTube.Instance.CreateCommentAsync(createParams, text, vid);
+            App.Post(() =>
+            {
+                _postingComment = false;
+                if (!ok) { Shell.Toast("Не удалось отправить комментарий: " + (err ?? "ошибка YouTube"), Th.Warn, 5000); App.Invalidate(); return; }
+                if (_commentEdit != null) _commentEdit.Text = "";
+                Sfx.Like();
+                if (gen == _commentGen)
+                {
+                    var acc = AccountMenu.Current;
+                    _comments.Insert(0, new CRow
+                    {
+                        RowId = ++_nextRowId,
+                        C = new Comment
+                        {
+                            Author = acc?.Handle is { Length: > 0 } h ? h : (acc?.Name is { Length: > 0 } nm ? nm : "Вы"),
+                            Avatar = acc?.Photo,
+                            Text = text,
+                            When = "только что",
+                            Likes = "0",
+                        },
+                    });
+                }
+                Shell.Toast("Комментарий опубликован", Th.Good, 2400);
+                App.Invalidate();
+            });
+        });
+    }
 
     private void LoadComments(string? fromToken = null)
     {
@@ -1141,9 +1288,10 @@ public sealed class WatchPage : IPage
                 App.Post(() =>
                 {
                     if (gen != _commentGen) return;
-                    foreach (var c in page.Items) _comments.Add(new CRow { C = c });
+                    foreach (var c in page.Items) _comments.Add(new CRow { RowId = ++_nextRowId, C = c });
                     _commentTok = page.Items.Count == 0 ? null : page.Continuation;
                     _commentCount ??= page.Count;
+                    if (!string.IsNullOrEmpty(page.CreateCommentParams)) _createCommentParams = page.CreateCommentParams;
                     _commentsLoading = false;
                     App.Invalidate();
                 });
@@ -1168,7 +1316,7 @@ public sealed class WatchPage : IPage
 
     private void LoadReplies(CRow row)
     {
-        var tok = row.Replies.Count == 0 ? row.C.RepliesToken : row.More;
+        var tok = !row.RepliesLoaded ? row.C.RepliesToken : row.More;
         if (tok == null || row.Loading) return;
         row.Loading = true;
         var gen = _commentGen;
@@ -1181,24 +1329,25 @@ public sealed class WatchPage : IPage
             {
                 if (gen != _commentGen) return;
                 row.Loading = false;
-                if (page != null) { foreach (var c in page.Items) row.Replies.Add(new CRow { C = c }); row.More = page.Items.Count == 0 ? null : page.Continuation; }
+                row.RepliesLoaded = true;
+                if (page != null) { foreach (var c in page.Items) row.Replies.Add(new CRow { RowId = ++_nextRowId, C = c }); row.More = page.Items.Count == 0 ? null : page.Continuation; }
                 else row.More = null;
                 App.Invalidate();
             });
         });
     }
 
-    /// <summary>The comment list under the description; only the comments on screen are laid out and drawn.</summary>
+    /// <summary>The comment list under the description + composer box to post comments on videos.</summary>
     private float DrawComments(float x0, float y, float w, R view)
     {
-        if (_info == null) return y;
+        if (_info == null) { _commentEdit?.Hide(); return y; }
         var count = _commentCount ?? _info.CommentsCount;
         if (_info.CommentsToken == null)
         {
+            _commentEdit?.Hide();
             Gfx.Draw("Комментарии отключены", x0, y, 14, Th.Sub);
             return y + 40;
         }
-        // YouTube sends either "396" or "396 комментариев"
         var head = count is { Length: > 0 } ? (count.Any(char.IsLetter) ? count : "Комментарии: " + count) : "Комментарии";
         var hr = Gfx.Draw(head, x0, y, 18, Th.Text, 700);
         if (_info.CommentSorts.Count > 1)
@@ -1208,46 +1357,84 @@ public sealed class WatchPage : IPage
                 Menus.Popup(_info.CommentSorts.Select(s => new MenuItem(s.Title, () => SortComments(s.Title, s.Token), null, s.Title == cur)).ToList());
         }
         y += 40;
-        // the section is close to the visible part: ask for the first page
+
+        // Comment composer (logged-in users can write and post comments directly!)
+        if (CookieStore.IsLoggedIn)
+        {
+            var composerR = new R(x0, y, w, 40);
+            if (composerR.Y >= view.Y && composerR.Bottom <= view.Bottom)
+            {
+                if (_commentEdit == null)
+                {
+                    _commentEdit = new Edit("Введите комментарий…") { Bg = () => Th.Field };
+                    _commentEdit.Enter = SubmitComment;
+                }
+                var acc = AccountMenu.Current;
+                Cards.Avatar(x0, y + 2, 36, acc?.Photo, acc?.Name is { Length: > 0 } nm ? nm : "?");
+                var sendLbl = _postingComment ? "Отправка…" : "Отправить";
+                var sendW = UI.PillWidth(null, sendLbl);
+                var boxR = new R(x0 + 48, y + 1, MathF.Max(120, w - 48 - sendW - 10), 38);
+                Gfx.Fill(boxR, Th.Field, 10);
+                Gfx.Stroke(boxR, _commentEdit.Focused ? Gfx.Fade(Th.Brand, 0.8f) : Th.Line, 10, _commentEdit.Focused ? 1.2f : 1f);
+                _commentEdit.Place(boxR, 14, 14);
+                bool canSend = !_postingComment && !string.IsNullOrWhiteSpace(_commentEdit.Text);
+                if (UI.Pill(UI.Id("cpost", _infoScroll), boxR.Right + 10, y + 2, 36, null, sendLbl, out _, accent: canSend) && canSend)
+                    App.Post(SubmitComment);
+            }
+            else _commentEdit?.Hide();
+            y += 54;
+        }
+        else
+        {
+            _commentEdit?.Hide();
+            var hintR = new R(x0, y, w, 38);
+            if (hintR.Bottom >= view.Y && hintR.Y <= view.Bottom)
+            {
+                Gfx.Fill(hintR, Th.A(0.055f), 10);
+                Gfx.Draw("Войдите в аккаунт YouTube, чтобы оставлять комментарии", x0 + 14, y + 10, 13, Th.Sub, 400, w - 120);
+                var lw = UI.PillWidth(Th.Account, "Войти");
+                if (UI.Pill(UI.Id("clogin", _infoScroll), hintR.Right - lw - 8, y + 4, 30, Th.Account, "Войти", out _, accent: true))
+                    App.Post(Shell.LoginNewAccount);
+            }
+            y += 48;
+        }
+
         if (!_commentsStarted && y < view.Bottom + 600) LoadComments();
         if (_commentsOff) { Gfx.Draw("Не удалось загрузить комментарии.", x0, y, 13.5f, Th.Sub); return y + 34; }
 
-        int n = 0;
         foreach (var row in _comments)
         {
-            y = DrawRow(row, x0, y, w, view, 40, ref n);
+            y = DrawRow(row, x0, y, w, view, 40);
             if (!row.Shown) continue;
-            foreach (var rep in row.Replies) y = DrawRow(rep, x0 + 56, y, w - 56, view, 28, ref n);
+            foreach (var rep in row.Replies) y = DrawRow(rep, x0 + 56, y, w - 56, view, 28);
             if (row.Loading) { UI.Spinner(x0 + 56 + 12, y + 12, 7, Th.Sub); y += 34; }
             else if (row.More != null)
             {
-                if (y > view.Y - 40 && y < view.Bottom + 40 && UI.Pill(UI.Id(_infoScroll, 60000 + n), x0 + 56, y, 30, null, "Ещё ответы", out _, Th.A(0.08f))) LoadReplies(row);
+                if (y > view.Y - 40 && y < view.Bottom + 40 && UI.Pill(UI.Id(_infoScroll, 60000 + row.RowId), x0 + 56, y, 30, null, "Ещё ответы", out _, Th.A(0.08f))) LoadReplies(row);
                 y += 40;
             }
         }
         if (_commentsLoading) { UI.Spinner(x0 + w / 2, y + 22, 9, Th.Sub); y += 50; }
         else if (_commentTok != null)
         {
-            // more as the end comes into view
             if (y < view.Bottom + 400) LoadComments();
             y += 50;
         }
         return y + 20;
     }
 
-    private float DrawRow(CRow row, float x0, float y, float w, R view, float avatar, ref int n)
+    private float DrawRow(CRow row, float x0, float y, float w, R view, float avatar)
     {
-        int i = n++;
+        int i = row.RowId;
         var c = row.C;
         var tw = w - avatar - 16;
         if (row.H > 0 && row.W == tw && row.SizedOpen == row.Open && (y + row.H < view.Y - 20 || y > view.Bottom + 20))
-            return y + row.H; // off screen and already measured
+            return y + row.H;
         var text = Gfx.Text(c.Text, 14, 400, tw, row.Open ? 0 : 5);
         var full = row.Open ? text : Gfx.Text(c.Text, 14, 400, tw, 0);
         var longText = full.H > Gfx.LineHeight(14) * 5 + 1;
         var hasReplies = c.RepliesToken != null;
         var h = 22 + text.H + (longText ? 22 : 0) + 34 + (hasReplies ? 6 : 0);
-        // keep only real measurements (a layout still on its way reports an estimate)
         if (text.Layout != null && full.Layout != null) { row.W = tw; row.H = h; row.SizedOpen = row.Open; }
         if (y + h <= view.Y - 20 || y >= view.Bottom + 20) return y + h;
 
@@ -1279,24 +1466,60 @@ public sealed class WatchPage : IPage
         var likes = Gfx.Draw(c.Likes, tx + 22, ty + 3, 12, Th.Sub);
         if (hasReplies)
         {
-            // "12 ответов": opens the thread under the comment, again to fold it
-            var label = (row.Shown ? "\uE70E  " : "\uE70D  ") + (c.Replies is { Length: > 0 } rc && rc != "0" ? "Ответы: " + rc : "Ответы");
             var pr = new R(tx + 22 + likes.W + 14, ty - 4, UI.PillWidth(null, "Ответы: " + c.Replies) + 22, 30);
             var pid = UI.Id(_infoScroll, 50000 + i);
             UI.Glow(pid, pr, 15, UI.Hover(pr));
             Gfx.Icon(row.Shown ? "\uE70E" : "\uE70D", new R(pr.X + 8, pr.Y, 18, 30), 10, Sel.LinkColor);
             Gfx.Draw(c.Replies is { Length: > 0 } r2 && r2 != "0" ? "Ответы: " + r2 : "Ответы", pr.X + 30, pr.Y + 6, 13, Sel.LinkColor, 600);
-            if (UI.Click(pid, pr)) { row.Shown = !row.Shown; if (row.Shown && row.Replies.Count == 0) LoadReplies(row); }
+            if (UI.Click(pid, pr)) { row.Shown = !row.Shown; if (row.Shown && !row.RepliesLoaded) LoadReplies(row); }
         }
         return y + h;
     }
 
+    private float _actionExtraH;
+
+    private void DrawLikeDislikePill(float x, float y, float h, out float width)
+    {
+        var lr = Gfx.Text(_likes, 13.5f, 600);
+        var dr = Gfx.Text(_dislikes, 13.5f, 600);
+        float leftW = 14 + 18 + 7 + lr.W + 14;
+        float rightW = 12 + 18 + 7 + dr.W + 14;
+        width = leftW + 1 + rightW;
+
+        var pill = new R(x, y, width, h);
+        var likeR = new R(x, y, leftW, h);
+        var disR = new R(x + leftW + 1, y, rightW, h);
+        int likeId = UI.Id("like", _infoScroll), disId = UI.Id("dislike", _infoScroll);
+        bool overL = UI.Hover(likeR), overD = UI.Hover(disR);
+        bool isLike = _rating == "LIKE", isDis = _rating == "DISLIKE";
+
+        // Elevated crisp glass/card capsule with subtle border and per-half active highlight
+        Gfx.Fill(pill, Th.Card, h / 2);
+        Gfx.PushClip(pill);
+        if (isLike) Gfx.Fill(likeR, Gfx.Fade(Th.Brand, 0.22f));
+        else if (overL) Gfx.Fill(likeR, Th.Hover);
+        if (isDis) Gfx.Fill(disR, Gfx.Fade(Th.Brand, 0.22f));
+        else if (overD) Gfx.Fill(disR, Th.Hover);
+        Gfx.PopClip();
+        Gfx.Stroke(pill, (isLike || isDis) ? Gfx.Fade(Th.Brand, 0.45f) : Th.Line, h / 2, 1f);
+
+        uint likeC = isLike ? Th.Brand : Th.Text;
+        uint disC = isDis ? Th.Brand : Th.Text;
+        Gfx.Icon(Th.Like, new R(likeR.X + 14, y, 18, h), 15.5f, likeC);
+        Gfx.Draw(lr, likeR.X + 39, y + (h - lr.H) / 2, likeC);
+        Gfx.Fill(new R(x + leftW, y + 8, 1, h - 16), Th.Line);
+        Gfx.Icon(Th.Dislike, new R(disR.X + 12, y, 18, h), 15.5f, disC);
+        Gfx.Draw(dr, disR.X + 37, y + (h - dr.H) / 2, disC);
+
+        if (UI.Click(likeId, likeR, playSfx: false)) Rate(true);
+        if (UI.Click(disId, disR, playSfx: false)) Rate(false);
+    }
+
     public void Draw(R r)
     {
-        // while the share panel is open nothing behind it reacts
-        if (SharePanel.Open) UI.Modal = new R(0, 0, 0, 0);
+        var savedModal = UI.Modal;
+        if (SharePanel.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
         var side = !AppSettings.Current.TheaterMode && r.W >= 980;
-        // the side list glides away in theater mode and back, the video grows into the space
         var sideT = UI.Smooth(UI.Id(_relScroll, 5), side ? 1 : 0, 14);
         const float padX = 24, topPad = 12, colGap = 24;
         float sideW = MathF.Min(400, r.W * 0.29f) * sideT;
@@ -1314,7 +1537,7 @@ public sealed class WatchPage : IPage
             if (Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id)
             {
                 Gfx.Fill(video, 0xFF0A0A0C, 12);
-                var img = Images.Get(Video.ThumbHq, 480, 270);
+                var img = Images.Get(Video.Thumb720, 640, 360);
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
                 if (img != null) { Gfx.Image(img.Bmp!, pr, 0.25f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
@@ -1327,21 +1550,20 @@ public sealed class WatchPage : IPage
             {
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
-                var img = Images.Get(Video.ThumbHq, 480, 270);
+                var img = Images.Get(Video.Thumb720, 640, 360);
                 if (img != null) { Gfx.Image(img.Bmp!, pr, 0.55f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
                 UI.Spinner(video.X + video.W / 2, video.Y + video.H / 2, 16, 0xFFFFFFFF);
             }
         }
 
-        // ---- info column (either below pinned video, or whole-page scroll with video inside) ----
+        // ---- info column ----
         var titleRun = Gfx.Text(Title, 20, 600, mainW, 3);
         var desc = _info?.Description ?? "";
         var descRun = desc.Length > 0 ? Gfx.Text(desc, 13.5f, 400, mainW - 32, _descOpen ? 0 : 4) : null;
         var canToggle = desc.Length > 280 || desc.Count(c => c == '\n') > 3;
         float descBoxH = 14 + 20 + (descRun != null ? descRun.H + 6 : 0) + (canToggle ? 24 : 0) + 12;
-        // no room for the side column (a narrow window, theater mode): the playlist sits under the buttons instead
         var listInline = _list != null && sideT < 0.03f;
-        float infoContentH = 14 + titleRun.H + 14 + 44 + 14 + descBoxH + (_note != null ? 40 : 0) + 30 + _commentsH + (listInline ? _listInlineH : 0);
+        float infoContentH = 14 + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + 30 + _commentsH + (listInline ? _listInlineH : 0);
 
         R video, view;
         float scroll, y;
@@ -1365,7 +1587,7 @@ public sealed class WatchPage : IPage
         Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, "Копировать название");
         y += titleRun.H + 14;
 
-        // channel + actions (measure action bar first so channel name & subscriber count NEVER overlap the pills)
+        // channel + upgraded Like/Dislike pill + actions (wraps cleanly onto 2 rows if narrow so Like/Dislike NEVER vanishes!)
         var chName = _info?.Channel ?? Video.Channel;
         var subText = _info?.Subscribers ?? "";
         float bx = x0 + mainW, by = y + 4;
@@ -1389,45 +1611,41 @@ public sealed class WatchPage : IPage
         bx -= UI.PillWidth(Th.Download, dl) + 8;
         if (UI.Pill(UI.Id("dl", _infoScroll), bx, by, ph, Th.Download, dl, out _)) DownloadMenu();
 
-        var likeW = UI.PillWidth(Th.Like, _likes) + UI.PillWidth(Th.Dislike, _dislikes) - 12;
+        float estLikeW = 14 + 18 + 7 + Gfx.Text(_likes, 13.5f, 600).W + 14 + 1 + 12 + 18 + 7 + Gfx.Text(_dislikes, 13.5f, 600).W + 14;
         var nameFullW = Gfx.Text(chName, 15, 600, 260).W;
         var subFullW = subText.Length > 0 ? Gfx.Text(subText, 12, 400, 260).W : 0;
-        var minChNeed = MathF.Min(200, MathF.Max(nameFullW, subFullW));
+        var minChNeed = MathF.Min(190, MathF.Max(nameFullW, subFullW));
         float leftEdge = bx;
-        if (bx - likeW - 8 > x0 + 54 + minChNeed + 16)
+        bool likeOnSameRow = bx - estLikeW - 8 > x0 + 54 + minChNeed + 14;
+        if (likeOnSameRow)
         {
-            bx -= likeW + 8;
+            bx -= estLikeW + 8;
             leftEdge = bx;
-            Gfx.Fill(new R(bx, by, likeW, ph), Th.A(0.12f), ph / 2);
-            var lr = Gfx.Text(_likes, 13.5f, 600);
-            float dx = bx + 38 + lr.W + 12;
-            // two halves of one pill, each a button; the active one takes the accent colour
-            var likeR = new R(bx, by, dx - bx, ph);
-            var disR = new R(dx, by, bx + likeW - dx, ph);
-            int likeId = UI.Id("like", _infoScroll), disId = UI.Id("dislike", _infoScroll);
-            UI.Glow(likeId, likeR, ph / 2, UI.Hover(likeR));
-            UI.Glow(disId, disR, ph / 2, UI.Hover(disR));
-            var likeC = _rating == "LIKE" ? Th.Brand : Th.Text;
-            var disC = _rating == "DISLIKE" ? Th.Brand : Th.Text;
-            Gfx.Icon(Th.Like, new R(bx + 14, by, 18, ph), 15, likeC);
-            Gfx.Draw(lr, bx + 38, by + (ph - lr.H) / 2, likeC);
-            Gfx.Fill(new R(dx, by + 9, 1, 18), Th.A(0.27f));
-            Gfx.Icon(Th.Dislike, new R(dx + 10, by, 18, ph), 15, disC);
-            Gfx.Draw(_dislikes, dx + 34, by + (ph - lr.H) / 2, 13.5f, disC, 600);
-            if (UI.Click(likeId, likeR)) Rate(true);
-            if (UI.Click(disId, disR)) Rate(false);
+            DrawLikeDislikePill(bx, by, ph, out _);
         }
 
         var chMaxW = MathF.Max(70, MathF.Min(260, leftEdge - (x0 + 54) - 14));
         Cards.Avatar(x0, y + 1, 42, _info?.ChannelAvatar, chName);
         var nameRun = Gfx.Text(chName, 15, 600, chMaxW);
         var nameRect = new R(x0 + 54, y + 2, nameRun.W, nameRun.H);
-        Gfx.Draw(nameRun, nameRect.X, nameRect.Y, Th.Text);
+        Gfx.Draw(nameRun, nameRect.X, nameRect.Y, UI.Hover(nameRect) && (_info?.ChannelId ?? Video.ChannelId) != null ? Th.Brand : Th.Text);
         Cards.CopyMenu(nameRect, chName, "Копировать название канала");
         if (subText.Length > 0) Gfx.Draw(subText, x0 + 54, y + 24, 12, Th.Sub, 400, chMaxW);
         var chId = _info?.ChannelId ?? Video.ChannelId;
-        if (chId != null && UI.Click(UI.Id("ch", _infoScroll), nameRect)) App.Post(() => Shell.OpenChannel(chId, chName));
-        y += 44 + 14;
+        if (chId != null && (UI.Click(UI.Id("ch", _infoScroll), nameRect, playSfx: false) || UI.Click(UI.Id("chav", _infoScroll), new R(x0, y + 1, 42, 42), playSfx: false)))
+            App.Post(() => Shell.OpenChannel(chId, chName));
+        y += 44;
+
+        float extraH = 0;
+        if (!likeOnSameRow)
+        {
+            y += 8;
+            DrawLikeDislikePill(x0, y, ph, out _);
+            y += ph;
+            extraH = ph + 8;
+        }
+        if (MathF.Abs(extraH - _actionExtraH) > 0.5f) { _actionExtraH = extraH; UI.Animate(); }
+        y += 14;
         if (listInline)
         {
             var used = DrawPlaylist(new R(x0, y, mainW + 14, 560));
@@ -1471,8 +1689,8 @@ public sealed class WatchPage : IPage
         if (SharePanel.Open)
         {
             var px = Gfx.Snap(x0 + (mainW - SharePanel.W) / 2);
-            var py = Gfx.Snap(MathF.Max(video.Bottom + 6, MathF.Min(video.Bottom + 14, r.Bottom - SharePanel.H - 14)));
-            UI.Modal = null;
+            var py = Gfx.Snap(Math.Clamp(video.Bottom + 10, r.Y + 12, MathF.Max(r.Y + 12, r.Bottom - SharePanel.H - 14)));
+            UI.Modal = savedModal;
             SharePanel.Draw(new R(px, py, SharePanel.W, SharePanel.H));
         }
 
@@ -1490,6 +1708,7 @@ public sealed class WatchPage : IPage
             DrawRelated(sideR);
             Gfx.PopClip();
         }
+        UI.Modal = savedModal;
     }
 
     /// <summary>The playlist (or mix) this video is being watched in: its items, the current one marked. Returns the height used.</summary>
@@ -1571,9 +1790,8 @@ public sealed class WatchPage : IPage
                         _related.Add(rv);
                         added++;
                     }
-                    _relCont = added > 0 ? page.Continuation : null;
+                    _relCont = page.Items.Count > 0 ? page.Continuation : null;
                     _relLoadingMore = false;
-                    _relTextW = 0;
                     App.Invalidate();
                 });
             }
@@ -1596,10 +1814,19 @@ public sealed class WatchPage : IPage
 
         var view = new R(r.X, r.Y + 40, r.W, r.H - 40);
         var textW = view.W - 14 - 168 - 14;
-        if (textW != _relTextW)
+        if (textW != _relTextW) { _relTextW = textW; _relPrewarmed = 0; }
+        if (_relPrewarmed < _related.Count)
         {
-            _relTextW = textW;
-            Gfx.Prewarm(_related.SelectMany(v => new (string, float, int, float, int)[] { (v.Title, 13.5f, 600, textW, 2), (v.Channel, 12, 400, textW, 1), (v.Meta, 12, 400, textW, 1) }).ToList());
+            var batch = new List<(string, float, int, float, int)>();
+            for (int k = _relPrewarmed; k < _related.Count; k++)
+            {
+                var rv = _related[k];
+                batch.Add((rv.Title, 13.5f, 600, textW, 2));
+                batch.Add((rv.Channel, 12, 400, textW, 1));
+                batch.Add((rv.Meta, 12, 400, textW, 1));
+            }
+            _relPrewarmed = _related.Count;
+            Gfx.Prewarm(batch);
         }
         if (_related.Count == 0)
         {
@@ -1627,7 +1854,7 @@ public sealed class WatchPage : IPage
             Gfx.Draw(v.Meta, tx, y + t.H + 22, 12, Th.Sub, 400, w);
             if (over) _hover.Over(v);
             if (UI.MiddleClick(row)) Shell.OpenVideoInNewTab(v);
-            else if (UI.Click(id, row)) OpenRelated(v);
+            else if (UI.Click(id, row, playSfx: false)) OpenRelated(v);
             else if (UI.RightClick(row)) Menus.Popup(Cards.MenuFor(v));
             if (_seen.Add(v.VideoId)) LogSeen(v);
         }
@@ -1681,7 +1908,8 @@ public sealed class WatchPage : IPage
 
     // ---- subtitles and audio language ----
     private string _subKey = "";   // "" = off, otherwise language (+ ">ru" when translated)
-    private string _audioId = "";  // "" = the original track
+    private string _audioId = "";  // "" = initial track
+    private int _subGen;
     public bool SubsOn => _subKey.Length > 0 && PlaybackTracker.Instance.Current?.VideoId == Video.VideoId;
 
     private static readonly (string Code, string Name)[] TranslateTo = [("ru", "русский"), ("en", "английский"), ("uk", "украинский")];
@@ -1694,16 +1922,25 @@ public sealed class WatchPage : IPage
         var x = QuickStream.ExtrasOf(id);
         if (x == null)
         {
-            // played from the disk cache: the list has not been asked for yet
             Shell.Toast("Загружаю список дорожек…", null, 1500);
             _ = QuickStream.EnsureSpecAsync(id).ContinueWith(_ => App.Post(() =>
             {
-                if (QuickStream.ExtrasOf(id) != null && Shell.Current == this) TracksMenu();
+                if (Shell.Current != this) return;
+                if (QuickStream.ExtrasOf(id) != null) TracksMenu();
                 else Shell.Toast("Список субтитров не загрузился", Th.Warn);
             }));
             return;
         }
         Menus.Popup(TrackItems(x));
+    }
+
+    private bool IsAudioSelected(QuickStream.Extras x, QuickStream.AudioTrack a)
+    {
+        if (_audioId.Length > 0) return _audioId == a.Id;
+        var pref = AppSettings.Current.AudioLanguage;
+        if (!string.IsNullOrEmpty(pref) && x.Audio.Any(t => t.Lang.Equals(pref, StringComparison.OrdinalIgnoreCase) || t.Lang.StartsWith(pref + "-", StringComparison.OrdinalIgnoreCase)))
+            return a.Lang.Equals(pref, StringComparison.OrdinalIgnoreCase) || a.Lang.StartsWith(pref + "-", StringComparison.OrdinalIgnoreCase);
+        return a.IsDefault;
     }
 
     private List<MenuItem> TrackItems(QuickStream.Extras x)
@@ -1713,13 +1950,11 @@ public sealed class WatchPage : IPage
         else
         {
             items.Add(new("Субтитры выключены", () => SetSubs(x, null, null), null, _subKey.Length == 0));
-            // the viewer's language first, then the rest as YouTube lists them
             var hl = AppSettings.Current.Hl;
             foreach (var t in x.Captions.OrderByDescending(t => t.Lang.StartsWith(hl)).ThenBy(t => t.Auto).Take(14))
                 items.Add(new(t.Name, () => SetSubs(x, t, null), null, _subKey == t.Lang + (t.Auto ? "*" : "")));
             if (x.Captions.Count > 14)
                 items.Add(new("Другие языки", null, x.Captions.OrderBy(t => t.Name).Select(t => new MenuItem(t.Name, () => SetSubs(x, t, null), null, _subKey == t.Lang + (t.Auto ? "*" : ""))).ToList()));
-            // machine translation: from the author's own track when there is one
             var from = x.Captions.FirstOrDefault(t => !t.Auto) ?? x.Captions[0];
             items.Add(new("Автоперевод", null, TranslateTo.Where(l => !from.Lang.StartsWith(l.Code))
                 .Select(l => new MenuItem("На " + l.Name, () => SetSubs(x, from, l.Code), null, _subKey == from.Lang + (from.Auto ? "*" : "") + ">" + l.Code)).ToList()));
@@ -1727,7 +1962,7 @@ public sealed class WatchPage : IPage
         if (x.Audio.Count > 1)
         {
             items.Add(MenuItem.Sep);
-            items.Add(new("Язык озвучки", null, x.Audio.Select(a => new MenuItem(a.Name, () => SetAudio(x, a), null, a.IsDefault ? _audioId.Length == 0 : _audioId == a.Id)).ToList()));
+            items.Add(new("Язык озвучки", null, x.Audio.Select(a => new MenuItem(a.Name, () => SetAudio(x, a), null, IsAudioSelected(x, a))).ToList()));
         }
         return items;
     }
@@ -1735,6 +1970,7 @@ public sealed class WatchPage : IPage
     private void SetSubs(QuickStream.Extras x, QuickStream.CaptionTrack? t, string? translateTo)
     {
         var p = MpvPlayer.Instance;
+        var sgen = ++_subGen;
         if (t == null)
         {
             _subKey = "";
@@ -1749,11 +1985,9 @@ public sealed class WatchPage : IPage
             string? file = null;
             try
             {
-                // a track already written in that language beats a machine translation
                 if (translateTo != null && x.Captions.FirstOrDefault(c => c.Lang.StartsWith(translateTo) && !c.Auto) is { } native)
                     file = await QuickStream.CaptionFileAsync(id, x, native, null);
                 file ??= await QuickStream.CaptionFileAsync(id, x, t, translateTo);
-                // YouTube sometimes refuses to translate one track and agrees to translate another
                 if (file == null && translateTo != null)
                     foreach (var other in x.Captions.Where(c => c != t).OrderBy(c => c.Auto).Take(2))
                         if ((file = await QuickStream.CaptionFileAsync(id, x, other, translateTo)) != null) break;
@@ -1761,10 +1995,9 @@ public sealed class WatchPage : IPage
             catch (Exception e) { Paths.Log("captions: " + e.Message); }
             App.Post(() =>
             {
-                if (PlaybackTracker.Instance.Current?.VideoId != id) return;
+                if (sgen != _subGen || PlaybackTracker.Instance.Current?.VideoId != id) return;
                 if (file == null) { Shell.Toast(translateTo != null ? "Перевод субтитров не получился, попробуйте ещё раз" : "Субтитры не загрузились", Th.Warn); return; }
                 _subKey = key;
-                // "cached": a track added before is selected again instead of being added twice
                 p.Command("sub-add", file.Replace('\\', '/'), "cached", translateTo != null ? "Перевод: " + TranslateTo.First(l => l.Code == translateTo).Name : t.Name, translateTo ?? t.Lang);
                 Shell.PushPlayerState();
             });
@@ -1774,13 +2007,6 @@ public sealed class WatchPage : IPage
     private void SetAudio(QuickStream.Extras x, QuickStream.AudioTrack a)
     {
         var p = MpvPlayer.Instance;
-        if (a.IsDefault)
-        {
-            _audioId = "";
-            p.Command("set", "aid", "1"); // the track the video was opened with
-            Shell.Toast("Озвучка: " + a.Name, null, 2000);
-            return;
-        }
         _audioId = a.Id;
         p.Command("audio-add", QuickStream.AudioUrl(x, a), "cached", a.Name, a.Lang);
         Shell.Toast("Озвучка: " + a.Name, null, 2000);

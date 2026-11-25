@@ -12,6 +12,7 @@ public sealed class Downloader
     public static Downloader Instance { get; } = new();
 
     public ObservableCollection<DownloadItem> Items { get; } = [];
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DownloadItem> _doneById = new();
     private readonly Dictionary<long, Process> _running = new();
     private const int MaxParallel = 3;
 
@@ -21,6 +22,16 @@ public sealed class Downloader
         {
             if (d.Status is "queued" or "downloading") { d.Status = "error"; d.Error = "прервано при закрытии"; }
             Items.Add(d);
+            if (d.IsDone && !string.IsNullOrEmpty(d.VideoId) && d.File != null) _doneById[d.VideoId] = d;
+        }
+    }
+
+    public void Shutdown()
+    {
+        lock (_running)
+        {
+            foreach (var p in _running.Values) try { p.Kill(true); } catch { }
+            _running.Clear();
         }
     }
 
@@ -63,13 +74,19 @@ public sealed class Downloader
             try { if (d.ThumbFile != null && File.Exists(d.ThumbFile)) File.Delete(d.ThumbFile); } catch { }
         }
         Db.DeleteDownload(d.Id);
+        if (!string.IsNullOrEmpty(d.VideoId)) _doneById.TryRemove(d.VideoId, out _);
         Items.Remove(d);
     }
 
     public bool IsDownloaded(string videoId, out DownloadItem? item)
     {
-        item = Items.FirstOrDefault(i => i.VideoId == videoId && i.IsDone && i.File != null && File.Exists(i.File));
-        return item != null;
+        if (_doneById.TryGetValue(videoId, out var d) && d.IsDone && d.File != null && File.Exists(d.File))
+        {
+            item = d;
+            return true;
+        }
+        item = null;
+        return false;
     }
 
     private void Pump()
@@ -119,17 +136,26 @@ public sealed class Downloader
         psi.Environment["PYTHONIOENCODING"] = "utf-8";
 
         var errors = new StringBuilder();
+        var errLock = new object();
         try
         {
+            if (d.Status == "canceled") return;
             using var p = Process.Start(psi)!;
-            lock (_running) _running[d.Id] = p;
-            p.ErrorDataReceived += (_, e) => { if (e.Data != null && e.Data.Contains("ERROR")) errors.AppendLine(e.Data); };
+            lock (_running)
+            {
+                if (d.Status == "canceled") { try { p.Kill(true); } catch { } return; }
+                _running[d.Id] = p;
+            }
+            p.ErrorDataReceived += (_, e) => { if (e.Data != null && e.Data.Contains("ERROR")) lock (errLock) errors.AppendLine(e.Data); };
             p.BeginErrorReadLine();
             string? line;
             while ((line = await p.StandardOutput.ReadLineAsync()) != null)
                 Handle(d, line);
             await p.WaitForExitAsync();
+            p.WaitForExit(); // wait for async ErrorDataReceived flush
             var ok = p.ExitCode == 0 && d.File != null;
+            string errCopy;
+            lock (errLock) errCopy = errors.ToString().Trim();
             Ui(() =>
             {
                 if (d.Status == "canceled") return;
@@ -142,13 +168,13 @@ public sealed class Downloader
                     {
                         var thumb = Path.Combine(dir, ".thumbs", d.VideoId + ".jpg");
                         if (File.Exists(thumb)) d.ThumbFile = thumb;
+                        _doneById[d.VideoId] = d;
                     }
                 }
                 else
                 {
                     d.Status = "error";
-                    var err = errors.ToString().Trim();
-                    d.Error = err.Length > 0 ? err.Split('\n')[^1].Replace("ERROR: ", "") : $"код {p.ExitCode}";
+                    d.Error = errCopy.Length > 0 ? errCopy.Split('\n')[^1].Replace("ERROR: ", "") : $"код {p.ExitCode}";
                 }
                 d.Refresh();
                 Db.UpdateDownload(d);

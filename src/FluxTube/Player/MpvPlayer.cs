@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
 using FluxTube.Services;
 using static FluxTube.Player.MpvNative;
@@ -16,13 +17,19 @@ public sealed class MpvPlayer : IDisposable
     private IntPtr _host;
     private Thread? _eventThread;
     private volatile bool _disposed;
-    private double _lastTimePosted;
+    private double _lastTimePosted = double.NaN;
+    private int _loadGen;
+    private int _volRampGen;
+    private double _volTarget = -1;
     private static Win32.WndProc? _wndProcKeep;
 
     public double TimePos { get; private set; }
     public double Duration { get; private set; }
     public bool Paused { get; private set; }
     public bool Fullscreen { get; private set; }
+    public double Volume { get; private set; } = AppSettings.Current.Volume;
+    public bool Muted { get; private set; }
+    public double Speed { get; private set; } = 1.0;
     public string? CurrentVideoId { get; private set; }
     public string? CurrentUrl { get; private set; }
     public bool HasMedia => CurrentUrl != null;
@@ -31,6 +38,9 @@ public sealed class MpvPlayer : IDisposable
     public event Action<double>? DurationChanged;
     public event Action<bool>? PauseChanged;
     public event Action<bool>? FullscreenChanged;
+    public event Action<double>? VolumeChanged;
+    public event Action<bool>? MuteChanged;
+    public event Action<double>? SpeedChanged;
     public event Action? FileLoaded;
     /// <summary>A click on the player's own controls that the app must handle (next, quality menu, ...).</summary>
     public event Action<string, string>? Message;
@@ -40,7 +50,7 @@ public sealed class MpvPlayer : IDisposable
     public event Action<bool>? EndOfFile; // true = played to end
     public event Action<string>? LoadFailed;
 
-    public bool IsReady => _ctx != IntPtr.Zero;
+    public bool IsReady => Volatile.Read(ref _ctx) != IntPtr.Zero && !_disposed;
 
     public IntPtr Host => _host;
     public bool Mute { get; set; }
@@ -48,103 +58,161 @@ public sealed class MpvPlayer : IDisposable
     /// <summary>hostHwnd: the child window mpv renders into (the shell owns it and its input).</summary>
     public void Init(IntPtr hostHwnd)
     {
-        if (_ctx != IntPtr.Zero) return;
+        if (Volatile.Read(ref _ctx) != IntPtr.Zero || _disposed) return;
         _host = hostHwnd;
 
-        _ctx = mpv_create();
-        if (_ctx == IntPtr.Zero) throw new InvalidOperationException("mpv_create failed");
+        var ctx = mpv_create();
+        if (ctx == IntPtr.Zero) throw new InvalidOperationException("mpv_create failed");
+        try
+        {
+            var baseDir = AppContext.BaseDirectory;
+            var mpvDir = Path.Combine(baseDir, "Assets", "mpv");
+            Opt(ctx, "config-dir", mpvDir);
+            Opt(ctx, "config", "yes");
+            Opt(ctx, "wid", _host.ToInt64().ToString());
+            Opt(ctx, "vo", "gpu-next");
+            Opt(ctx, "gpu-api", "d3d11");
+            Opt(ctx, "hwdec", "auto-safe");
+            Opt(ctx, "idle", "yes");
+            Opt(ctx, "input-ipc-server", @"\\.\pipe\fluxtube-mpv-" + Environment.ProcessId);
+            Opt(ctx, "force-window", "immediate");
+            Opt(ctx, "gpu-shader-cache", "yes");
+            Opt(ctx, "gpu-shader-cache-dir", Path.Combine(Paths.Data, "mpv-shaders").Replace('\\', '/'));
+            Opt(ctx, "keep-open", "yes");
+            Opt(ctx, "osc", "no");          // scripts/fluxosc.lua draws the controls
+            Opt(ctx, "osd-bar", "no");
+            Opt(ctx, "border", "no");
+            Opt(ctx, "input-default-bindings", "yes");
+            Opt(ctx, "input-vo-keyboard", "yes");
+            Opt(ctx, "cursor-autohide", "1000");
+            Opt(ctx, "window-dragging", "no");
+            Opt(ctx, "background-color", "#000000");
+            Opt(ctx, "osd-font", "Segoe UI");
+            Opt(ctx, "osd-font-size", "28");
+            Opt(ctx, "demuxer-max-bytes", "12MiB");
+            Opt(ctx, "demuxer-max-back-bytes", "4MiB");
+            Opt(ctx, "cache", "yes");
+            Opt(ctx, "demuxer-seekable-cache", "no");
+            Opt(ctx, "volume-max", "150");
+            Opt(ctx, "sub-font", "Segoe UI");
+            Opt(ctx, "sub-font-size", "40");
+            Opt(ctx, "sub-border-size", "2.2");
+            Opt(ctx, "sub-shadow-offset", "0");
+            Opt(ctx, "sub-margin-y", "64");
+            Opt(ctx, "sub-auto", "no");
+            Opt(ctx, "ytdl", "yes");
+            Opt(ctx, "script-opts", "ytdl_hook-ytdl_path=" + Paths.YtDlp.Replace('\\', '/') + (ScriptOpts.Length > 0 ? "," + ScriptOpts : ""));
+            Opt(ctx, "cache-pause-initial", "no");
+            Opt(ctx, "cache-pause-wait", "0.4");
+            Opt(ctx, "demuxer-readahead-secs", "20");
+            Opt(ctx, "network-timeout", "15");
+            Opt(ctx, "hr-seek", "yes");
+            Opt(ctx, "vd-lavc-threads", "6");
+            Opt(ctx, "ad-lavc-threads", "1");
+            if (Mute) { Opt(ctx, "mute", "yes"); Muted = true; }
+            if (Environment.GetEnvironmentVariable("FLUX_MPV_LOG") is { Length: > 0 } logFile) { Opt(ctx, "log-file", logFile); Opt(ctx, "msg-level", "all=v"); }
 
-        var baseDir = AppContext.BaseDirectory;
-        var mpvDir = Path.Combine(baseDir, "Assets", "mpv");
-        Opt("config-dir", mpvDir);
-        Opt("config", "yes");
-        Opt("wid", _host.ToInt64().ToString());
-        Opt("vo", "gpu-next");
-        Opt("gpu-api", "d3d11");
-        Opt("hwdec", "auto-safe");
-        Opt("idle", "yes");
-        Opt("input-ipc-server", @"\\.\pipe\fluxtube-mpv-" + Environment.ProcessId); // diagnostics: query state from scripts
-        // "immediate": the GPU output (~90 ms to set up) is created with the player, not on the first video
-        Opt("force-window", "immediate");
-        Opt("gpu-shader-cache", "yes");
-        Opt("gpu-shader-cache-dir", Path.Combine(Paths.Data, "mpv-shaders").Replace('\\', '/'));
-        Opt("keep-open", "yes");
-        Opt("osc", "no");          // scripts/fluxosc.lua draws the controls
-        Opt("osd-bar", "no");
-        Opt("border", "no");
-        Opt("input-default-bindings", "yes");
-        Opt("input-vo-keyboard", "yes");
-        Opt("cursor-autohide", "1000");
-        // mpv would start dragging its window once a held mouse button moves three pixels, and let go of the button
-        // for our controls: the volume slider and the seek bar could be clicked but not dragged
-        Opt("window-dragging", "no");
-        Opt("background-color", "#000000");
-        Opt("osd-font", "Segoe UI");
-        Opt("osd-font-size", "28");
-        // ~1-2 min of 1080p ahead is plenty with 30+ MB/s chunks; keeps memory low (audio-file adds a second demuxer)
-        Opt("demuxer-max-bytes", "12MiB");
-        Opt("demuxer-max-back-bytes", "4MiB");
-        Opt("cache", "yes");
-        // no in-memory seek ranges: with YouTube's fragmented mp4 a seek back makes lavf scan the fragment headers to
-        // the end, mpv then joins the new range with the old one and every later seek into the gap lands back at the
-        // old position. Seeking again is cheap anyway: the proxy serves played parts from disk.
-        Opt("demuxer-seekable-cache", "no");
-        Opt("volume-max", "150");
-        // subtitles: readable on any picture, above the controls
-        Opt("sub-font", "Segoe UI");
-        Opt("sub-font-size", "40");
-        Opt("sub-border-size", "2.2");
-        Opt("sub-shadow-offset", "0");
-        Opt("sub-margin-y", "64");
-        Opt("sub-auto", "no");
-        Opt("ytdl", "yes");
-        Opt("script-opts", "ytdl_hook-ytdl_path=" + Paths.YtDlp.Replace('\\', '/') + (ScriptOpts.Length > 0 ? "," + ScriptOpts : ""));
-        // fast start: play as soon as the first packets arrive, no initial buffering pause
-        Opt("cache-pause-initial", "no");
-        Opt("cache-pause-wait", "0.4");
-        Opt("demuxer-readahead-secs", "20");
-        Opt("network-timeout", "15");
-        Opt("hr-seek", "yes");
-        // decoding is on the GPU; a software fallback gets a few threads, not one per core (32 threads cost memory for nothing)
-        Opt("vd-lavc-threads", "6");
-        Opt("ad-lavc-threads", "1");
-        if (Mute) Opt("mute", "yes");
-        if (Environment.GetEnvironmentVariable("FLUX_MPV_LOG") is { Length: > 0 } logFile) { Opt("log-file", logFile); Opt("msg-level", "all=v"); }
-        ApplySettings();
+            ApplySettingsTo(ctx);
+            Check(mpv_initialize(ctx), "mpv_initialize");
 
-        Check(mpv_initialize(_ctx), "mpv_initialize");
+            mpv_observe_property(ctx, 1, "time-pos", Format.Double);
+            mpv_observe_property(ctx, 2, "duration", Format.Double);
+            mpv_observe_property(ctx, 3, "pause", Format.Flag);
+            mpv_observe_property(ctx, 4, "fullscreen", Format.Flag);
+            mpv_observe_property(ctx, 5, "eof-reached", Format.Flag);
+            mpv_observe_property(ctx, 6, "volume", Format.Double);
+            mpv_observe_property(ctx, 7, "mute", Format.Flag);
+            mpv_observe_property(ctx, 8, "speed", Format.Double);
 
-        mpv_observe_property(_ctx, 1, "time-pos", Format.Double);
-        mpv_observe_property(_ctx, 2, "duration", Format.Double);
-        mpv_observe_property(_ctx, 3, "pause", Format.Flag);
-        mpv_observe_property(_ctx, 4, "fullscreen", Format.Flag);
-        // with keep-open the player pauses on the last frame and sends no end-file: this flag is how the end shows
-        mpv_observe_property(_ctx, 5, "eof-reached", Format.Flag);
-
-        _eventThread = new Thread(EventLoop) { IsBackground = true, Name = "mpv-events" };
-        _eventThread.Start();
+            // Publish _ctx only after full initialization so other threads never touch an uninitialized handle
+            Volatile.Write(ref _ctx, ctx);
+            _eventThread = new Thread(EventLoop) { IsBackground = true, Name = "mpv-events" };
+            _eventThread.Start();
+        }
+        catch
+        {
+            mpv_terminate_destroy(ctx);
+            throw;
+        }
     }
 
-    /// <summary>Pushes current settings (quality, cookies, proxy...) into mpv.</summary>
+    private void ApplySettingsTo(IntPtr ctx)
+    {
+        var s = AppSettings.Current;
+        var vol = Math.Clamp(s.Volume, 0, 150);
+        Volume = vol;
+        mpv_set_option_string(ctx, "ytdl-format", s.PlayerFormat);
+        mpv_set_option_string(ctx, "volume", vol.ToString(CultureInfo.InvariantCulture));
+        mpv_set_option_string(ctx, "ytdl-raw-options", "");
+        foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
+            mpv_set_option_string(ctx, "ytdl-raw-options-append", kv);
+        mpv_set_option_string(ctx, "http-proxy", string.IsNullOrWhiteSpace(s.Proxy) ? "" : s.Proxy);
+    }
+
+    /// <summary>Pushes current settings (quality, cookies, proxy...) into mpv asynchronously.</summary>
     public void ApplySettings()
     {
-        if (_ctx == IntPtr.Zero) return;
+        if (!IsReady) return;
         var s = AppSettings.Current;
+        var vol = Math.Clamp(s.Volume, 0, 150);
+        Volume = vol;
         Set("ytdl-format", s.PlayerFormat);
-        Set("volume", s.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Set("volume", vol.ToString(CultureInfo.InvariantCulture));
         Set("ytdl-raw-options", "");
         foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
-            Set("ytdl-raw-options-append", kv);
+            Command("set", "ytdl-raw-options-append", kv);
         Set("http-proxy", string.IsNullOrWhiteSpace(s.Proxy) ? "" : s.Proxy);
+    }
+
+    /// <summary>Smoothly ramps mpv volume to target (0..150) over ~100ms instead of a harsh step jump.</summary>
+    public void SetVolumeSmooth(double target, int durationMs = 95)
+    {
+        target = Math.Clamp(Math.Round(target), 0, 150);
+        var start = _volTarget >= 0 ? Volume : Volume;
+        _volTarget = target;
+        if (!IsReady)
+        {
+            Volume = target;
+            return;
+        }
+        if (target > 0 && Muted)
+        {
+            Muted = false;
+            Set("mute", "no");
+        }
+        var delta = target - start;
+        if (Math.Abs(delta) <= 2.5 || durationMs <= 0)
+        {
+            Interlocked.Increment(ref _volRampGen);
+            Volume = target;
+            Set("volume", target.ToString("0.#", CultureInfo.InvariantCulture));
+            return;
+        }
+        var gen = Interlocked.Increment(ref _volRampGen);
+        int steps = Math.Clamp(durationMs / 16, 3, 8);
+        _ = Task.Run(async () =>
+        {
+            for (int i = 1; i <= steps; i++)
+            {
+                if (gen != Volatile.Read(ref _volRampGen) || !IsReady) return;
+                double t = (double)i / steps;
+                double ease = 1.0 - (1.0 - t) * (1.0 - t); // quad ease-out
+                double v = i == steps ? target : Math.Round(start + delta * ease, 1);
+                Volume = v;
+                Command("set", "volume", v.ToString("0.#", CultureInfo.InvariantCulture));
+                if (i < steps) await Task.Delay(16);
+            }
+        });
     }
 
     public void Load(string url, string? videoId, double startSeconds = 0)
     {
-        if (_ctx == IntPtr.Zero) return;
+        if (!IsReady) return;
+        Interlocked.Increment(ref _loadGen);
         CurrentUrl = url;
         CurrentVideoId = videoId;
-        TimePos = 0; Duration = 0;
-        var opts = startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}" : "start=0";
+        TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
+        var opts = startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", CultureInfo.InvariantCulture)}" : "start=0";
         Command("loadfile", url, "replace", "-1", opts);
         Set("pause", "no");
     }
@@ -152,11 +220,12 @@ public sealed class MpvPlayer : IDisposable
     /// <summary>Plays already-resolved googlevideo URLs directly: no yt-dlp on the critical path.</summary>
     public void LoadStream(StreamInfo s, string? title, double startSeconds, bool keepPause = false)
     {
-        if (_ctx == IntPtr.Zero) return;
+        if (!IsReady) return;
+        Interlocked.Increment(ref _loadGen);
         CurrentUrl = s.Video;
         CurrentVideoId = s.VideoId;
-        TimePos = 0; Duration = 0;
-        var opts = new List<string> { "start=" + (startSeconds > 0.3 ? startSeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) : "0") };
+        TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
+        var opts = new List<string> { "start=" + (startSeconds > 0.3 ? startSeconds.ToString("0.00", CultureInfo.InvariantCulture) : "0") };
         if (s.Audio != null) opts.Add("audio-file=" + Escaped(s.Audio));
         var t = string.IsNullOrEmpty(title) ? s.Title : title;
         if (!string.IsNullOrEmpty(t)) opts.Add("force-media-title=" + Escaped(t));
@@ -169,27 +238,30 @@ public sealed class MpvPlayer : IDisposable
 
     public void Stop()
     {
+        Interlocked.Increment(ref _loadGen);
         Command("stop");
         CurrentUrl = null; CurrentVideoId = null;
-        TimePos = 0; Duration = 0;
+        TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
     }
 
     public void TogglePause() => Command("cycle", "pause");
     public void SetPause(bool p) => Set("pause", p ? "yes" : "no");
-    public void SeekAbsolute(double s) => Command("seek", s.ToString(System.Globalization.CultureInfo.InvariantCulture), "absolute");
+    public void SeekAbsolute(double s) => Command("seek", s.ToString(CultureInfo.InvariantCulture), "absolute");
     public void ShowText(string text, int ms = 1800) => Command("show-text", text, ms.ToString());
-    public void SetSpeed(double v) => Set("speed", v.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    public void SetSpeed(double v) { Speed = v; Set("speed", v.ToString(CultureInfo.InvariantCulture)); }
 
     public double GetDouble(string name)
     {
-        if (_ctx == IntPtr.Zero) return 0;
-        return mpv_get_property(_ctx, name, Format.Double, out double v) >= 0 ? v : 0;
+        var ctx = Volatile.Read(ref _ctx);
+        if (ctx == IntPtr.Zero || _disposed) return 0;
+        return mpv_get_property(ctx, name, Format.Double, out double v) >= 0 ? v : 0;
     }
 
     public string? GetString(string name)
     {
-        if (_ctx == IntPtr.Zero) return null;
-        var p = mpv_get_property_string(_ctx, name);
+        var ctx = Volatile.Read(ref _ctx);
+        if (ctx == IntPtr.Zero || _disposed) return null;
+        var p = mpv_get_property_string(ctx, name);
         if (p == IntPtr.Zero) return null;
         var s = PtrToUtf8(p);
         mpv_free(p);
@@ -203,7 +275,6 @@ public sealed class MpvPlayer : IDisposable
     public void SetBounds(int x, int y, int w, int h)
     {
         if (_host == IntPtr.Zero) return;
-        // HWND_TOP every time: WinUI's content bridge is a sibling child window and must stay below the video
         Win32.SetWindowPos(_host, IntPtr.Zero, x, y, Math.Max(1, w), Math.Max(1, h), Win32.SWP_NOACTIVATE);
     }
 
@@ -241,17 +312,18 @@ public sealed class MpvPlayer : IDisposable
 
     // ---- plumbing ----
 
-    private void Opt(string n, string v) => mpv_set_option_string(_ctx, n, v);
-    private void Set(string n, string v) { if (_ctx != IntPtr.Zero) mpv_set_property_string(_ctx, n, v); }
+    private static void Opt(IntPtr ctx, string n, string v) => mpv_set_option_string(ctx, n, v);
+    private void Set(string n, string v) => Command("set", n, v);
 
     public void Command(params string[] args)
     {
-        if (_ctx == IntPtr.Zero) return;
+        var ctx = Volatile.Read(ref _ctx);
+        if (ctx == IntPtr.Zero || _disposed) return;
         var ptrs = new IntPtr[args.Length + 1];
         try
         {
             for (int i = 0; i < args.Length; i++) ptrs[i] = Marshal.StringToCoTaskMemUTF8(args[i]);
-            mpv_command_async(_ctx, 0, ptrs);
+            mpv_command_async(ctx, 0, ptrs);
         }
         finally
         {
@@ -268,20 +340,32 @@ public sealed class MpvPlayer : IDisposable
 
     private void EventLoop()
     {
+        bool volSeen = false, muteSeen = false, speedSeen = false;
         while (!_disposed)
         {
-            var evPtr = mpv_wait_event(_ctx, 0.5);
+            var ctx = Volatile.Read(ref _ctx);
+            if (ctx == IntPtr.Zero) return;
+            var evPtr = mpv_wait_event(ctx, 0.5);
             if (evPtr == IntPtr.Zero) continue;
             var ev = Marshal.PtrToStructure<MpvEvent>(evPtr);
             switch (ev.event_id)
             {
                 case EventId.None: break;
                 case EventId.Shutdown: return;
-                case EventId.FileLoaded: Ui(() => FileLoaded?.Invoke()); break;
-                case EventId.PlaybackRestart: Ui(() => PlaybackStarted?.Invoke()); break;
+                case EventId.FileLoaded:
+                {
+                    var gen = Volatile.Read(ref _loadGen);
+                    Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) FileLoaded?.Invoke(); });
+                    break;
+                }
+                case EventId.PlaybackRestart:
+                {
+                    var gen = Volatile.Read(ref _loadGen);
+                    Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) PlaybackStarted?.Invoke(); });
+                    break;
+                }
                 case EventId.ClientMessage:
                 {
-                    // mpv_event_client_message { int num_args; const char** args; }
                     var n = Marshal.ReadInt32(ev.data);
                     var argv = Marshal.ReadIntPtr(ev.data, IntPtr.Size);
                     if (n >= 2 && PtrToUtf8(Marshal.ReadIntPtr(argv)) == "flux")
@@ -297,8 +381,9 @@ public sealed class MpvPlayer : IDisposable
                     var ef = Marshal.PtrToStructure<MpvEventEndFile>(ev.data);
                     if (ef.reason == 4)
                     {
+                        var gen = Volatile.Read(ref _loadGen);
                         var msg = PtrToUtf8(mpv_error_string(ef.error)) ?? "error";
-                        Ui(() => LoadFailed?.Invoke(msg));
+                        Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) LoadFailed?.Invoke(msg); });
                     }
                     break;
                 }
@@ -312,17 +397,18 @@ public sealed class MpvPlayer : IDisposable
                         {
                             var v = Marshal.PtrToStructure<double>(p.data);
                             TimePos = v;
-                            // mpv reports every frame; the UI needs a few updates a second
-                            if (Math.Abs(v - _lastTimePosted) < 0.25) break;
+                            if (!double.IsNaN(_lastTimePosted) && Math.Abs(v - _lastTimePosted) < 0.25) break;
                             _lastTimePosted = v;
-                            Ui(() => TimeChanged?.Invoke(v));
+                            var gen = Volatile.Read(ref _loadGen);
+                            Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) TimeChanged?.Invoke(v); });
                             break;
                         }
                         case 2:
                         {
                             var v = Marshal.PtrToStructure<double>(p.data);
                             Duration = v;
-                            Ui(() => DurationChanged?.Invoke(v));
+                            var gen = Volatile.Read(ref _loadGen);
+                            Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) DurationChanged?.Invoke(v); });
                             break;
                         }
                         case 3:
@@ -332,9 +418,6 @@ public sealed class MpvPlayer : IDisposable
                             Ui(() => PauseChanged?.Invoke(v));
                             break;
                         }
-                        case 5:
-                            if (Marshal.ReadInt32(p.data) != 0) Ui(() => EndOfFile?.Invoke(true));
-                            break;
                         case 4:
                         {
                             var v = Marshal.ReadInt32(p.data) != 0;
@@ -343,6 +426,37 @@ public sealed class MpvPlayer : IDisposable
                                 Fullscreen = v;
                                 Ui(() => FullscreenChanged?.Invoke(v));
                             }
+                            break;
+                        }
+                        case 5:
+                            if (Marshal.ReadInt32(p.data) != 0)
+                            {
+                                var gen = Volatile.Read(ref _loadGen);
+                                Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) EndOfFile?.Invoke(true); });
+                            }
+                            break;
+                        case 6:
+                        {
+                            var v = Marshal.PtrToStructure<double>(p.data);
+                            Volume = v;
+                            if (volSeen) Ui(() => VolumeChanged?.Invoke(v));
+                            volSeen = true;
+                            break;
+                        }
+                        case 7:
+                        {
+                            var v = Marshal.ReadInt32(p.data) != 0;
+                            Muted = v;
+                            if (muteSeen) Ui(() => MuteChanged?.Invoke(v));
+                            muteSeen = true;
+                            break;
+                        }
+                        case 8:
+                        {
+                            var v = Marshal.PtrToStructure<double>(p.data);
+                            Speed = v;
+                            if (speedSeen) Ui(() => SpeedChanged?.Invoke(v));
+                            speedSeen = true;
                             break;
                         }
                     }
@@ -356,12 +470,12 @@ public sealed class MpvPlayer : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        if (_ctx != IntPtr.Zero)
+        var ctx = Interlocked.Exchange(ref _ctx, IntPtr.Zero);
+        if (ctx != IntPtr.Zero)
         {
-            mpv_wakeup(_ctx);
+            mpv_wakeup(ctx);
             _eventThread?.Join(1500);
-            mpv_terminate_destroy(_ctx);
-            _ctx = IntPtr.Zero;
+            mpv_terminate_destroy(ctx);
         }
     }
 }

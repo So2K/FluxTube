@@ -12,40 +12,55 @@ public static class ThemePicker
     public static float Draw(float x, float y, float w)
     {
         var y0 = y;
+        var clip = Gfx.Clip;
         var cols = Math.Max(1, (int)((w + Gap) / (CardW + Gap)));
-        foreach (var group in Themes.All.GroupBy(t => t.Group))
+        foreach (var (groupName, items) in Themes.Groups)
         {
-            Gfx.Draw(group.Key, x, y, 12.5f, Th.Sub, 600);
+            if (y + 24 >= clip.Y && y <= clip.Bottom)
+                Gfx.Draw(groupName, x, y, 12.5f, Th.Sub, 600);
             y += 24;
-            int i = 0;
-            foreach (var t in group)
+            int rows = (items.Length + cols - 1) / cols;
+            float rowStride = CardH + 34 + Gap;
+            for (int i = 0; i < items.Length; i++)
             {
-                float cx = x + i % cols * (CardW + Gap), cy = y + i / cols * (CardH + 34 + Gap);
-                Card(t, new R(cx, cy, CardW, CardH));
-                i++;
+                float cx = x + i % cols * (CardW + Gap), cy = y + i / cols * rowStride;
+                if (cy + CardH + 34 < clip.Y || cy > clip.Bottom) continue;
+                Card(items[i], new R(cx, cy, CardW, CardH));
             }
-            y += (i + cols - 1) / cols * (CardH + 34 + Gap) + 6;
+            y += rows * rowStride + 6;
         }
 
         // accents: the theme's own, then the fixed set
-        Gfx.Draw("Акцентный цвет", x, y, 12.5f, Th.Sub, 600);
+        if (y + 26 >= clip.Y && y <= clip.Bottom)
+            Gfx.Draw("Акцентный цвет", x, y, 12.5f, Th.Sub, 600);
         y += 26;
         var cur = Themes.AccentOverride;
         float sx = x;
-        Swatch(UI.Id("acc:own"), sx, y, Themes.Current.Brand, cur == null, "Как в теме", () => Themes.Apply(accent: ""));
-        sx += 46;
-        foreach (var (name, color) in Themes.Accents)
+        string? tipName = null;
+        float tipX = 0, tipY = 0;
+
+        if (Swatch(UI.Id("acc:own"), sx, y, Themes.Current.Brand, cur == null, true, () => Themes.Apply(accent: "")))
         {
-            var c = color;
-            Swatch(UI.Id("acc:" + name), sx, y, c, cur == c, name, () => Themes.Apply(accent: Themes.Hex(c)));
-            sx += 40;
-            if (sx > x + w - 40) { sx = x; y += 44; }
+            tipName = "Как в теме"; tipX = sx + 17; tipY = y + 40;
         }
+        sx += 46;
+        for (int i = 0; i < Themes.Accents.Length; i++)
+        {
+            var (name, color) = Themes.Accents[i];
+            if (sx > x + w - 34) { sx = x; y += 44; }
+            var c = color;
+            if (Swatch(UI.Id("acc:" + name), sx, y, c, cur == c, false, () => Themes.Apply(accent: Themes.Hex(c))))
+            {
+                tipName = name; tipX = sx + 17; tipY = y + 40;
+            }
+            sx += 40;
+        }
+        if (tipName != null) Tip(tipName, tipX, tipY, x, x + w);
         y += 48;
         return y - y0;
     }
 
-    private static void Swatch(int id, float x, float y, uint color, bool on, string name, Action pick)
+    private static bool Swatch(int id, float x, float y, uint color, bool on, bool isOwn, Action pick)
     {
         var r = new R(x, y, 34, 34);
         var over = UI.Hover(r);
@@ -53,15 +68,17 @@ public static class ThemePicker
         if (ring > 0.01f) Gfx.Circle(x + 17, y + 17, 17, Gfx.Fade(Th.Text, ring));
         Gfx.Circle(x + 17, y + 17, 17 - 3 * ring, Th.Bg);
         Gfx.Circle(x + 17, y + 17, 12.5f, color);
-        if (name == "Как в теме") Gfx.Icon(Th.Refresh, new R(x, y, 34, 34), 11, 0xFFFFFFFF);
-        if (over) Tip(name, x + 17, y + 40);
+        if (isOwn) Gfx.Icon(Th.Refresh, new R(x, y, 34, 34), 11, 0xFFFFFFFF);
         if (UI.Click(id, r)) App.Post(pick);
+        return over;
     }
 
-    private static void Tip(string text, float cx, float y)
+    private static void Tip(string text, float cx, float y, float minX, float maxX)
     {
         var run = Gfx.Text(text, 12, 500);
-        var b = new R(cx - run.W / 2 - 8, y, run.W + 16, run.H + 8);
+        float bw = run.W + 16;
+        float bx = Math.Clamp(cx - bw / 2, minX, MathF.Max(minX, maxX - bw));
+        var b = new R(bx, y, bw, run.H + 8);
         Gfx.Fill(b, Th.Menu, 6);
         Gfx.Stroke(b, Th.Line, 6);
         Gfx.Draw(run, b.X + 8, b.Y + 4, Th.Text);

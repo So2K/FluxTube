@@ -15,21 +15,18 @@ public sealed class InnerTube
 {
     public static InnerTube Instance { get; } = new();
 
+    private sealed record SessionState(JsonObject Context, string ClientVersion, string? VisitorData, string SessionIndex, string? DelegatedSessionId, bool LoggedIn, DateTime BootAt);
+
     private const string Origin = "https://www.youtube.com";
     private readonly HttpClient _http;
-    private JsonObject? _context;
-    private string _clientVersion = "2.20261112.00.00";
-    private string? _visitorData;
-    private string _sessionIndex = "0";
-    private string? _delegatedSessionId;
-    private DateTime _bootAt;
+    private volatile SessionState? _session;
     private JsonNode? _bootInitialData;
     private readonly SemaphoreSlim _bootLock = new(1, 1);
 
     public static int ChromeMajor { get; set; } = 142;
     public static string UserAgent => $"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{ChromeMajor}.0.0.0 Safari/537.36";
 
-    public bool LoggedIn { get; private set; }
+    public bool LoggedIn => _session?.LoggedIn ?? false;
 
     private InnerTube()
     {
@@ -51,7 +48,7 @@ public sealed class InnerTube
             DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
             Timeout = TimeSpan.FromSeconds(25),
         };
-        CookieStore.Changed += () => _bootAt = default;
+        CookieStore.Changed += ResetSession;
     }
 
     // ---------------- headers ----------------
@@ -98,20 +95,22 @@ public sealed class InnerTube
 
     // ---------------- bootstrap ----------------
 
-    private async Task EnsureBootAsync(CancellationToken ct)
+    private async Task<SessionState> EnsureBootAsync(CancellationToken ct)
     {
-        if (_context != null && (DateTime.UtcNow - _bootAt).TotalMinutes < 30) return;
+        var cur = _session;
+        if (cur != null && (DateTime.UtcNow - cur.BootAt).TotalMinutes < 30) return cur;
         await _bootLock.WaitAsync(ct);
         try
         {
-            if (_context != null && (DateTime.UtcNow - _bootAt).TotalMinutes < 30) return;
+            cur = _session;
+            if (cur != null && (DateTime.UtcNow - cur.BootAt).TotalMinutes < 30) return cur;
             var html = await GetHtmlAsync(Origin + "/", ct);
-            ParseBoot(html);
+            return ParseBoot(html);
         }
         finally { _bootLock.Release(); }
     }
 
-    private void ParseBoot(string html)
+    private SessionState ParseBoot(string html)
     {
         var cfgText = J.ExtractObject(html, "ytcfg.set({") is { } t ? t : null;
         // ytcfg.set is called several times; the big one contains INNERTUBE_CONTEXT
@@ -123,15 +122,15 @@ public sealed class InnerTube
         }
         if (cfgText == null) throw new InvalidOperationException("YouTube page without ytcfg");
         var cfg = JsonNode.Parse(cfgText)!;
-        _context = cfg["INNERTUBE_CONTEXT"]?.DeepClone() as JsonObject
-                   ?? throw new InvalidOperationException("no INNERTUBE_CONTEXT");
-        _clientVersion = cfg.S("INNERTUBE_CLIENT_VERSION") ?? _clientVersion;
-        _visitorData = cfg.S("VISITOR_DATA") ?? _context.S("client", "visitorData");
-        _sessionIndex = cfg.S("SESSION_INDEX") ?? "0";
-        _delegatedSessionId = cfg.S("DELEGATED_SESSION_ID");
-        LoggedIn = cfg["LOGGED_IN"]?.GetValue<bool>() ?? false;
+        var ctx = cfg["INNERTUBE_CONTEXT"]?.DeepClone() as JsonObject
+                  ?? throw new InvalidOperationException("no INNERTUBE_CONTEXT");
+        var clientVer = cfg.S("INNERTUBE_CLIENT_VERSION") ?? _session?.ClientVersion ?? "2.20261112.00.00";
+        var visitor = cfg.S("VISITOR_DATA") ?? ctx.S("client", "visitorData");
+        var sessIdx = cfg.S("SESSION_INDEX") ?? "0";
+        var delSess = cfg.S("DELEGATED_SESSION_ID");
+        var logged = cfg["LOGGED_IN"]?.GetValue<bool>() ?? false;
 
-        var client = (JsonObject)_context["client"]!;
+        var client = (JsonObject)ctx["client"]!;
         client["hl"] = AppSettings.Current.Hl;
         if (!string.IsNullOrWhiteSpace(AppSettings.Current.Gl)) client["gl"] = AppSettings.Current.Gl;
         client["userAgent"] = UserAgent + ",gzip(gfe)";
@@ -141,12 +140,14 @@ public sealed class InnerTube
         client["screenHeightPoints"] = 1080;
         client["screenPixelDensity"] = 1;
         client["userInterfaceTheme"] = "USER_INTERFACE_THEME_DARK";
-        _context.Remove("clickTracking");
-        _context.Remove("adSignalsInfo");
+        ctx.Remove("clickTracking");
+        ctx.Remove("adSignalsInfo");
 
         var dataText = J.ExtractObject(html, "var ytInitialData = ") ?? J.ExtractObject(html, "ytInitialData\"] = ");
-        _bootInitialData = dataText != null ? JsonNode.Parse(dataText) : null;
-        _bootAt = DateTime.UtcNow;
+        Volatile.Write(ref _bootInitialData, dataText != null ? JsonNode.Parse(dataText) : null);
+        var state = new SessionState(ctx, clientVer, visitor, sessIdx, delSess, logged, DateTime.UtcNow);
+        _session = state;
+        return state;
     }
 
     private static string IanaTimeZone()
@@ -163,22 +164,22 @@ public sealed class InnerTube
 
     private async Task<JsonNode> PostAsync(string endpoint, JsonObject body, string referer, CancellationToken ct)
     {
-        await EnsureBootAsync(ct);
-        body["context"] = _context!.DeepClone();
+        var sess = await EnsureBootAsync(ct);
+        body["context"] = sess.Context.DeepClone();
         using var req = new HttpRequestMessage(HttpMethod.Post, $"{Origin}/youtubei/v1/{endpoint}?prettyPrint=false");
         BrowserHeaders(req, navigation: false);
         var h = req.Headers;
         h.TryAddWithoutValidation("Referer", referer);
         h.TryAddWithoutValidation("X-Youtube-Client-Name", "1");
-        h.TryAddWithoutValidation("X-Youtube-Client-Version", _clientVersion);
+        h.TryAddWithoutValidation("X-Youtube-Client-Version", sess.ClientVersion);
         h.TryAddWithoutValidation("X-Origin", Origin);
-        if (_visitorData != null) h.TryAddWithoutValidation("X-Goog-Visitor-Id", _visitorData);
+        if (sess.VisitorData != null) h.TryAddWithoutValidation("X-Goog-Visitor-Id", sess.VisitorData);
         var auth = CookieStore.AuthorizationHeader(Origin);
         if (auth != null)
         {
             h.TryAddWithoutValidation("Authorization", auth);
-            h.TryAddWithoutValidation("X-Goog-AuthUser", _sessionIndex);
-            if (!string.IsNullOrEmpty(_delegatedSessionId)) h.TryAddWithoutValidation("X-Goog-PageId", _delegatedSessionId);
+            h.TryAddWithoutValidation("X-Goog-AuthUser", sess.SessionIndex);
+            if (!string.IsNullOrEmpty(sess.DelegatedSessionId)) h.TryAddWithoutValidation("X-Goog-PageId", sess.DelegatedSessionId);
             h.TryAddWithoutValidation("X-Youtube-Bootstrap-Logged-In", "true");
         }
         req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8);
@@ -193,8 +194,13 @@ public sealed class InnerTube
         return JsonNode.Parse(text)!;
     }
 
-    /// <summary>Forget the session (language changed): the next request boots again with the new settings.</summary>
-    public void ResetSession() => _bootAt = default;
+    /// <summary>Forget the session and watch cache (account/language changed): the next request boots cleanly.</summary>
+    public void ResetSession()
+    {
+        _session = null;
+        Volatile.Write(ref _bootInitialData, null);
+        _watch.Clear();
+    }
 
     /// <summary>Opens the TLS/HTTP2 connection and reads ytcfg before the first page needs it.</summary>
     public async Task WarmAsync()
@@ -209,18 +215,25 @@ public sealed class InnerTube
     {
         await EnsureBootAsync(ct);
         // Use the exact 1-to-1 ytInitialData from https://www.youtube.com/ (identical ranking, personalization, and chips as desktop YouTube!)
-        JsonNode? d = _bootInitialData;
-        _bootInitialData = null;
+        JsonNode? d = Interlocked.Exchange(ref _bootInitialData, null);
         if (d == null)
         {
+            await _bootLock.WaitAsync(ct);
             try
             {
-                var html = await GetHtmlAsync(Origin + "/", ct);
-                ParseBoot(html);
-                d = _bootInitialData;
-                _bootInitialData = null;
+                d = Interlocked.Exchange(ref _bootInitialData, null);
+                if (d == null)
+                {
+                    try
+                    {
+                        var html = await GetHtmlAsync(Origin + "/", ct);
+                        ParseBoot(html);
+                        d = Interlocked.Exchange(ref _bootInitialData, null);
+                    }
+                    catch { }
+                }
             }
-            catch { }
+            finally { _bootLock.Release(); }
         }
         d ??= await PostAsync("browse", new JsonObject { ["browseId"] = "FEwhat_to_watch" }, Origin + "/", ct);
         var page = ParseFeed(d);
@@ -411,7 +424,17 @@ public sealed class InnerTube
             if (items is not JsonArray arr) continue;
             foreach (var it in arr)
             {
-                if (it.P("commentsHeaderRenderer") is { } hdr) { page.Count = hdr.P("countText").Text(); continue; }
+                if (it.P("commentsHeaderRenderer") is { } hdr)
+                {
+                    page.Count = hdr.P("countText").Text();
+                    J.Walk(hdr, (_, x) =>
+                    {
+                        if (page.CreateCommentParams != null) return false;
+                        if (x.S("createCommentParams") is { Length: > 0 } cp) { page.CreateCommentParams = cp; return false; }
+                        return true;
+                    });
+                    continue;
+                }
                 if (it.P("continuationItemRenderer") is { } ci)
                 {
                     page.Continuation = ci.S("continuationEndpoint", "continuationCommand", "token")
@@ -440,6 +463,31 @@ public sealed class InnerTube
             }
         }
         return page;
+    }
+
+    /// <summary>Posts a top-level comment on a video or Short using the signed-in YouTube account.</summary>
+    public async Task<(bool Ok, string? Error)> CreateCommentAsync(string createCommentParams, string text, string videoId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(createCommentParams)) return (false, "Нет токена для комментария");
+        if (string.IsNullOrWhiteSpace(text)) return (false, "Пустой комментарий");
+        var body = new JsonObject
+        {
+            ["createCommentParams"] = createCommentParams,
+            ["commentText"] = text.Trim(),
+        };
+        var d = await PostAsync("comment/create_comment", body, $"{Origin}/watch?v={videoId}", ct);
+        if (d["error"] != null) return (false, d.S("error", "message") ?? "YouTube отклонил комментарий");
+        if (d.P("actionResults") is JsonArray results)
+        {
+            foreach (var r in results)
+            {
+                var st = r.S("status");
+                if (st == "STATUS_SUCCEEDED") return (true, null);
+                if (st != null && st != "STATUS_SUCCEEDED")
+                    return (false, r.S("feedbackText") ?? "YouTube не принял комментарий");
+            }
+        }
+        return (true, null);
     }
 
     /// <summary>The signed-in account: name, handle, photo, own channel. Null when not signed in.</summary>
@@ -587,7 +635,7 @@ public sealed class InnerTube
     {
         var now = Environment.TickCount64;
         var key = playlistId == null ? videoId : videoId + "|" + playlistId;
-        if (_watch.TryGetValue(key, out var e) && !e.Task.IsFaulted && now - e.At < 600_000) return e.Task;
+        if (_watch.TryGetValue(key, out var e) && !e.Task.IsFaulted && !e.Task.IsCanceled && now - e.At < 600_000) return e.Task;
         if (_watch.Count > 120) _watch.Clear();
         var t = Task.Run(() => WatchAsync(videoId, default, playlistId));
         _watch[key] = (t, now);
@@ -663,7 +711,15 @@ public sealed class InnerTube
         if (data.P("engagementPanels") is JsonArray panels)
             foreach (var p in panels)
                 if (p.S("engagementPanelSectionListRenderer", "panelIdentifier")?.Contains("comment") == true)
+                {
                     info.CommentsCount = p.P("engagementPanelSectionListRenderer", "header", "engagementPanelTitleHeaderRenderer", "contextualInfo").Text();
+                    J.Walk(p, (_, x) =>
+                    {
+                        if (info.CreateCommentParams != null) return false;
+                        if (x.S("createCommentParams") is { Length: > 0 } cp) { info.CreateCommentParams = cp; return false; }
+                        return true;
+                    });
+                }
         return info;
     }
 
@@ -742,8 +798,19 @@ public sealed class InnerTube
 
     private static bool IsShortsShelf(JsonObject o)
     {
-        var s = o.ToJsonString();
-        return s.Contains("shortsLockupViewModel") || s.Contains("reelItemRenderer") || s.Contains("\"isShorts\"");
+        bool found = false;
+        J.Walk(o, (k, x) =>
+        {
+            if (found) return false;
+            if (k is "shortsLockupViewModel" or "reelItemRenderer" or "shortsLockupViewModelV2"
+                || x.ContainsKey("shortsLockupViewModel") || x.ContainsKey("reelItemRenderer") || x.ContainsKey("isShorts"))
+            {
+                found = true;
+                return false;
+            }
+            return true;
+        });
+        return found;
     }
 
     /// <param name="shortsToo">Keep a Short that is listed as a plain video (the history does that for Shorts opened

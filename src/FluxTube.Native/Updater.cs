@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http;
 using System.Text.Json.Nodes;
 using FluxTube.Services;
@@ -7,14 +8,14 @@ namespace FluxTube;
 
 /// <summary>
 /// Built-in GitHub Releases auto-updater: silently checks for a newer release,
-/// downloads the Setup EXE with live progress, and launches a clean in-place upgrade.
+/// downloads the Setup EXE with live progress (atomic .part write), and launches a clean in-place upgrade.
 /// </summary>
 public static class Updater
 {
-    public const string CurrentVersion = "9.0.17";
+    public const string CurrentVersion = "9.1.0";
     public const string Repo = "So2K/FluxTube";
 
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(15) };
+    private static readonly HttpClient Http = MakeClient();
     private static volatile bool _checking, _downloading;
 
     public static bool Checking => _checking;
@@ -28,9 +29,13 @@ public static class Updater
 
     public static bool HasUpdate => AvailableVersion != null && DownloadUrl != null;
 
-    static Updater()
+    private static HttpClient MakeClient()
     {
-        Http.DefaultRequestHeaders.UserAgent.ParseAdd($"FluxTube/{CurrentVersion}");
+        var h = new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All };
+        if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy)) { h.Proxy = new WebProxy(AppSettings.Current.Proxy); h.UseProxy = true; }
+        var c = new HttpClient(h) { Timeout = TimeSpan.FromMinutes(15) };
+        c.DefaultRequestHeaders.UserAgent.ParseAdd($"FluxTube/{CurrentVersion}");
+        return c;
     }
 
     public static void Check(bool manual = false)
@@ -43,9 +48,10 @@ public static class Updater
         {
             try
             {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
                 using var req = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{Repo}/releases/latest");
                 req.Headers.Accept.ParseAdd("application/vnd.github+json");
-                using var resp = await Http.SendAsync(req);
+                using var resp = await Http.SendAsync(req, cts.Token);
                 if (!resp.IsSuccessStatusCode)
                 {
                     App.Post(() =>
@@ -57,7 +63,7 @@ public static class Updater
                     });
                     return;
                 }
-                var json = await resp.Content.ReadAsStringAsync();
+                var json = await resp.Content.ReadAsStringAsync(cts.Token);
                 var root = JsonNode.Parse(json);
                 var tag = (root.S("tag_name") ?? "").TrimStart('v', 'V').Trim();
                 string? url = null, name = null;
@@ -70,7 +76,7 @@ public static class Updater
                         var au = a.S("browser_download_url");
                         if (an.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(au))
                         {
-                            name = an;
+                            name = Path.GetFileName(an);
                             url = au;
                             try { size = a?["size"]?.GetValue<long>() ?? 0; } catch { }
                             break;
@@ -119,8 +125,10 @@ public static class Updater
         if (_downloading || DownloadUrl == null || AvailableVersion == null) return;
         var url = DownloadUrl;
         var ver = AvailableVersion;
-        var fileName = AssetName ?? $"FluxTube-{ver}-Setup-x64.exe";
-        var dest = Path.Combine(Path.GetTempPath(), fileName);
+        var safeName = Path.GetFileName(AssetName ?? $"FluxTube-{ver}-Setup-x64.exe");
+        if (string.IsNullOrWhiteSpace(safeName)) safeName = $"FluxTube-{ver}-Setup-x64.exe";
+        var dest = Path.Combine(Path.GetTempPath(), safeName);
+        var part = dest + ".part";
         _downloading = true;
         Progress = 0;
         StatusText = $"Скачиваю FluxTube {ver}…";
@@ -135,7 +143,7 @@ public static class Updater
                 resp.EnsureSuccessStatusCode();
                 var total = resp.Content.Headers.ContentLength ?? AssetSize;
                 await using var input = await resp.Content.ReadAsStreamAsync();
-                await using (var output = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, true))
+                await using (var output = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, true))
                 {
                     var buf = new byte[128 * 1024];
                     long readTotal = 0;
@@ -149,40 +157,26 @@ public static class Updater
                         if (now - lastUi > 120)
                         {
                             lastUi = now;
-                            Progress = total > 0 ? Math.Clamp((double)readTotal / total, 0, 1) : 0;
-                            StatusText = total > 0
-                                ? $"Скачивание {ver}: {Fmt.Size(readTotal)} / {Fmt.Size(total)} ({(int)(Progress * 100)}%)"
+                            var prog = total > 0 ? Math.Clamp((double)readTotal / total, 0, 1) : 0;
+                            var st = total > 0
+                                ? $"Скачивание {ver}: {Fmt.Size(readTotal)} / {Fmt.Size(total)} ({(int)(prog * 100)}%)"
                                 : $"Скачивание {ver}: {Fmt.Size(readTotal)}";
-                            App.WakeUi();
+                            App.Post(() => { Progress = prog; StatusText = st; });
                         }
                     }
                 }
-                App.Post(() =>
+                File.Move(part, dest, overwrite: true);
+                App.Post(() => { Progress = 1; StatusText = $"Запускаю установку {ver}…"; });
+                Process.Start(new ProcessStartInfo(dest, "/SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /NORESTART")
                 {
-                    Progress = 1;
-                    StatusText = $"Запускаю установку {ver}…";
-                    App.Invalidate();
-                    try
-                    {
-                        Process.Start(new ProcessStartInfo(dest, "/SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /NORESTART")
-                        {
-                            UseShellExecute = true,
-                        });
-                        // Close FluxTube cleanly so the installer upgrades it in place and restarts it
-                        App.After(400, () => W.PostMessageW(App.Hwnd, W.WM_CLOSE, 0, 0));
-                    }
-                    catch (Exception ex)
-                    {
-                        _downloading = false;
-                        StatusText = "Не удалось запустить установщик";
-                        Shell.Toast("Ошибка запуска установщика: " + ex.Message, Th.Warn, 6000);
-                    }
+                    UseShellExecute = true,
                 });
+                App.Post(() => App.After(400, () => W.PostMessageW(App.Hwnd, W.WM_CLOSE, 0, 0)));
             }
             catch (Exception e)
             {
                 Paths.Log("updater download: " + e.Message);
-                try { if (File.Exists(dest)) File.Delete(dest); } catch { }
+                try { if (File.Exists(part)) File.Delete(part); } catch { }
                 App.Post(() =>
                 {
                     _downloading = false;
@@ -198,9 +192,9 @@ public static class Updater
     private static bool IsNewer(string remote, string local)
     {
         if (string.IsNullOrWhiteSpace(remote)) return false;
-        if (Version.TryParse(Normalize(remote), out var rv) && Version.TryParse(Normalize(local), out var lv))
-            return rv > lv;
-        return !string.Equals(remote, local, StringComparison.OrdinalIgnoreCase);
+        return Version.TryParse(Normalize(remote), out var rv)
+            && Version.TryParse(Normalize(local), out var lv)
+            && rv > lv;
     }
 
     private static string Normalize(string v)

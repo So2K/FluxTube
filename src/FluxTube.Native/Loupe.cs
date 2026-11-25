@@ -25,9 +25,20 @@ internal static unsafe partial class Loupe
     private static float _wx, _wy;     // smoothed window center
     private static bool _posInit;
     private static W.POINT _lastPt;
-    private static nint _font;
+    private static nint _font, _bgBr, _borderPen;
     private static float _fontScale;
     private static long _lastTick;
+    private static int _lastWinX, _lastWinY, _lastWinW, _lastWinH, _lastAlpha, _lastSx, _lastSy, _lastSw, _lastSh;
+    private static float _lastPaintedZoom;
+
+    public static void Shutdown()
+    {
+        Hide();
+        if (_hwnd != 0) { W.DestroyWindow(_hwnd); _hwnd = 0; }
+        if (_font != 0) { W.DeleteObject(_font); _font = 0; }
+        if (_bgBr != 0) { W.DeleteObject(_bgBr); _bgBr = 0; }
+        if (_borderPen != 0) { W.DeleteObject(_borderPen); _borderPen = 0; }
+    }
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     private struct DWM_THUMBNAIL_PROPERTIES
@@ -146,7 +157,7 @@ internal static unsafe partial class Loupe
         vidRc = default;
         srcWin = Pip.Active && Pip.Hwnd != 0 ? Pip.Hwnd : App.Hwnd;
         if (srcWin == 0 || App.VideoHwnd == 0 || !W.IsWindowVisible(App.VideoHwnd)) return false;
-        if (Menus.Open || AccountMenu.Open) return false;
+        if (Pip.Locked || Menus.Open || AccountMenu.Open) return false;
         if (!W.AsyncKeyDown(W.VK_CONTROL)) return false;
         W.POINT p;
         if (!W.GetCursorPos(&p)) return false;
@@ -201,14 +212,19 @@ internal static unsafe partial class Loupe
         float targetCx = pt.X + offset + fullW * 0.5f;
         if (targetCx + fullW * 0.5f > mi.rcMonitor.R - 8)
             targetCx = pt.X - offset - fullW * 0.5f;
-        targetCx = Math.Clamp(targetCx, mi.rcMonitor.L + fullW * 0.5f + 8, mi.rcMonitor.R - fullW * 0.5f - 8);
-        float targetCy = Math.Clamp(pt.Y, mi.rcMonitor.T + fullH * 0.5f + 8, Math.Max(mi.rcMonitor.T + fullH * 0.5f + 8, mi.rcMonitor.B - fullH * 0.5f - 8));
+        float minCx = mi.rcMonitor.L + fullW * 0.5f + 8;
+        float maxCx = MathF.Max(minCx, mi.rcMonitor.R - fullW * 0.5f - 8);
+        targetCx = Math.Clamp(targetCx, minCx, maxCx);
+        float minCy = mi.rcMonitor.T + fullH * 0.5f + 8;
+        float maxCy = MathF.Max(minCy, mi.rcMonitor.B - fullH * 0.5f - 8);
+        float targetCy = Math.Clamp(pt.Y, minCy, maxCy);
 
         if (!_posInit)
         {
             _wx = targetCx;
             _wy = targetCy;
             _posInit = true;
+            _lastWinW = _lastWinH = _lastAlpha = -1;
         }
         else
         {
@@ -221,13 +237,21 @@ internal static unsafe partial class Loupe
         int winY = (int)MathF.Round(_wy - curH * 0.5f);
 
         byte alpha = (byte)Math.Clamp((int)MathF.Round(ease * 255f), 1, 255);
-        W.SetLayeredWindowAttributes(_hwnd, 0, alpha, 2 /*LWA_ALPHA*/);
-        W.SetWindowPos(_hwnd, (nint)(-1) /*HWND_TOPMOST*/, winX, winY, curW, curH, W.SWP_NOACTIVATE);
+        if (alpha != _lastAlpha)
+        {
+            _lastAlpha = alpha;
+            W.SetLayeredWindowAttributes(_hwnd, 0, alpha, 2 /*LWA_ALPHA*/);
+        }
+        bool sizeChanged = curW != _lastWinW || curH != _lastWinH;
+        if (winX != _lastWinX || winY != _lastWinY || sizeChanged)
+        {
+            _lastWinX = winX; _lastWinY = winY; _lastWinW = curW; _lastWinH = curH;
+            W.SetWindowPos(_hwnd, (nint)(-1) /*HWND_TOPMOST*/, winX, winY, curW, curH, W.SWP_NOACTIVATE);
+        }
 
-        // Update DWM GPU thumbnail source/dest rects
+        // Update DWM GPU thumbnail source/dest rects (opacity stays 255 so layered window controls alpha without alpha^2)
         if (_thumb != 0 && want)
         {
-            // Convert cursor and video rect into srcWin client coordinates
             var cPt = pt;
             W.ScreenToClient(srcWin, &cPt);
 
@@ -239,7 +263,7 @@ internal static unsafe partial class Loupe
             int vw = Math.Max(16, vBR.X - vTL.X);
             int vh = Math.Max(16, vBR.Y - vTL.Y);
             int viewW = Math.Max(16, curW - BorderPx * 2);
-            int viewH = Math.Max(16, curH - curFoot - BorderPx * 2);
+            int viewH = Math.Max(16, curH - curFoot - BorderPx);
 
             int sw = Math.Clamp((int)MathF.Round(viewW / _zoomCur), 16, vw);
             int sh = Math.Clamp((int)MathF.Round(viewH / _zoomCur), 16, vh);
@@ -247,29 +271,37 @@ internal static unsafe partial class Loupe
             int sx = Math.Clamp(cPt.X - sw / 2, vTL.X, Math.Max(vTL.X, vBR.X - sw));
             int sy = Math.Clamp(cPt.Y - sh / 2, vTL.Y, Math.Max(vTL.Y, vBR.Y - sh));
 
-            var props = new DWM_THUMBNAIL_PROPERTIES
+            if (sizeChanged || sx != _lastSx || sy != _lastSy || sw != _lastSw || sh != _lastSh)
             {
-                dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_VISIBLE | DWM_TNP_SOURCECLIENTAREAONLY,
-                rcSource = new W.RECT { L = sx, T = sy, R = sx + sw, B = sy + sh },
-                rcDestination = new W.RECT { L = BorderPx, T = BorderPx, R = curW - BorderPx, B = curH - curFoot },
-                opacity = alpha,
-                fVisible = 1,
-                fSourceClientAreaOnly = 1,
-            };
-            DwmUpdateThumbnailProperties(_thumb, &props);
+                _lastSx = sx; _lastSy = sy; _lastSw = sw; _lastSh = sh;
+                var props = new DWM_THUMBNAIL_PROPERTIES
+                {
+                    dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_RECTSOURCE | DWM_TNP_OPACITY | DWM_TNP_VISIBLE | DWM_TNP_SOURCECLIENTAREAONLY,
+                    rcSource = new W.RECT { L = sx, T = sy, R = sx + sw, B = sy + sh },
+                    rcDestination = new W.RECT { L = BorderPx, T = BorderPx, R = curW - BorderPx, B = curH - curFoot },
+                    opacity = 255,
+                    fVisible = 1,
+                    fSourceClientAreaOnly = 1,
+                };
+                DwmUpdateThumbnailProperties(_thumb, &props);
+            }
         }
-        else if (_thumb != 0)
+        else if (_thumb != 0 && sizeChanged)
         {
             var props = new DWM_THUMBNAIL_PROPERTIES
             {
-                dwFlags = DWM_TNP_OPACITY | DWM_TNP_VISIBLE,
-                opacity = alpha,
+                dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE,
+                rcDestination = new W.RECT { L = BorderPx, T = BorderPx, R = curW - BorderPx, B = curH - curFoot },
                 fVisible = alpha > 4 ? 1 : 0,
             };
             DwmUpdateThumbnailProperties(_thumb, &props);
         }
 
-        W.InvalidateRect(_hwnd, null, 0);
+        if (sizeChanged || MathF.Abs(_zoomTarget - _lastPaintedZoom) > 0.01f)
+        {
+            _lastPaintedZoom = _zoomTarget;
+            W.InvalidateRect(_hwnd, null, 0);
+        }
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
@@ -290,19 +322,15 @@ internal static unsafe partial class Loupe
                 W.GetClientRect(h, &rc);
                 int bw = rc.R - rc.L, bh = rc.B - rc.T;
 
-                // Dark sleek background for border & footer strip
-                var bgBr = W.CreateSolidBrush(W.Rgb(18, 18, 22));
-                W.FillRect(dc, &rc, bgBr);
-                W.DeleteObject(bgBr);
+                if (_bgBr == 0) _bgBr = W.CreateSolidBrush(W.Rgb(18, 18, 22));
+                if (_borderPen == 0) _borderPen = CreatePen(0, 1, W.Rgb(72, 72, 82));
+                W.FillRect(dc, &rc, _bgBr);
 
-                // Subtle crisp outer border
-                var pen = CreatePen(0, 1, W.Rgb(72, 72, 82));
-                var oldP = W.SelectObject(dc, pen);
+                var oldP = W.SelectObject(dc, _borderPen);
                 var oldB = W.SelectObject(dc, GetStockObject(5 /*NULL_BRUSH*/));
                 Rectangle(dc, 0, 0, bw, bh);
                 W.SelectObject(dc, oldB);
                 W.SelectObject(dc, oldP);
-                W.DeleteObject(pen);
 
                 // Footer label showing current magnification & hint
                 var dpi = W.GetDpiForWindow(h) / 96f;

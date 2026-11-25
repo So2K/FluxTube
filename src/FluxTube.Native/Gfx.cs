@@ -62,9 +62,23 @@ public static unsafe class Gfx
     public static double TextDrawMs;
     /// <summary>Bumped when the GPU device was recreated: every device bitmap made before is dead.</summary>
     public static int DeviceGeneration { get; private set; }
+    /// <summary>True when DXGI reported DXGI_STATUS_OCCLUDED (covered/locked window); pauses continuous animation spinning.</summary>
+    public static bool Occluded { get; private set; }
+    public static event Action? DeviceLost;
 
     public const string Font = "Segoe UI";
     public static string IconFont = "Segoe Fluent Icons";
+
+    private static ID2D1SolidColorBrush? _scratchBrush;
+    private sealed class RadialSlot
+    {
+        public ID2D1GradientStopCollection? Stops;
+        public ID2D1RadialGradientBrush? Brush;
+        public float R, G, B, A;
+        public void Dispose() { Brush?.Dispose(); Stops?.Dispose(); Brush = null; Stops = null; A = -1; }
+    }
+    private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new()];
+    private static readonly GradientStop[] _radialStopsBuf = new GradientStop[6];
 
     public static void Init(nint hwnd)
     {
@@ -99,8 +113,44 @@ public static unsafe class Gfx
         _d2dDev = _d2dFactory.CreateDevice(dxgiDev);
         DC = _d2dDev.CreateDeviceContext(DeviceContextOptions.None);
         DC.TextAntialiasMode = Vortice.Direct2D1.TextAntialiasMode.Grayscale;
+        _scratchBrush = DC.CreateSolidColorBrush(new Color4(1, 1, 1, 1));
         CreateTarget();
         DeviceGeneration++;
+        Occluded = false;
+    }
+
+    private static bool IsDeviceLost(int code)
+        => code == unchecked((int)0x887A0005) // DXGI_ERROR_DEVICE_REMOVED
+        || code == unchecked((int)0x887A0007) // DXGI_ERROR_DEVICE_RESET
+        || code == unchecked((int)0x8899000C) // D2DERR_RECREATE_TARGET
+        || code == unchecked((int)0x88990015); // D2DERR_WRONG_RESOURCE_DOMAIN
+
+    private static void RecreateDevice()
+    {
+        foreach (var b in _brushes.Values) b.Dispose();
+        _brushes.Clear();
+        _scratchBrush?.Dispose();
+        _scratchBrush = null;
+        foreach (var s in _radials) s.Dispose();
+        ClearTextCache();
+        while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
+        try { DeviceLost?.Invoke(); } catch { }
+        DC.Target = null;
+        _target?.Dispose();
+        _target = null;
+        DC.Dispose();
+        _d2dDev.Dispose();
+        _swap.Dispose();
+        _dev.Dispose();
+        CreateDevice();
+    }
+
+    public static bool TestOccluded()
+    {
+        if (_swap == null) return false;
+        var hr = _swap.Present(0, PresentFlags.Test);
+        Occluded = hr.Code == 0x087A0001; // DXGI_STATUS_OCCLUDED
+        return Occluded;
     }
 
     private static float TargetScale() => (Win.GetDpiForWindow(_hwnd) / 96f) * Math.Clamp(Services.AppSettings.Current.UiScale, 0.7f, 1.5f);
@@ -140,7 +190,14 @@ public static unsafe class Gfx
         DC.Target = null;
         _target?.Dispose();
         _target = null;
-        _swap.ResizeBuffers(0, (uint)w, (uint)h, Format.Unknown, SwapChainFlags.None).CheckError();
+        var hr = _swap.ResizeBuffers(0, (uint)w, (uint)h, Format.Unknown, SwapChainFlags.None);
+        if (hr.Failure && IsDeviceLost(hr.Code))
+        {
+            Services.Paths.Log($"gpu device lost on resize 0x{hr.Code:X}, recreating");
+            RecreateDevice();
+            return;
+        }
+        hr.CheckError();
         if (MathF.Abs(scale - Scale) >= 0.001f) ClearTextCache();
         CreateTarget();
     }
@@ -166,13 +223,11 @@ public static unsafe class Gfx
         var hr = DC.EndDraw();
         FlushMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
         if (hr.Success) hr = _swap.Present(1, PresentFlags.None);
-        if (hr.Failure && (hr.Code == unchecked((int)0x887A0005) || hr.Code == unchecked((int)0x887A0007) || hr.Code == unchecked((int)0x8899000C)))
+        Occluded = hr.Code == 0x087A0001; // DXGI_STATUS_OCCLUDED
+        if (hr.Failure && IsDeviceLost(hr.Code))
         {
             Services.Paths.Log($"gpu device lost 0x{hr.Code:X}, recreating");
-            foreach (var b in _brushes.Values) b.Dispose();
-            _brushes.Clear();
-            DC.Target = null; _target?.Dispose(); DC.Dispose(); _d2dDev.Dispose(); _swap.Dispose(); _dev.Dispose();
-            CreateDevice();
+            RecreateDevice();
             return false;
         }
         TrimTextCache();
@@ -186,12 +241,19 @@ public static unsafe class Gfx
     private static Color4 ToColor(uint argb)
         => new(((argb >> 16) & 255) / 255f, ((argb >> 8) & 255) / 255f, (argb & 255) / 255f, (argb >> 24) / 255f);
 
+    /// <summary>Zero-allocation reusable brush for immediate Draw/Fill/Stroke calls.</summary>
+    private static ID2D1SolidColorBrush Scratch(uint argb)
+    {
+        var b = _scratchBrush ??= DC.CreateSolidColorBrush(ToColor(argb));
+        b.Color = ToColor(argb);
+        return b;
+    }
+
+    /// <summary>Persistent solid brush (required for IDWriteTextLayout.SetDrawingEffect which stores a COM ref).</summary>
     public static ID2D1SolidColorBrush Brush(uint argb)
     {
         if (_brushes.TryGetValue(argb, out var b)) return b;
-        // fades and theme changes produce thousands of one-off colours: start over instead of keeping them all
-        // (a brush already handed to a draw call stays alive until that call is flushed)
-        if (_brushes.Count > 3000)
+        if (_brushes.Count > 512)
         {
             foreach (var old in _brushes.Values) old.Dispose();
             _brushes.Clear();
@@ -207,48 +269,56 @@ public static unsafe class Gfx
 
     private static Vortice.RawRectF Raw(R r) => new(r.X, r.Y, r.Right, r.Bottom);
 
-    public static void Fill(R r, uint color) => DC.FillRectangle(Raw(r), Brush(color));
+    public static void Fill(R r, uint color) => DC.FillRectangle(Raw(r), Scratch(color));
 
     public static void Fill(R r, uint color, float radius)
     {
         if (radius <= 0) { Fill(r, color); return; }
         var rr = new RoundedRectangle { Rect = Raw(r), RadiusX = radius, RadiusY = radius };
-        DC.FillRoundedRectangle(rr, Brush(color));
+        DC.FillRoundedRectangle(rr, Scratch(color));
     }
 
     public static void Stroke(R r, uint color, float radius, float width = 1)
     {
         var rr = new RoundedRectangle { Rect = Raw(r.Inset(width / 2)), RadiusX = radius, RadiusY = radius };
-        DC.DrawRoundedRectangle(rr, Brush(color), width);
+        DC.DrawRoundedRectangle(rr, Scratch(color), width);
     }
 
     public static void Circle(float cx, float cy, float radius, uint color)
-        => DC.FillEllipse(new Ellipse(new Vector2(cx, cy), radius, radius), Brush(color));
+        => DC.FillEllipse(new Ellipse(new Vector2(cx, cy), radius, radius), Scratch(color));
 
-    /// <summary>Hardware-accelerated Direct2D radial Gaussian-like light glow (seamless fade to 0, zero visible edge).</summary>
-    public static void RadialGlow(float cx, float cy, float rx, float ry, float r, float g, float b, float alpha)
+    /// <summary>Hardware-accelerated Direct2D radial Gaussian-like light glow with per-zone COM brush caching (zero per-frame allocs when steady).</summary>
+    public static void RadialGlow(float cx, float cy, float rx, float ry, float r, float g, float b, float alpha, int slot = 0)
     {
         if (alpha <= 0.004f || rx <= 1 || ry <= 1) return;
-        GradientStop[] stops =
-        [
-            new(0.00f, new Color4(r, g, b, alpha)),
-            new(0.20f, new Color4(r, g, b, alpha * 0.64f)),
-            new(0.42f, new Color4(r, g, b, alpha * 0.28f)),
-            new(0.65f, new Color4(r, g, b, alpha * 0.08f)),
-            new(0.84f, new Color4(r, g, b, alpha * 0.015f)),
-            new(1.00f, new Color4(r, g, b, 0f)),
-        ];
-        using var col = DC.CreateGradientStopCollection(stops, Gamma.StandardRgb, ExtendMode.Clamp);
-        var props = new RadialGradientBrushProperties(new Vector2(cx, cy), Vector2.Zero, rx, ry);
-        using var brush = DC.CreateRadialGradientBrush(props, col);
-        DC.FillEllipse(new Ellipse(new Vector2(cx, cy), rx, ry), brush);
+        var s = _radials[(uint)slot % (uint)_radials.Length];
+        if (s.Brush == null || MathF.Abs(s.R - r) > 0.004f || MathF.Abs(s.G - g) > 0.004f || MathF.Abs(s.B - b) > 0.004f || MathF.Abs(s.A - alpha) > 0.003f)
+        {
+            s.Dispose();
+            _radialStopsBuf[0] = new(0.00f, new Color4(r, g, b, alpha));
+            _radialStopsBuf[1] = new(0.20f, new Color4(r, g, b, alpha * 0.64f));
+            _radialStopsBuf[2] = new(0.42f, new Color4(r, g, b, alpha * 0.28f));
+            _radialStopsBuf[3] = new(0.65f, new Color4(r, g, b, alpha * 0.08f));
+            _radialStopsBuf[4] = new(0.84f, new Color4(r, g, b, alpha * 0.015f));
+            _radialStopsBuf[5] = new(1.00f, new Color4(r, g, b, 0f));
+            s.Stops = DC.CreateGradientStopCollection(_radialStopsBuf, Gamma.StandardRgb, ExtendMode.Clamp);
+            s.Brush = DC.CreateRadialGradientBrush(new RadialGradientBrushProperties(new Vector2(cx, cy), Vector2.Zero, rx, ry), s.Stops);
+            s.R = r; s.G = g; s.B = b; s.A = alpha;
+        }
+        else
+        {
+            s.Brush.Center = new Vector2(cx, cy);
+            s.Brush.RadiusX = rx;
+            s.Brush.RadiusY = ry;
+        }
+        DC.FillEllipse(new Ellipse(new Vector2(cx, cy), rx, ry), s.Brush);
     }
 
     public static void Image(ID2D1Bitmap bmp, R dest, float opacity = 1)
-        => DC.DrawBitmap(bmp, Raw(dest), opacity, BitmapInterpolationMode.Linear, null);
+        => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
 
     public static void ImageRegion(ID2D1Bitmap bmp, R dest, R src, float opacity = 1)
-        => DC.DrawBitmap(bmp, Raw(dest), opacity, BitmapInterpolationMode.Linear, Raw(src));
+        => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, (Vortice.RawRectF?)Raw(src), null);
 
     /// <summary>GPU bitmap straight from memory: raw premultiplied BGRA, or BC1 blocks (an eighth of the video memory).</summary>
     public static ID2D1Bitmap1 CreateBitmap(byte* data, int w, int h, bool bc1)
@@ -272,7 +342,7 @@ public static unsafe class Gfx
         if (radius <= 0) return;
         float s = radius * 0.5f + 0.75f;
         var rr = new RoundedRectangle { Rect = Raw(r.Inset(-s / 2)), RadiusX = radius + s / 2, RadiusY = radius + s / 2 };
-        DC.DrawRoundedRectangle(rr, Brush(behind), s);
+        DC.DrawRoundedRectangle(rr, Scratch(behind), s);
     }
 
     // ---------------- clipping (drawing and hit-testing share it) ----------------
@@ -364,6 +434,8 @@ public static unsafe class Gfx
         });
     }
 
+    public static void ResetShapeBudget() => _shapeMs = 0;
+
     /// <param name="lines">1 = one line with ellipsis; n = wrap to n lines with ellipsis; 0 = wrap without limit.</param>
     public static TextRun Text(string text, float size, int weight = 400, float maxW = 0, int lines = 1, bool icon = false)
     {
@@ -391,7 +463,7 @@ public static unsafe class Gfx
     {
         if (run.Layout == null) return;
         var t0 = App.Bench ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-        DC.DrawTextLayout(new Vector2(x, y), run.Layout, Brush(color), run.Color ? DrawTextOptions.EnableColorFont : DrawTextOptions.None);
+        DC.DrawTextLayout(new Vector2(x, y), run.Layout, Scratch(color), run.Color ? DrawTextOptions.EnableColorFont : DrawTextOptions.None);
         if (App.Bench) { TextDrawMs += System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds; TextDraws++; }
     }
 

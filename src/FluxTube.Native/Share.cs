@@ -16,8 +16,10 @@ public static class SharePanel
     private static int _at;
     private static bool _withTime;
     private static long _openedAt;
+    private static bool _syncNeeded;
 
     public static bool Open { get; private set; }
+    public static R Rect { get; private set; }
 
     public static void Show(string videoId, double atSeconds)
     {
@@ -25,6 +27,7 @@ public static class SharePanel
         _at = (int)Math.Max(0, atSeconds);
         _withTime = false;
         _openedAt = UI.Now;
+        _syncNeeded = true;
         Open = true;
         App.Invalidate();
     }
@@ -33,6 +36,7 @@ public static class SharePanel
     {
         if (!Open) return;
         Open = false;
+        Rect = default;
         _box?.Hide();
         App.Invalidate();
     }
@@ -41,7 +45,12 @@ public static class SharePanel
 
     private static void Sync()
     {
-        if (_box != null && _box.Text != Url) { _box.Text = Url; if (!_box.Focused) _box.ShowStart(); }
+        if (_box != null && _syncNeeded)
+        {
+            _syncNeeded = false;
+            _box.Text = Url;
+            if (!_box.Focused) _box.ShowStart();
+        }
     }
 
     /// <summary>Draws the panel at r (W x H). Call after the page content, outside any scroll clip.</summary>
@@ -59,6 +68,7 @@ public static class SharePanel
         if (t < 1) UI.Animate();
         var ease = 1 - (1 - t) * (1 - t);
         r = new R(r.X, r.Y + (1 - ease) * 10, r.W, r.H);
+        Rect = r;
 
         Gfx.Fill(new R(r.X + 2, r.Y + 4, r.W - 4, r.H), Gfx.Fade(0xFF000000, 0.35f * ease), 16);
         Gfx.Fill(r, Gfx.Fade(Th.Menu, ease), 16);

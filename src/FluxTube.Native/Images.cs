@@ -26,16 +26,19 @@ public static unsafe class ThumbPack
 
     private static readonly Dictionary<ulong, Entry> _index = new();
     private static readonly object _lock = new();
+    private static readonly object _saveLock = new();
     private static MemoryMappedFile? _mmf;
     private static MemoryMappedViewAccessor? _view;
     private static byte* _base;
     private static long _end;
+    private static volatile int _packGen;
     private static bool _dirty, _ok;
     private static Timer? _timer;
     private static string PackFile => Path.Combine(Paths.Data, "thumbs.pack");
     private static string IndexFile => Path.Combine(Paths.Data, "thumbs.idx");
 
     public static long Bytes => _end;
+    public static int PackGeneration => _packGen;
     public static int Count { get { lock (_lock) return _index.Count; } }
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -43,15 +46,17 @@ public static unsafe class ThumbPack
 
     public static void Open()
     {
+        FileStream? fs = null;
         try
         {
-            var fs = new FileStream(PackFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
+            fs = new FileStream(PackFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite);
             if (fs.Length != Capacity)
             {
                 DeviceIoControl(fs.SafeFileHandle, 0x900C4 /*FSCTL_SET_SPARSE*/, 0, 0, 0, 0, out _, 0);
                 fs.SetLength(Capacity);
             }
             _mmf = MemoryMappedFile.CreateFromFile(fs, null, Capacity, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, leaveOpen: false);
+            fs = null; // owned by _mmf now
             _view = _mmf.CreateViewAccessor(0, Capacity, MemoryMappedFileAccess.ReadWrite);
             byte* p = null;
             _view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
@@ -60,7 +65,14 @@ public static unsafe class ThumbPack
             _ok = true;
             _timer = new Timer(_ => SaveIndex(), null, 20_000, 20_000);
         }
-        catch (Exception e) { Paths.Log("thumb pack: " + e.Message); }
+        catch (Exception e) { fs?.Dispose(); Paths.Log("thumb pack: " + e.Message); }
+    }
+
+    public static void Close()
+    {
+        _timer?.Dispose();
+        _timer = null;
+        SaveIndex();
     }
 
     private static void LoadIndex()
@@ -70,13 +82,15 @@ public static unsafe class ThumbPack
             if (!File.Exists(IndexFile)) return;
             using var r = new BinaryReader(File.OpenRead(IndexFile));
             if (r.ReadUInt32() != Magic) return;
-            _end = r.ReadInt64();
+            var end = r.ReadInt64();
             int n = r.ReadInt32();
+            if (end < 0 || end > Capacity || n < 0 || n > 500_000) { _end = 0; return; }
+            _end = end;
             for (int i = 0; i < n; i++)
             {
                 var key = r.ReadUInt64();
                 var e = new Entry(r.ReadInt64(), r.ReadInt32(), r.ReadInt32(), r.ReadByte(), r.ReadInt32());
-                if (e.Offset >= 0 && e.Offset + e.Bytes <= _end && _end <= Capacity) _index[key] = e;
+                if (e.W > 0 && e.H > 0 && e.Bytes > 0 && e.Offset >= 0 && e.Offset + e.Bytes <= _end) _index[key] = e;
             }
         }
         catch (Exception e)
@@ -90,62 +104,79 @@ public static unsafe class ThumbPack
     public static void SaveIndex()
     {
         if (!_dirty || !_ok) return;
-        try
+        lock (_saveLock)
         {
-            KeyValuePair<ulong, Entry>[] snap;
-            long end;
-            lock (_lock) { snap = [.. _index]; end = _end; _dirty = false; }
-            var tmp = IndexFile + ".tmp";
-            using (var w = new BinaryWriter(File.Create(tmp)))
+            if (!_dirty || !_ok) return;
+            try
             {
-                w.Write(Magic); w.Write(end); w.Write(snap.Length);
-                foreach (var (k, e) in snap) { w.Write(k); w.Write(e.Offset); w.Write(e.W); w.Write(e.H); w.Write(e.Format); w.Write(e.Bytes); }
+                KeyValuePair<ulong, Entry>[] snap;
+                long end;
+                lock (_lock) { snap = [.. _index]; end = _end; _dirty = false; }
+                var tmp = IndexFile + ".tmp";
+                using (var w = new BinaryWriter(File.Create(tmp)))
+                {
+                    w.Write(Magic); w.Write(end); w.Write(snap.Length);
+                    foreach (var (k, e) in snap) { w.Write(k); w.Write(e.Offset); w.Write(e.W); w.Write(e.H); w.Write(e.Format); w.Write(e.Bytes); }
+                }
+                File.Move(tmp, IndexFile, overwrite: true);
             }
-            File.Move(tmp, IndexFile, overwrite: true);
+            catch (Exception e) { Paths.Log("thumb index save: " + e.Message); }
         }
-        catch (Exception e) { Paths.Log("thumb index save: " + e.Message); }
     }
 
-    public static bool TryGet(ulong key, out Entry e, out byte* data)
+    public static bool TryGet(ulong key, out Entry e, out byte* data, out int gen)
     {
-        data = null;
+        data = null; gen = _packGen;
         if (!_ok) { e = default; return false; }
         lock (_lock)
+        {
             if (!_index.TryGetValue(key, out e)) return false;
+            gen = _packGen;
+        }
         data = _base + e.Offset;
         return true;
     }
 
-    public static bool Add(ulong key, ReadOnlySpan<byte> bytes, int w, int h, byte format, out Entry e, out byte* data)
+    public static bool Add(ulong key, ReadOnlySpan<byte> bytes, int w, int h, byte format, out Entry e, out byte* data, out int gen)
     {
-        e = default; data = null;
-        if (!_ok) return false;
+        e = default; data = null; gen = 0;
+        if (!_ok || bytes.Length <= 0 || bytes.Length > Capacity) return false;
+        long off;
         lock (_lock)
         {
             if (_end + bytes.Length > Capacity)
             {
-                // full: start over. Entries come back from the network as they are needed again.
+                // full: start over. Bump pack generation so any stale Img pointers are discarded cleanly.
                 _index.Clear();
                 _end = 0;
+                _packGen++;
             }
-            e = new Entry(_end, w, h, format, bytes.Length);
+            off = _end;
+            gen = _packGen;
             _end += (bytes.Length + 15) & ~15;
+            e = new Entry(off, w, h, format, bytes.Length);
+        }
+        // Write pixels into our exclusively reserved slice BEFORE publishing into _index (no uninitialized-memory race!)
+        data = _base + off;
+        bytes.CopyTo(new Span<byte>(data, bytes.Length));
+        lock (_lock)
+        {
+            if (gen != _packGen) return false; // wrapped while copying
             _index[key] = e;
             _dirty = true;
         }
-        data = _base + e.Offset;
-        bytes.CopyTo(new Span<byte>(data, bytes.Length));
         return true;
     }
 
     /// <summary>Stable across runs (string.GetHashCode is not).</summary>
-    public static ulong Key(string url, int w, bool round)
+    public static ulong Key(string url, int w, int h, bool round)
     {
-        ulong h = 14695981039346656037UL;
-        foreach (var c in url) { h ^= c; h *= 1099511628211UL; }
-        h ^= (ulong)w; h *= 1099511628211UL;
-        h ^= round ? 0x9E37UL : 0; h *= 1099511628211UL;
-        return h;
+        ulong hash = 14695981039346656037UL;
+        foreach (var c in url) { hash ^= c; hash *= 1099511628211UL; }
+        hash ^= (ulong)w; hash *= 1099511628211UL;
+        hash ^= (ulong)h; hash *= 1099511628211UL;
+        hash ^= round ? 0x9E37UL : 0; hash *= 1099511628211UL;
+        return hash;
     }
 }
 
@@ -153,16 +184,34 @@ public sealed unsafe class Img
 {
     public ID2D1Bitmap1? Bmp;
     public byte* Data;          // in the pack, waiting for upload
-    public int W, H, Bytes;
+    public int W, H, Bytes, GpuBytes, PackGen;
     public byte Format;
-    public int State;           // 0 queued, 1 in the pack, 2 on GPU, 3 failed, 4 dropped from the queue
+    public int State;           // 0 queued, 1 in the pack, 2 on GPU, 3 failed, 4 dropped from the queue, 5 warming
     public long WantedFrame;    // last frame something asked to draw it
-    public long ReadyTick;
+    public long ReadyTick, FailedAt;
     public int Generation;
     public bool Warm;           // came from the pack: no fade-in
     public required Images.IKey Key;
     public required string Url;
     public bool Round;
+}
+
+/// <summary>Shared thread-safe per-thread WIC factory so Images, Ambient, and Storyboard never allocate 3 separate COM factories per ThreadPool thread.</summary>
+internal static class Wic
+{
+    [ThreadStatic] private static IWICImagingFactory? t_wic;
+    public static IWICImagingFactory Factory
+    {
+        get
+        {
+            if (t_wic == null)
+            {
+                W.CoInitializeEx(0, 0);
+                t_wic = new IWICImagingFactory();
+            }
+            return t_wic;
+        }
+    }
 }
 
 /// <summary>
@@ -174,7 +223,7 @@ public static class Images
     private const long GpuBudget = 40L * 1024 * 1024; // BC1: room for some 600 thumbnails
     private const int MaxParallel = 6;
 
-    public readonly record struct IKey(string Url, int W, bool Round);
+    public readonly record struct IKey(string Url, int W, int H, bool Round);
     private static readonly Dictionary<IKey, Img> _map = new();
     private static readonly ConcurrentStack<Img> _queue = new();
     private static readonly ConcurrentQueue<Img> _ready = new();
@@ -184,7 +233,21 @@ public static class Images
     private static long _syncFrame;
     private static bool _bc1Works = true;
     private static readonly HttpClient _http = MakeClient();
-    [ThreadStatic] private static IWICImagingFactory? t_wic;
+
+    static Images()
+    {
+        Gfx.DeviceLost += OnDeviceLost;
+    }
+
+    public static unsafe void OnDeviceLost()
+    {
+        foreach (var img in _map.Values)
+        {
+            if (img.Bmp != null) { img.Bmp.Dispose(); img.Bmp = null; img.GpuBytes = 0; }
+            if (Volatile.Read(ref img.State) == 2) Volatile.Write(ref img.State, img.PackGen == ThumbPack.PackGeneration && img.Data != null ? 1 : 4);
+        }
+        _gpuBytes = 0;
+    }
 
     public static long GpuBytes => _gpuBytes;
     public static int Count => _map.Count;
@@ -203,46 +266,66 @@ public static class Images
     /// <summary>Bitmap for url at w x h DIPs, or null while it loads. Call every frame it is visible.</summary>
     public static unsafe Img? Get(string? url, float wDip, float hDip, bool round = false)
     {
-        if (string.IsNullOrEmpty(url)) return null;
+        if (string.IsNullOrEmpty(url) || wDip <= 0.5f || hDip <= 0.5f) return null;
         // quantised so a window resize does not re-convert on every pixel; multiples of 4 for the block format
         int w = Math.Max(16, ((int)MathF.Ceiling(wDip * Gfx.Scale) + 15) / 16 * 16);
         int h = Math.Max(4, ((int)MathF.Round(w * hDip / wDip) + 3) / 4 * 4);
-        var key = new IKey(url, w, round);
+        var key = new IKey(url, w, h, round);
         if (!_map.TryGetValue(key, out var img))
         {
             img = new Img { Key = key, Url = url, W = w, H = h, Round = round, Generation = Gfx.DeviceGeneration };
             _map[key] = img;
-            if (ThumbPack.TryGet(ThumbPack.Key(url, w, round), out var e, out var data) && e.W == w && e.H == h)
+            if (ThumbPack.TryGet(ThumbPack.Key(url, w, h, round), out var e, out var data, out var gen) && e.W == w && e.H == h)
             {
-                img.Data = data; img.Format = e.Format; img.Bytes = e.Bytes; img.State = 5; img.Warm = true;
+                img.Data = data; img.Format = e.Format; img.Bytes = e.Bytes; img.PackGen = gen; img.Warm = true;
+                Volatile.Write(ref img.State, 5);
                 // the pack is a memory-mapped file: its pages may still be on disk, and reading them here would
                 // stall the frame for as long as the disk takes. A worker touches them; the upload follows next frame.
                 ThreadPool.UnsafeQueueUserWorkItem(static i => Warm(i), img, preferLocal: false);
             }
             else Enqueue(img);
         }
-        else if (img.State == 2 && img.Generation != Gfx.DeviceGeneration)
+        else
         {
-            img.Bmp = null; img.State = 1; // device was recreated: the pack still has the data
-            TryUploadNow(img);
+            int st = Volatile.Read(ref img.State);
+            if (st == 2 && img.Generation != Gfx.DeviceGeneration)
+            {
+                img.Bmp?.Dispose(); img.Bmp = null;
+                _gpuBytes = Math.Max(0, _gpuBytes - img.GpuBytes); img.GpuBytes = 0;
+                if (img.Data != null && img.PackGen == ThumbPack.PackGeneration)
+                {
+                    Volatile.Write(ref img.State, 1);
+                    TryUploadNow(img);
+                }
+                else
+                {
+                    Volatile.Write(ref img.State, 0);
+                    Enqueue(img);
+                }
+            }
+            else if (st == 1) TryUploadNow(img);
+            else if (st == 4 || (st == 3 && UI.Now - img.FailedAt > 30_000))
+            {
+                Volatile.Write(ref img.State, 0);
+                Enqueue(img);
+            }
         }
-        else if (img.State == 1) TryUploadNow(img);
-        else if (img.State == 4)
-        {
-            img.State = 0; // was dropped from the queue while off screen
-            Enqueue(img);
-        }
-        img.WantedFrame = Gfx.Frame;
-        return img.State == 2 ? img : null;
+        Volatile.Write(ref img.WantedFrame, Gfx.Frame);
+        return Volatile.Read(ref img.State) == 2 ? img : null;
     }
 
     private static unsafe void Warm(Img img)
     {
+        if (img.PackGen != ThumbPack.PackGeneration || img.Data == null)
+        {
+            Volatile.Write(ref img.State, 4);
+            return;
+        }
         byte sum = 0;
         for (int i = 0; i < img.Bytes; i += 4096) sum ^= img.Data[i];
         if (img.Bytes > 0) sum ^= img.Data[img.Bytes - 1];
         GC.KeepAlive(sum);
-        img.State = 1;
+        Volatile.Write(ref img.State, 1);
         _ready.Enqueue(img);
         App.WakeUi();
     }
@@ -258,25 +341,37 @@ public static class Images
 
     private static unsafe void Upload(Img img, bool fade)
     {
+        if (img.Data == null || img.PackGen != ThumbPack.PackGeneration)
+        {
+            Volatile.Write(ref img.State, 4);
+            return;
+        }
         try
         {
+            if (img.Bmp != null) { img.Bmp.Dispose(); img.Bmp = null; _gpuBytes = Math.Max(0, _gpuBytes - img.GpuBytes); img.GpuBytes = 0; }
             if (img.Format == ThumbPack.Bc1Blocks && !_bc1Works)
             {
                 // this GPU path refuses block-compressed bitmaps: expand in software (still no JPEG decode)
-                var px = System.Buffers.ArrayPool<byte>.Shared.Rent(img.W * img.H * 4);
-                Bc1.Decode(new ReadOnlySpan<byte>(img.Data, img.Bytes), img.W, img.H, px);
-                fixed (byte* p = px) img.Bmp = Gfx.CreateBitmap(p, img.W, img.H, bc1: false);
-                System.Buffers.ArrayPool<byte>.Shared.Return(px);
-                _gpuBytes += img.W * img.H * 4;
+                int size = img.W * img.H * 4;
+                var px = System.Buffers.ArrayPool<byte>.Shared.Rent(size);
+                try
+                {
+                    Bc1.Decode(new ReadOnlySpan<byte>(img.Data, img.Bytes), img.W, img.H, px);
+                    fixed (byte* p = px) img.Bmp = Gfx.CreateBitmap(p, img.W, img.H, bc1: false);
+                }
+                finally { System.Buffers.ArrayPool<byte>.Shared.Return(px); }
+                img.GpuBytes = size;
+                _gpuBytes += size;
             }
             else
             {
                 img.Bmp = Gfx.CreateBitmap(img.Data, img.W, img.H, img.Format == ThumbPack.Bc1Blocks);
+                img.GpuBytes = img.Bytes;
                 _gpuBytes += img.Bytes;
             }
             img.Generation = Gfx.DeviceGeneration;
             img.ReadyTick = fade ? Environment.TickCount64 : 0;
-            img.State = 2;
+            Volatile.Write(ref img.State, 2);
             Uploaded++;
         }
         catch (Exception e)
@@ -287,7 +382,11 @@ public static class Images
                 Paths.Log("block-compressed bitmaps not accepted, expanding in software: " + e.Message);
                 Upload(img, fade);
             }
-            else img.State = 3;
+            else
+            {
+                img.FailedAt = Environment.TickCount64;
+                Volatile.Write(ref img.State, 3);
+            }
         }
     }
 
@@ -315,20 +414,29 @@ public static class Images
             while (_queue.TryPop(out var img))
             {
                 // scrolled past long ago: skip, it is re-queued if it ever becomes visible again
-                if (Gfx.Frame - Volatile.Read(ref img.WantedFrame) > 40 && _queue.Count > 8) { img.State = 4; continue; }
+                if (Gfx.Frame - Volatile.Read(ref img.WantedFrame) > 40 && _queue.Count > 8) { Volatile.Write(ref img.State, 4); continue; }
                 try
                 {
-                    var data = img.Url.StartsWith("file:", StringComparison.Ordinal)
-                        ? await File.ReadAllBytesAsync(new Uri(img.Url).LocalPath)
-                        : await _http.GetByteArrayAsync(img.Url);
+                    byte[] data;
+                    if (img.Url.StartsWith("file:", StringComparison.Ordinal))
+                        data = await File.ReadAllBytesAsync(new Uri(img.Url).LocalPath);
+                    else
+                    {
+                        try { data = await _http.GetByteArrayAsync(img.Url); }
+                        catch when (img.Url.EndsWith("/hq720.jpg", StringComparison.Ordinal))
+                        {
+                            data = await _http.GetByteArrayAsync(img.Url.Replace("/hq720.jpg", "/hqdefault.jpg"));
+                        }
+                    }
                     Convert(data, img);
-                    img.State = 1;
+                    Volatile.Write(ref img.State, 1);
                     _ready.Enqueue(img);
                     App.WakeUi();
                 }
                 catch (Exception e)
                 {
-                    img.State = 3;
+                    img.FailedAt = Environment.TickCount64;
+                    Volatile.Write(ref img.State, 3);
                     Paths.Log($"image {img.Url}: {e.Message}");
                 }
             }
@@ -336,16 +444,18 @@ public static class Images
         finally
         {
             Interlocked.Decrement(ref _running);
-            if (!_queue.IsEmpty && Interlocked.Increment(ref _running) <= MaxParallel) _ = Task.Run(Worker);
-            else if (!_queue.IsEmpty) Interlocked.Decrement(ref _running);
+            if (!_queue.IsEmpty)
+            {
+                if (Interlocked.Increment(ref _running) <= MaxParallel) _ = Task.Run(Worker);
+                else Interlocked.Decrement(ref _running);
+            }
         }
     }
 
     /// <summary>JPEG to display-size pixels to GPU blocks, written into the pack. Runs on a worker.</summary>
     private static unsafe void Convert(byte[] data, Img img)
     {
-        if (t_wic == null) W.CoInitializeEx(0, 0);
-        var wic = t_wic ??= new IWICImagingFactory();
+        var wic = Wic.Factory;
         using var stream = wic.CreateStream(data);
         using var decoder = wic.CreateDecoderFromStream(stream, DecodeOptions.CacheOnLoad);
         using var frame = decoder.GetFrame(0);
@@ -365,25 +475,30 @@ public static class Images
         try
         {
             fixed (byte* p = px) conv.CopyPixels(new RectI(0, 0, img.W, img.H), (uint)(img.W * 4), (uint)n, (nint)p);
-            var key = ThumbPack.Key(img.Url, img.W, img.Round);
+            var key = ThumbPack.Key(img.Url, img.W, img.H, img.Round);
             ThumbPack.Entry e;
             byte* at;
+            int pgen;
             bool stored;
             if (img.Round)
             {
                 // avatars are tiny and need a soft edge: raw pixels with the circle baked into alpha
                 Mask(px, img.W, img.H, Math.Min(img.W, img.H) / 2f);
-                stored = ThumbPack.Add(key, px.AsSpan(0, n), img.W, img.H, ThumbPack.Bgra, out e, out at);
+                stored = ThumbPack.Add(key, px.AsSpan(0, n), img.W, img.H, ThumbPack.Bgra, out e, out at, out pgen);
             }
             else
             {
-                var blocks = System.Buffers.ArrayPool<byte>.Shared.Rent(Bc1.Size(img.W, img.H));
-                Bc1.Encode(px.AsSpan(0, n), img.W, img.H, blocks);
-                stored = ThumbPack.Add(key, blocks.AsSpan(0, Bc1.Size(img.W, img.H)), img.W, img.H, ThumbPack.Bc1Blocks, out e, out at);
-                System.Buffers.ArrayPool<byte>.Shared.Return(blocks);
+                int bsz = Bc1.Size(img.W, img.H);
+                var blocks = System.Buffers.ArrayPool<byte>.Shared.Rent(bsz);
+                try
+                {
+                    Bc1.Encode(px.AsSpan(0, n), img.W, img.H, blocks);
+                    stored = ThumbPack.Add(key, blocks.AsSpan(0, bsz), img.W, img.H, ThumbPack.Bc1Blocks, out e, out at, out pgen);
+                }
+                finally { System.Buffers.ArrayPool<byte>.Shared.Return(blocks); }
             }
             if (!stored) throw new IOException("thumbnail pack unavailable");
-            img.Data = at; img.Format = e.Format; img.Bytes = e.Bytes;
+            img.Data = at; img.Format = e.Format; img.Bytes = e.Bytes; img.PackGen = pgen;
         }
         finally { System.Buffers.ArrayPool<byte>.Shared.Return(px); }
     }
@@ -418,24 +533,31 @@ public static class Images
         int n = 0;
         while (n < 24 && _ready.TryDequeue(out var img))
         {
-            if (img.State != 1) continue;
+            if (Volatile.Read(ref img.State) != 1) continue;
             Upload(img, fade: !img.Warm);
             n++;
             if (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds > 1.5) break;
         }
         if (!_ready.IsEmpty) UI.Animate();
-        if (_gpuBytes > GpuBudget) Evict();
+        if (_gpuBytes > GpuBudget || _map.Count > 1500) Evict();
     }
 
     private static void Evict()
     {
-        var victims = _map.Values.Where(i => i.State == 2 && Gfx.Frame - i.WantedFrame > 2).OrderBy(i => i.WantedFrame).ToList();
+        var victims = _map.Values.Where(i => Volatile.Read(ref i.State) == 2 && Gfx.Frame - Volatile.Read(ref i.WantedFrame) > 2).OrderBy(i => Volatile.Read(ref i.WantedFrame)).ToList();
         foreach (var v in victims)
         {
             if (_gpuBytes < GpuBudget * 3 / 4) break;
             v.Bmp?.Dispose();
-            _gpuBytes -= v.Format == ThumbPack.Bc1Blocks && _bc1Works ? v.Bytes : v.W * v.H * 4;
+            v.Bmp = null;
+            _gpuBytes = Math.Max(0, _gpuBytes - v.GpuBytes);
+            v.GpuBytes = 0;
             _map.Remove(v.Key); // the pack still has it: coming back costs one upload
+        }
+        if (_map.Count > 1200)
+        {
+            var stale = _map.Values.Where(i => Volatile.Read(ref i.State) is 1 or 3 or 4 && Gfx.Frame - Volatile.Read(ref i.WantedFrame) > 300).Select(i => i.Key).ToList();
+            foreach (var k in stale) _map.Remove(k);
         }
     }
 

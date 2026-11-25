@@ -218,12 +218,20 @@ local function render()
         if S.dur > 0 and S.cache > S.time then
             rect(L.px0 + pw * pct, L.py - th / 2, L.px0 + pw * clamp(S.cache / S.dur, 0, 1), L.py + th / 2, "FFFFFF", 0.38)
         end
-        if S.dur > 0 then
-            for _, seg in ipairs(S.segments) do -- sponsor segments
-                rect(L.px0 + pw * clamp(seg[1] / S.dur, 0, 1), L.py - th / 2, L.px0 + pw * clamp(seg[2] / S.dur, 0, 1), L.py + th / 2, "50C800", 0.95)
+        rect(L.px0, L.py - th / 2, L.px0 + pw * pct, L.py + th / 2, opts.brand, 1, th / 2)
+        -- SponsorBlock segments: thick, bold emerald bars with crisp dark outline so skipped sections pop out clearly
+        if S.dur > 0 and S.segments and #S.segments > 0 then
+            local sbh = (hot and 9.5 or 7.0) * sc
+            local ob = 1.6 * sc
+            for _, seg in ipairs(S.segments) do
+                local sx0 = L.px0 + pw * clamp(seg[1] / S.dur, 0, 1)
+                local sx1 = L.px0 + pw * clamp(seg[2] / S.dur, 0, 1)
+                if sx1 - sx0 < 4 * sc then sx1 = math.min(L.px1, sx0 + 4 * sc) end
+                rect(sx0 - ob, L.py - sbh / 2 - ob, sx1 + ob, L.py + sbh / 2 + ob, "08080C", 0.96, (sbh + ob * 2) / 2)
+                rect(sx0, L.py - sbh / 2, sx1, L.py + sbh / 2, "68EE00", 1.0, sbh / 2)
+                rect(sx0 + 1 * sc, L.py - sbh / 2 + 0.8 * sc, sx1 - 1 * sc, L.py - sbh / 2 + 2.2 * sc, "C8FFAA", 0.55, 1 * sc)
             end
         end
-        rect(L.px0, L.py - th / 2, L.px0 + pw * pct, L.py + th / 2, opts.brand, 1, th / 2)
         if S.dur > 0 and S.chapters then
             for i, ch in ipairs(S.chapters) do
                 if i > 1 and ch[1] < S.dur then
@@ -232,7 +240,7 @@ local function render()
                 end
             end
         end
-        if hot then circle(L.px0 + pw * pct, L.py, 6.5 * sc, opts.brand, 1) end
+        if hot then circle(L.px0 + pw * pct, L.py, 7.0 * sc, opts.brand, 1) end
         if hot and S.dur > 0 and S.mx >= 0 then
             local hp = clamp((S.mx - L.px0) / pw, 0, 1)
             local ht = hp * S.dur
@@ -245,8 +253,11 @@ local function render()
                 local iw, ih = S.thumb_w, S.thumb_h
                 local ix = math.floor(clamp(S.mx - iw / 2, 6 * sc, math.max(6 * sc, W - iw - 6 * sc)))
                 local iy = math.floor(L.py - 46 * sc - ih)
-                mp.commandv("overlay-add", 7, ix, iy, S.thumb_file, 0, "bgra", iw, ih, iw * 4)
-                S.thumb_on = true
+                if not S.thumb_on or S.ov_file ~= S.thumb_file or S.ov_x ~= ix or S.ov_y ~= iy then
+                    mp.commandv("overlay-add", 7, ix, iy, S.thumb_file, 0, "bgra", iw, ih, iw * 4)
+                    S.thumb_on = true
+                    S.ov_file, S.ov_x, S.ov_y = S.thumb_file, ix, iy
+                end
                 -- the overlay sits under the OSD, so the frame around it is drawn here, on top
                 local b = 2 * sc
                 rect(ix - b, iy - b, ix + iw + b, iy, "0A0A0A", 0.95)
@@ -390,9 +401,14 @@ local function tick()
         local step = dt / (target == 1 and 0.10 or 0.22)
         S.fade = target == 1 and math.min(1, S.fade + step) or math.max(0, S.fade - step)
     end
-    local animating = S.fade ~= target or S.bezel or S.hold_at ~= nil or S.hold_2x or S.ext_2x ~= nil or t < S.vol_until + 0.05 or ((S.buffering or S.seeking) and S.ready)
+    local vol_fading = t >= S.vol_until - 0.28 and t < S.vol_until + 0.05
+    local animating = S.fade ~= target or S.bezel or S.hold_at ~= nil or vol_fading or ((S.buffering or S.seeking) and S.ready)
     if active() then
         if S.dirty or animating then S.dirty = false; render() end
+        -- Pause 40Hz timer while purely static (paused / steady controls / static 2x pill) until an event wakes it
+        if not animating and not S.hold_at and t >= S.vol_until and (S.paused or S.force or (S.fade == target and S.fade == 1 and over_controls())) then
+            timer:kill()
+        end
     else
         thumb_hide()
         ov:remove()
@@ -541,7 +557,23 @@ mp.register_script_message("flux-thumb", function(file, w, h)
     wake()
 end)
 
-mp.register_event("end-file", function() S.ready = false; S.time = 0; S.dur = 0; S.cache = 0 end)
+local function cancel_hold_2x()
+    if S.hold_2x then
+        mp.set_property_number("speed", S.saved_speed or 1)
+        S.hold_2x = false
+    end
+    S.hold_at = nil
+    S.down = nil
+    S.drag = nil
+end
+
+mp.register_event("end-file", function()
+    cancel_hold_2x()
+    S.ext_2x = nil
+    S.ready = false; S.time = 0; S.dur = 0; S.cache = 0
+    S.thumb_file = nil; S.ov_file = nil; thumb_hide()
+    wake()
+end)
 
 -- the app tells us what it knows: {"next":true,"quality":"1080p","speed":"1×","title":"…","segments":[[12.5,48],…]}
 mp.register_script_message("flux-state", function(json)
@@ -563,7 +595,7 @@ mp.register_script_message("flux-state", function(json)
     if t.subs ~= nil then S.subs_on = t.subs end
     wake()
 end)
-mp.register_script_message("flux-leave", function() S.mx, S.my = -1, -1; S.drag = nil; wake() end)
+mp.register_script_message("flux-leave", function() S.mx, S.my = -1, -1; cancel_hold_2x(); wake() end)
 mp.register_script_message("flux-show", function(v) S.force = v == "yes"; wake() end) -- for screenshots and tests
 mp.register_script_message("flux-bezel", function(kind) S.bezel = { g = G[kind] or G.play, t = now() }; wake() end)
 mp.register_script_message("flux-2x", function(v) S.ext_2x = (v and v ~= "off") and v or nil; wake() end)

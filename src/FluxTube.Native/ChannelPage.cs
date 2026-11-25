@@ -26,6 +26,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
     public static string? TestChip;
     private ChannelInfo? _info;
     private bool _loading, _failed;
+    private int _loadGen;
     private int _tab; // index into _tabs; 0 = home
     private readonly List<(string Title, string Params)> _tabs = [("Главная", "")];
     private readonly Dictionary<string, Grid> _grids = new();
@@ -43,10 +44,11 @@ public sealed class ChannelPage(string channelId, string name) : IPage
 
     public void Shown() { if (_info == null && !_loading) Load(); }
     public void Hidden() { }
-    public void Refresh() { _grids.Clear(); Load(); }
+    public void Refresh() { _grids.Clear(); _shelfPage.Clear(); Load(); }
 
     private void Load()
     {
+        var gen = ++_loadGen;
         _loading = true; _failed = false;
         _ = Task.Run(async () =>
         {
@@ -56,6 +58,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                 foreach (var s in c.Shelves) Own(s.Items, c);
                 App.Post(() =>
                 {
+                    if (gen != _loadGen) return;
                     _info = c; _loading = false;
                     _subscribed = c.Subscribed;
                     _tabs.Clear();
@@ -75,7 +78,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
             catch (Exception e)
             {
                 Paths.Log($"channel {channelId}: {e.Message}");
-                App.Post(() => { _loading = false; _failed = true; App.Invalidate(); });
+                App.Post(() => { if (gen != _loadGen) return; _loading = false; _failed = true; App.Invalidate(); });
             }
         });
     }
@@ -92,7 +95,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
             items[i] = new VideoItem
             {
                 VideoId = v.VideoId, Title = v.Title, Channel = c.Title, ChannelId = c.Id, Duration = v.Duration, Meta = meta,
-                IsLive = v.IsLive, Progress = v.Progress,
+                AvatarUrl = v.AvatarUrl ?? c.Avatar, IsLive = v.IsLive, IsShort = v.IsShort, Progress = v.Progress,
             };
         }
     }
@@ -171,7 +174,7 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                     App.Invalidate();
                 });
             }
-            catch { App.Post(() => { g.LoadingMore = false; g.Cont = null; }); }
+            catch { App.Post(() => { if (gen != g.Gen) return; g.LoadingMore = false; g.Cont = null; App.Invalidate(); }); }
         });
     }
 
@@ -243,9 +246,8 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                 var moreR = new R(tx, ty, more.W, more.H);
                 Gfx.Draw(more, tx, ty, UI.Hover(moreR) ? Th.Text : Th.Sub);
                 if (UI.Click(UI.Id("ch:desc", _scroll), moreR)) _descOpen = !_descOpen;
-                ty += more.H - 2;
+                ty += more.H + 10;
                 Cards.CopyMenu(dRect, c.Description, "Копировать описание");
-                ty += dr.H + 12;
             }
             // subscribe: filled like youtube.com when not subscribed, quiet when already
             float bx = tx;
@@ -296,7 +298,8 @@ public sealed class ChannelPage(string channelId, string name) : IPage
         if (_tab == 0) y = DrawShelves(x0, y, w, r);
         else y = DrawGrid(x0, y, w, r);
 
-        _contentH = y + scroll - r.Y + 30;
+        var needH = y + scroll - r.Y + 30;
+        if (MathF.Abs(needH - _contentH) > 1f) { _contentH = needH; UI.Animate(); }
         UI.EndScroll();
     }
 
@@ -339,7 +342,8 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                 if (UI.Pill(UI.Id("ch:all", s), hx, y - 4, 32, null, "Все", out _, Th.A(0.08f))) SelectTab(ti);
             }
             var pages = Math.Max(1, (sh.Items.Count + cols - 1) / cols);
-            var page = (int)_shelfPage.GetValueOrDefault(s);
+            var page = Math.Clamp((int)_shelfPage.GetValueOrDefault(s), 0, pages - 1);
+            _shelfPage[s] = page;
             if (pages > 1)
             {
                 if (UI.IconButton(UI.Id("ch:prev", s), new R(x0 + w - 80, y - 6, 36, 36), "", 13, null, page > 0)) _shelfPage[s] = page - 1;
@@ -406,7 +410,12 @@ public sealed class ChannelPage(string channelId, string name) : IPage
         if (g.Failed || g.Items.Count == 0)
         {
             Gfx.Draw(g.Failed ? "Не удалось загрузить." : "Здесь пока пусто.", x0, y, 14, Th.Sub);
-            return y + 40;
+            if (g.Failed && UI.Pill(UI.Id("ch:tabretry", _tab), x0, y + 28, 34, Th.Refresh, "Повторить", out _))
+            {
+                var prm = _tabs[_tab].Params;
+                App.Post(() => LoadGrid(prm));
+            }
+            return y + (g.Failed ? 70 : 40);
         }
         if (g.Items.Count > 0 && g.Items[0].IsShort) return DrawShortsGrid(g, x0, y, w, r);
         var (cols, cardW, thumbH) = Layout(w);

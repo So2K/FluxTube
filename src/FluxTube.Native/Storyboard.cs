@@ -26,17 +26,32 @@ public static class Storyboard
 
     private static readonly ConcurrentDictionary<string, Book?> _books = new();
     private static readonly HttpClient _http = MakeClient();
-    [ThreadStatic] private static IWICImagingFactory? t_wic;
+    private static readonly byte[] FailedSheet = []; // negative cache sentinel to avoid HTTP retry storms
 
     private static string _lastKey = "";
     private static string _lastFile = "";
     private static int _lastW, _lastH, _slot;
     private static long _lastUse;
     private static double _lastSeconds;
+    private static volatile bool _hasSheets;
 
     // Single reusable GPU sheet bitmap for YouTube-style hover preview on Home/Feed cards
     private static Vortice.Direct2D1.ID2D1Bitmap1? _cardBmp;
     private static string _cardKey = "";
+    private static int _cardBmpGen;
+    private static long _cardNextFrameAt;
+
+    static Storyboard()
+    {
+        Gfx.DeviceLost += DropCardBitmap;
+    }
+
+    private static void DropCardBitmap()
+    {
+        _cardBmp?.Dispose();
+        _cardBmp = null;
+        _cardKey = "";
+    }
 
     /// <summary>
     /// Draws an animated storyboard preview inside a hovered video card thumbnail (like YouTube Home hover preview).
@@ -47,7 +62,7 @@ public static class Storyboard
         if (string.IsNullOrEmpty(videoId) || hoverSec < 0.35) return false;
         _lastUse = Environment.TickCount64;
         var book = BookFor(videoId);
-        if (book == null || book.Total <= 0) return false;
+        if (book == null || book.Total <= 0 || book.TileW < 120) return false;
 
         int per = Math.Max(1, book.Cols * book.Rows);
         int maxFrames = Math.Min(book.Total, per * 2); // cycle through up to 2 sheets for rich variety
@@ -58,25 +73,26 @@ public static class Storyboard
         if (!book.Sheets.TryGetValue(sheet, out var px))
         {
             book.Sheets[sheet] = null;
-            _ = Task.Run(() => LoadSheet(videoId, book, sheet));
+            _ = Task.Run(() => LoadSheet(videoId, book, sheet, notifySeekBar: false));
             // Fall back to sheet 0 if already loaded so playback never stalls
-            if (sheet > 0 && book.Sheets.TryGetValue(0, out var px0) && px0 != null)
+            if (sheet > 0 && book.Sheets.TryGetValue(0, out var px0) && px0 is { Length: > 0 })
             {
                 sheet = 0; cell = idx % per; px = px0;
             }
             else return false;
         }
-        if (px == null || !book.Size.TryGetValue(sheet, out var size)) return false;
+        if (px == null || px.Length == 0 || !book.Size.TryGetValue(sheet, out var size)) return false;
         var (sw, sh) = size;
         int sx = cell % book.Cols * book.TileW, sy = cell / book.Cols * book.TileH;
         if (sx + book.TileW > sw || sy + book.TileH > sh) return false;
 
         var key = videoId + "#" + sheet;
-        if (_cardKey != key || _cardBmp == null)
+        if (_cardKey != key || _cardBmp == null || _cardBmpGen != Gfx.DeviceGeneration)
         {
             _cardBmp?.Dispose();
             fixed (byte* p = px) _cardBmp = Gfx.CreateBitmap(p, sw, sh, bc1: false);
             _cardKey = key;
+            _cardBmpGen = Gfx.DeviceGeneration;
         }
 
         float fade = Math.Clamp((float)((hoverSec - 0.35) / 0.22), 0f, 1f);
@@ -92,7 +108,13 @@ public static class Storyboard
         Gfx.Fill(badgeR, Gfx.Fade(0xFF0A0A0E, 0.86f * fade), 4);
         Gfx.Draw(tr, badgeR.X + 4.5f, badgeR.Y + 1, Gfx.Fade(0xFFFFFFFF, fade));
 
-        UI.Animate();
+        // 60 FPS only during the 220ms fade-in; after that, wake at the 2.4 FPS frame cadence instead of spinning!
+        if (fade < 1f) UI.Animate();
+        else if (UI.Now >= _cardNextFrameAt)
+        {
+            _cardNextFrameAt = UI.Now + 210;
+            App.After(210, App.Invalidate);
+        }
         return true;
     }
 
@@ -121,10 +143,10 @@ public static class Storyboard
         if (!book.Sheets.TryGetValue(sheet, out var px))
         {
             book.Sheets[sheet] = null;
-            _ = Task.Run(() => LoadSheet(videoId, book, sheet));
+            _ = Task.Run(() => LoadSheet(videoId, book, sheet, notifySeekBar: false));
             return false;
         }
-        if (px == null || !book.Size.TryGetValue(sheet, out var size)) return false;
+        if (px == null || px.Length == 0 || !book.Size.TryGetValue(sheet, out var size)) return false;
         var (sw, sh) = size;
         int sx = cell % book.Cols * book.TileW, sy = cell / book.Cols * book.TileH;
         if (sx + book.TileW > sw || sy + book.TileH > sh) return false;
@@ -173,16 +195,16 @@ public static class Storyboard
         if (!book.Sheets.TryGetValue(sheet, out var px))
         {
             book.Sheets[sheet] = null;
-            _ = Task.Run(() => LoadSheet(videoId, book, sheet));
+            _ = Task.Run(() => LoadSheet(videoId, book, sheet, notifySeekBar: true));
             return;
         }
-        if (px == null) return; // on its way; the pointer will ask again
+        if (px == null || px.Length == 0) return; // on its way or permanently unavailable
         if (!book.Size.TryGetValue(sheet, out var size)) return;
         var (sw, sh) = size;
         int sx = cell % book.Cols * book.TileW, sy = cell / book.Cols * book.TileH;
         if (sx + book.TileW > sw || sy + book.TileH > sh) return; // last sheet, missing cell
 
-        int tw = (int)Math.Round(180 * Gfx.Scale / 2) * 2;
+        int tw = (int)Math.Round(240 * Gfx.Scale / 2) * 2;
         int th = (int)Math.Round((double)tw * book.TileH / book.TileW / 2) * 2;
         var dst = new byte[tw * th * 4];
         Resample(px, sw, sx, sy, book.TileW, book.TileH, dst, tw, th);
@@ -229,13 +251,15 @@ public static class Storyboard
     public static void Forget()
     {
         _books.Clear();
+        _hasSheets = false;
+        DropCardBitmap();
         _lastKey = ""; _lastFile = "";
     }
 
-    /// <summary>Drops the unpacked sheets once the pointer has been away from the bar for a while.</summary>
+    /// <summary>Drops the unpacked sheets and card preview GPU bitmap once idle for 20s.</summary>
     public static void Idle()
     {
-        if (_lastFile.Length == 0 || Environment.TickCount64 - _lastUse < 20_000) return;
+        if ((!_hasSheets && _lastFile.Length == 0 && _cardBmp == null) || Environment.TickCount64 - _lastUse < 20_000) return;
         foreach (var b in _books.Values)
         {
             if (b == null) continue;
@@ -246,27 +270,43 @@ public static class Storyboard
                 b.Order.Clear();
             }
         }
+        _hasSheets = false;
+        DropCardBitmap();
         _lastKey = ""; _lastFile = "";
     }
 
-    /// <summary>spec: "baseUrl|W#H#frames#cols#rows#intervalMs#name#sigh|…" (one part per level, biggest last).</summary>
+    /// <summary>spec: "baseUrl|W#H#frames#cols#rows#intervalMs#name#sigh|…" — picks the highest-resolution valid level.</summary>
     private static Book? Parse(string spec)
     {
         try
         {
             var parts = spec.Split('|');
             if (parts.Length < 2) return null;
-            int lvl = parts.Length - 2;
-            var f = parts[1 + lvl].Split('#');
-            if (f.Length < 8) return null;
-            var url = parts[0].Replace("$L", lvl.ToString()).Replace("$N", f[6]) + "&sigh=" + f[7];
-            return new Book
+            Book? best = null;
+            int bestArea = 0;
+            for (int lvl = 0; lvl < parts.Length - 1; lvl++)
             {
-                Url = url,
-                TileW = int.Parse(f[0]), TileH = int.Parse(f[1]), Total = int.Parse(f[2]),
-                Cols = int.Parse(f[3]), Rows = int.Parse(f[4]),
-                Interval = Math.Max(0.5, int.Parse(f[5]) / 1000.0),
-            };
+                var f = parts[1 + lvl].Split('#');
+                if (f.Length < 8) continue;
+                if (!int.TryParse(f[0], out int w) || !int.TryParse(f[1], out int h)
+                    || !int.TryParse(f[2], out int total) || !int.TryParse(f[3], out int cols)
+                    || !int.TryParse(f[4], out int rows) || !int.TryParse(f[5], out int intervalMs))
+                    continue;
+                if (w <= 0 || h <= 0 || total <= 0 || cols <= 0 || rows <= 0) continue;
+                int area = w * h;
+                if (area >= bestArea)
+                {
+                    bestArea = area;
+                    var url = parts[0].Replace("$L", lvl.ToString()).Replace("$N", f[6]) + "&sigh=" + f[7];
+                    best = new Book
+                    {
+                        Url = url,
+                        TileW = w, TileH = h, Total = total, Cols = cols, Rows = rows,
+                        Interval = intervalMs > 0 ? Math.Max(0.5, intervalMs / 1000.0) : 2.0,
+                    };
+                }
+            }
+            return best;
         }
         catch (Exception e)
         {
@@ -275,13 +315,12 @@ public static class Storyboard
         }
     }
 
-    private static async Task LoadSheet(string videoId, Book book, int sheet)
+    private static async Task LoadSheet(string videoId, Book book, int sheet, bool notifySeekBar)
     {
         try
         {
             var data = await _http.GetByteArrayAsync(book.Url.Replace("$M", sheet.ToString()));
-            if (t_wic == null) W.CoInitializeEx(0, 0);
-            var wic = t_wic ??= new IWICImagingFactory();
+            var wic = Wic.Factory;
             using var stream = wic.CreateStream(data);
             using var decoder = wic.CreateDecoderFromStream(stream, DecodeOptions.CacheOnLoad);
             using var frame = decoder.GetFrame(0);
@@ -289,12 +328,13 @@ public static class Storyboard
             using var conv = wic.CreateFormatConverter();
             conv.Initialize(frame, PixelFormat.Format32bppBGRA);
             var px = Copy(conv, size.Width, size.Height);
+            SharpenMild(px, size.Width, size.Height);
             lock (book.Order)
             {
                 book.Size[sheet] = (size.Width, size.Height); // before the pixels: a reader that sees the sheet finds its size
                 book.Sheets[sheet] = px;
                 book.Order.Add(sheet);
-                while (book.Order.Count > 4)
+                while (book.Order.Count > 3)
                 {
                     var old = book.Order[0];
                     book.Order.RemoveAt(0);
@@ -302,12 +342,13 @@ public static class Storyboard
                     book.Size.TryRemove(old, out _);
                 }
             }
-            App.Post(() => Request(videoId, _lastSeconds)); // the sheet the pointer was waiting for is here
+            _hasSheets = true;
+            if (notifySeekBar) App.Post(() => { if (MpvPlayer.Instance.CurrentVideoId == videoId) Request(videoId, _lastSeconds); });
             App.WakeUi();
         }
         catch (Exception e)
         {
-            book.Sheets.TryRemove(sheet, out _);
+            book.Sheets[sheet] = FailedSheet; // negative-cache so we never storm HTTP at 60 req/s
             Paths.Log($"storyboard sheet {sheet}: {e.Message}");
         }
     }
@@ -319,30 +360,85 @@ public static class Storyboard
         return px;
     }
 
-    /// <summary>Bilinear copy of one tile out of the sheet into an opaque BGRA image.</summary>
+    /// <summary>Gentle 3x3 unsharp mask applied once off-thread on decoded storyboard sheets so hover previews stay crisp.</summary>
+    private static void SharpenMild(byte[] px, int w, int h)
+    {
+        if (w < 3 || h < 3) return;
+        var src = (byte[])px.Clone();
+        int stride = w * 4;
+        for (int y = 1; y < h - 1; y++)
+        {
+            int row = y * stride;
+            for (int x = 1; x < w - 1; x++)
+            {
+                int o = row + x * 4;
+                for (int c = 0; c < 3; c++)
+                {
+                    int center = src[o + c];
+                    int avg = (src[o - 4 + c] + src[o + 4 + c] + src[o - stride + c] + src[o + stride + c]) >> 2;
+                    int v = center + ((center - avg) * 3 >> 3); // ~0.375 sharpen strength
+                    px[o + c] = (byte)Math.Clamp(v, 0, 255);
+                }
+            }
+        }
+    }
+
+    /// <summary>Catmull-Rom bicubic copy of one tile out of the sheet into a crisp opaque BGRA image.</summary>
     private static void Resample(byte[] src, int srcW, int sx, int sy, int tileW, int tileH, byte[] dst, int w, int h)
     {
+        static float Cubic(float t)
+        {
+            t = MathF.Abs(t);
+            if (t < 1f) return 1.5f * t * t * t - 2.5f * t * t + 1f;
+            if (t < 2f) return -0.5f * t * t * t + 2.5f * t * t - 4f * t + 2f;
+            return 0f;
+        }
+
         int stride = srcW * 4;
+        Span<int> ix = stackalloc int[4];
+        Span<float> wx = stackalloc float[4];
+        Span<int> iy = stackalloc int[4];
+        Span<float> wy = stackalloc float[4];
         for (int y = 0; y < h; y++)
         {
             float fy = (y + 0.5f) * tileH / h - 0.5f;
-            int y0 = Math.Clamp((int)MathF.Floor(fy), 0, tileH - 1), y1 = Math.Min(y0 + 1, tileH - 1);
-            float wy = Math.Clamp(fy - y0, 0, 1);
-            int row0 = (sy + y0) * stride, row1 = (sy + y1) * stride, drow = y * w * 4;
+            int yBase = (int)MathF.Floor(fy);
+            float ty = fy - yBase;
+            for (int k = 0; k < 4; k++)
+            {
+                iy[k] = (sy + Math.Clamp(yBase + k - 1, 0, tileH - 1)) * stride;
+                wy[k] = Cubic(ty - (k - 1));
+            }
+            int drow = y * w * 4;
             for (int x = 0; x < w; x++)
             {
                 float fx = (x + 0.5f) * tileW / w - 0.5f;
-                int x0 = Math.Clamp((int)MathF.Floor(fx), 0, tileW - 1), x1 = Math.Min(x0 + 1, tileW - 1);
-                float wx = Math.Clamp(fx - x0, 0, 1);
-                int a = row0 + (sx + x0) * 4, b = row0 + (sx + x1) * 4, c = row1 + (sx + x0) * 4, d = row1 + (sx + x1) * 4;
-                int o = drow + x * 4;
-                for (int ch = 0; ch < 3; ch++)
+                int xBase = (int)MathF.Floor(fx);
+                float tx = fx - xBase;
+                for (int k = 0; k < 4; k++)
                 {
-                    float top = src[a + ch] + (src[b + ch] - src[a + ch]) * wx;
-                    float bot = src[c + ch] + (src[d + ch] - src[c + ch]) * wx;
-                    dst[o + ch] = (byte)(top + (bot - top) * wy + 0.5f);
+                    ix[k] = (sx + Math.Clamp(xBase + k - 1, 0, tileW - 1)) * 4;
+                    wx[k] = Cubic(tx - (k - 1));
                 }
-                dst[o + 3] = 255;
+                float b = 0, g = 0, r = 0;
+                for (int j = 0; j < 4; j++)
+                {
+                    float wj = wy[j];
+                    int rowOff = iy[j];
+                    for (int i = 0; i < 4; i++)
+                    {
+                        float ww = wj * wx[i];
+                        int o = rowOff + ix[i];
+                        b += src[o] * ww;
+                        g += src[o + 1] * ww;
+                        r += src[o + 2] * ww;
+                    }
+                }
+                int dstOff = drow + x * 4;
+                dst[dstOff] = (byte)Math.Clamp((int)(b + 0.5f), 0, 255);
+                dst[dstOff + 1] = (byte)Math.Clamp((int)(g + 0.5f), 0, 255);
+                dst[dstOff + 2] = (byte)Math.Clamp((int)(r + 0.5f), 0, 255);
+                dst[dstOff + 3] = 255;
             }
         }
     }

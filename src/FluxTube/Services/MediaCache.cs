@@ -16,7 +16,9 @@ public sealed class CachedStream
     private readonly List<(long From, long To)> _ranges = []; // sorted, merged, To exclusive
     private SafeFileHandle? _h;
     private readonly object _lock = new();
-    internal bool Dirty;
+    private volatile bool _closed;
+    internal long LastUseTick = Environment.TickCount64;
+    internal volatile bool Dirty;
     internal int Users; // connections reading or writing right now
 
     public long Bytes { get { lock (_lock) return _ranges.Sum(r => r.To - r.From); } }
@@ -58,18 +60,19 @@ public sealed class CachedStream
         return long.MaxValue;
     }
 
-    private SafeFileHandle Handle()
+    private SafeFileHandle? Handle()
     {
-        if (_h is { IsInvalid: false, IsClosed: false }) return _h;
+        if (_closed) return null;
+        LastUseTick = Environment.TickCount64;
         lock (_lock)
         {
+            if (_closed) return null;
             if (_h is { IsInvalid: false, IsClosed: false }) return _h;
             Directory.CreateDirectory(MediaCache.Dir);
             var isNew = !File.Exists(Path);
             _h = File.OpenHandle(Path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete, FileOptions.RandomAccess);
             if (isNew)
             {
-                // sparse: the file has the stream's full length but only written ranges take disk space
                 DeviceIoControl(_h, 0x900C4 /*FSCTL_SET_SPARSE*/, 0, 0, 0, 0, out _, 0);
                 RandomAccess.SetLength(_h, Length);
                 _ranges.Clear();
@@ -78,14 +81,24 @@ public sealed class CachedStream
         }
     }
 
-    public int Read(long pos, Span<byte> buffer) => RandomAccess.Read(Handle(), buffer, pos);
+    public int Read(long pos, Span<byte> buffer)
+    {
+        var h = Handle();
+        if (h == null) return 0;
+        try { return RandomAccess.Read(h, buffer, pos); }
+        catch (ObjectDisposedException) { return 0; }
+    }
 
     public void Write(long pos, ReadOnlySpan<byte> data)
     {
-        if (data.Length == 0) return;
-        RandomAccess.Write(Handle(), data, pos);
+        if (data.Length == 0 || _closed) return;
+        var h = Handle();
+        if (h == null) return;
+        try { RandomAccess.Write(h, data, pos); }
+        catch (ObjectDisposedException) { return; }
         lock (_lock)
         {
+            if (_closed) return;
             long from = pos, to = pos + data.Length;
             int i = 0;
             while (i < _ranges.Count && _ranges[i].To < from) i++;
@@ -100,6 +113,18 @@ public sealed class CachedStream
         }
     }
 
+    /// <summary>Closes only the OS file handle after inactivity to avoid handle leaks (re-opens lazily on next read).</summary>
+    internal void CloseIdleHandle()
+    {
+        if (Volatile.Read(ref Users) > 0) return;
+        lock (_lock)
+        {
+            if (Volatile.Read(ref Users) > 0 || _h == null) return;
+            _h.Dispose();
+            _h = null;
+        }
+    }
+
     /// <summary>Forgets what is stored: the bytes are refetched. Used when the file turns out to be unusable.</summary>
     public void Invalidate()
     {
@@ -108,6 +133,7 @@ public sealed class CachedStream
 
     internal void Close()
     {
+        _closed = true;
         lock (_lock) { _h?.Dispose(); _h = null; }
     }
 
@@ -133,9 +159,14 @@ public static class MediaCache
     public static string Dir => Path.Combine(Paths.Data, "media");
     private static readonly ConcurrentDictionary<(string, int), CachedStream> _open = new();
     private static Timer? _timer;
+    private static int _flushing;
     private static long _lastEnforce;
     /// <summary>The video being played: never evicted.</summary>
     public static string? Pinned;
+    /// <summary>Optional hook so background tabs keep their cache entries pinned too.</summary>
+    public static Func<string, bool>? IsActive;
+
+    private static bool IsProtected(string id) => id == Pinned || (IsActive?.Invoke(id) ?? false);
 
     public static bool Enabled => AppSettings.Current.CacheLimitMb > 0;
     private static long Limit => AppSettings.Current.CacheLimitMb * 1024L * 1024L;
@@ -144,7 +175,11 @@ public static class MediaCache
     public static CachedStream? Open(string videoId, int itag, long length, string mime)
     {
         if (!Enabled || length <= 0 || itag <= 0) return null;
-        _timer ??= new Timer(_ => Flush(), null, 5000, 5000);
+        if (_timer == null)
+        {
+            var t = new Timer(_ => Flush(), null, 5000, 5000);
+            if (Interlocked.CompareExchange(ref _timer, t, null) != null) t.Dispose();
+        }
         return _open.GetOrAdd((videoId, itag), _ =>
         {
             var cs = new CachedStream { VideoId = videoId, Itag = itag, Length = length, Mime = mime };
@@ -197,17 +232,23 @@ public static class MediaCache
 
     private static void Flush()
     {
+        if (Interlocked.Exchange(ref _flushing, 1) != 0) return;
         try
         {
+            var now = Environment.TickCount64;
             foreach (var cs in _open.Values)
             {
-                if (!cs.Dirty) continue;
-                cs.Dirty = false;
-                Db.CacheSaveStream(cs.VideoId, cs.Itag, cs.Length, cs.Mime, cs.RangesText, cs.Bytes);
+                if (cs.Dirty)
+                {
+                    cs.Dirty = false;
+                    Db.CacheSaveStream(cs.VideoId, cs.Itag, cs.Length, cs.Mime, cs.RangesText, cs.Bytes);
+                }
+                if (now - cs.LastUseTick > 60_000) cs.CloseIdleHandle();
             }
-            if (Environment.TickCount64 - _lastEnforce > 30_000) Enforce();
+            if (now - _lastEnforce > 30_000) Enforce();
         }
         catch (Exception e) { Paths.Log("cache flush: " + e.Message); }
+        finally { Interlocked.Exchange(ref _flushing, 0); }
     }
 
     public static long TotalBytes() => Db.CacheTotalBytes();
@@ -226,7 +267,7 @@ public static class MediaCache
         {
             var age = now - v.Last;
             var expired = v.Plays == 0 ? age > 40 * 60 : age > Days(v.Plays) * 86400L; // prefetched beginnings nobody opened go within the hour
-            if (expired && v.Id != Pinned) Delete(v.Id);
+            if (expired && !IsProtected(v.Id)) Delete(v.Id);
             else { keep.Add(v); total += v.Bytes; }
         }
         if (total <= Limit) return;
@@ -234,7 +275,7 @@ public static class MediaCache
         foreach (var v in keep.OrderBy(v => v.Plays == 0 ? 0 : v.Plays >= 5 ? 3 : v.Plays >= 2 ? 2 : 1).ThenBy(v => v.Last))
         {
             if (total <= Limit * 9 / 10) break;
-            if (v.Id == Pinned) continue;
+            if (IsProtected(v.Id)) continue;
             if (Delete(v.Id)) total -= v.Bytes;
         }
     }
@@ -259,7 +300,8 @@ public static class MediaCache
         Resolver.Instance.Forget(videoId);
         try
         {
-            foreach (var f in Directory.EnumerateFiles(Dir, videoId + ".*.bin")) File.Delete(f);
+            if (Directory.Exists(Dir))
+                foreach (var f in Directory.EnumerateFiles(Dir, videoId + ".*.bin")) File.Delete(f);
         }
         catch (Exception e) { Paths.Log("cache delete: " + e.Message); return false; }
         Db.CacheDelete(videoId);
@@ -268,7 +310,7 @@ public static class MediaCache
 
     public static void Clear()
     {
-        foreach (var v in Db.CacheVideos()) if (v.Id != Pinned) Delete(v.Id);
+        foreach (var v in Db.CacheVideos()) if (!IsProtected(v.Id)) Delete(v.Id);
         try
         {
             // files without a row (crash leftovers)
@@ -276,7 +318,7 @@ public static class MediaCache
                 foreach (var f in Directory.EnumerateFiles(Dir, "*.bin"))
                 {
                     var id = Path.GetFileName(f).Split('.')[0];
-                    if (id != Pinned && Db.CacheVideo(id) == null) File.Delete(f);
+                    if (!IsProtected(id) && Db.CacheVideo(id) == null) File.Delete(f);
                 }
         }
         catch { }
@@ -284,6 +326,8 @@ public static class MediaCache
 
     public static void Shutdown()
     {
+        var t = Interlocked.Exchange(ref _timer, null);
+        t?.Dispose();
         Flush();
         foreach (var cs in _open.Values) cs.Close();
     }

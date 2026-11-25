@@ -5,21 +5,33 @@ using FluxTube.Services;
 namespace FluxTube.Pages;
 
 /// <summary>
-/// Shorts: structured vertical player with instant prefetching (next 3 + prev 1),
-/// unified playback & global volume deck (mouse wheel + drag, persisted across all Shorts),
-/// balanced engagement & quick-action tiles, inline comments drawer, Up-Next preview card,
-/// and full keyboard/context-menu support.
+/// Shorts: borderless vertical YouTube-style player with:
+/// - Always-visible YouTube circular action rail on the bottom-right (Like + count, Dislike + RYD count,
+///   Comments + count, Share, Panel/More, Channel square-rounded avatar)
+/// - Clean borderless vertical swipe animation (no ugly outline during slide)
+/// - Smooth volume adjustment with custom volume SFX + persistent global volume deck
+/// - Inline comments drawer with live comment posting (InnerTube comment/create_comment)
+/// - Instant prefetching (next 3 + prev 1) and zero idle CPU/GPU spin.
 /// </summary>
 public sealed class ShortsPage : IPage
 {
+    private sealed class ShortCommentRow
+    {
+        public required Comment C;
+        public float W, H;
+    }
+
     private readonly List<VideoItem> _items = [];
     private int _i;
     private string? _next;
-    private bool _loading, _failed;
+    private bool _loading, _failed, _pendingAdvance;
+    private int _feedGen;
     private readonly bool _feed;
     private long _lastStep;
     private readonly HashSet<string> _asked = [];
     private readonly Dictionary<string, string> _rating = new();
+    private readonly Dictionary<string, string> _dislikes = new();
+    private readonly Dictionary<string, string> _commCounts = new();
     private readonly int _id = UI.Id("shorts");
     private readonly int _commScroll = UI.Id("shorts:comm");
 
@@ -27,25 +39,24 @@ public sealed class ShortsPage : IPage
     private long _slideAt;
     private string? _prevVideoId;
     private bool _loop = true;
-    private bool _muted;
     private bool _dragVol, _dragSeek;
-    private long _volSaveAt;
+    private long _volSaveAt, _lastDragSeekAt, _lastDragVolAt;
+    private float _videoW = 360, _videoH = 640;
 
-    // Inline comments state for the active Short
+    // Inline comments + composer state for the active Short
     private bool _showComments;
     private string? _commentsFor;
-    private readonly List<Comment> _comments = [];
-    private string? _commentTok, _commentCount;
-    private bool _commentsLoading, _commentsOff;
+    private readonly List<ShortCommentRow> _comments = [];
+    private string? _commentTok, _commentCount, _createCommentParams;
+    private bool _commentsLoading, _commentsOff, _postingComment;
     private int _commentGen;
+    private Edit? _commentEdit;
 
     public string Tag => _feed ? "shorts" : "";
     public int MainScroll => _showComments ? _commScroll : _id;
 
-    /// <summary>YouTube's Shorts feed.</summary>
     public ShortsPage() { _feed = true; }
 
-    /// <summary>A fixed list, starting at one of its items.</summary>
     public ShortsPage(List<VideoItem> items, int index)
     {
         _items.AddRange(items);
@@ -65,18 +76,27 @@ public sealed class ShortsPage : IPage
         else PlayCurrent();
     }
 
-    /// <summary>Leaving the page ends the short: it would otherwise loop in the bar at the bottom forever.</summary>
     public void Hidden()
     {
         FlushVolume();
+        _commentEdit?.Hide();
+        if (PlaybackTracker.Instance.CurrentSource == "shorts") { PlaybackTracker.Instance.Stop(); Shell.VideoReady = false; }
+    }
+
+    public void Invalidate()
+    {
+        if (!_feed) return;
+        _feedGen++;
+        _items.Clear(); _i = 0; _next = null; _failed = false; _pendingAdvance = false;
+        _asked.Clear(); _rating.Clear(); _dislikes.Clear(); _commCounts.Clear();
+        ResetComments();
         if (PlaybackTracker.Instance.CurrentSource == "shorts") { PlaybackTracker.Instance.Stop(); Shell.VideoReady = false; }
     }
 
     public void Refresh()
     {
         if (!_feed) return;
-        _items.Clear(); _i = 0; _next = null; _failed = false;
-        ResetComments();
+        Invalidate();
         LoadMore();
     }
 
@@ -91,10 +111,12 @@ public sealed class ShortsPage : IPage
         {
             AppSettings.Current.ShortsPanelHidden = false;
             AppSettings.Current.Save();
+            Shell.PushPlayerState();
             _showComments = true;
         }
         else _showComments = !_showComments;
-        if (_showComments && Cur is { } v && _commentsFor != v.VideoId) StartComments(v.VideoId);
+        if (!_showComments) _commentEdit?.Hide();
+        else if (Cur is { } v && (_commentsFor != v.VideoId || _commentsOff)) StartComments(v.VideoId);
         App.Invalidate();
     }
 
@@ -102,6 +124,7 @@ public sealed class ShortsPage : IPage
     {
         AppSettings.Current.ShortsPanelHidden = !AppSettings.Current.ShortsPanelHidden;
         AppSettings.Current.Save();
+        if (AppSettings.Current.ShortsPanelHidden) _commentEdit?.Hide();
         Shell.PushPlayerState();
         App.Invalidate();
     }
@@ -114,24 +137,32 @@ public sealed class ShortsPage : IPage
         App.Invalidate();
     }
 
-    /// <summary>Global volume for all Shorts (persisted in AppSettings.Volume).</summary>
-    public void SetVolume(int vol)
+    public void OpenContextMenu()
+    {
+        if (Cur is { } v) ContextMenuFor(v);
+    }
+
+    public void OnShortEnded()
+    {
+        if (!_loop) Step(1);
+    }
+
+    /// <summary>Global smooth volume for all Shorts (persisted in AppSettings.Volume + plays custom volume SFX).</summary>
+    public void SetVolume(int vol, bool smooth = true)
     {
         vol = Math.Clamp(vol, 0, 100);
-        if (vol != AppSettings.Current.Volume) Sfx.Tick();
+        if (vol != AppSettings.Current.Volume) Shell.PlayVolumeSfx();
         AppSettings.Current.Volume = vol;
-        if (vol > 0 && _muted)
-        {
-            _muted = false;
-            MpvPlayer.Instance.Command("set", "mute", "no");
-        }
-        MpvPlayer.Instance.Command("set", "volume", vol.ToString());
-        MpvPlayer.Instance.ShowText($"Громкость: {vol}%", 900);
+        var p = MpvPlayer.Instance;
+        if (vol > 0 && p.Muted) p.Command("set", "mute", "no");
+        if (smooth) p.SetVolumeSmooth(vol);
+        else p.Command("set", "volume", vol.ToString());
+        p.ShowText($"Громкость: {vol}%", 900);
         _volSaveAt = Environment.TickCount64 + 400;
         App.Invalidate();
     }
 
-    public void AdjustVolume(int delta) => SetVolume(AppSettings.Current.Volume + delta);
+    public void AdjustVolume(int delta) => SetVolume(AppSettings.Current.Volume + delta, smooth: true);
 
     private void FlushVolume()
     {
@@ -145,8 +176,10 @@ public sealed class ShortsPage : IPage
         _comments.Clear();
         _commentTok = null;
         _commentCount = null;
+        _createCommentParams = null;
         _commentsLoading = false;
         _commentsOff = false;
+        _commentEdit?.Hide();
         UI.ScrollReset(_commScroll);
     }
 
@@ -170,9 +203,11 @@ public sealed class ShortsPage : IPage
                 App.Post(() =>
                 {
                     if (gen != _commentGen) return;
-                    _comments.AddRange(page.Items);
+                    foreach (var c in page.Items) _comments.Add(new ShortCommentRow { C = c });
                     _commentTok = page.Items.Count == 0 ? null : page.Continuation;
                     _commentCount = page.Count ?? info.CommentsCount;
+                    if (!string.IsNullOrEmpty(_commentCount)) _commCounts[videoId] = _commentCount;
+                    _createCommentParams = page.CreateCommentParams ?? info.CreateCommentParams;
                     _commentsLoading = false;
                     App.Invalidate();
                 });
@@ -182,6 +217,52 @@ public sealed class ShortsPage : IPage
                 Paths.Log("shorts comments: " + e.Message);
                 App.Post(() => { if (gen == _commentGen) { _commentsLoading = false; _commentsOff = true; App.Invalidate(); } });
             }
+        });
+    }
+
+    private void SubmitComment()
+    {
+        if (_postingComment || _commentEdit == null || Cur is not { } v) return;
+        var text = _commentEdit.Text.Trim();
+        if (text.Length == 0) return;
+        if (!CookieStore.IsLoggedIn) { Shell.Toast("Войдите в аккаунт YouTube, чтобы оставлять комментарии", Th.Warn); return; }
+        if (string.IsNullOrEmpty(_createCommentParams))
+        {
+            Shell.Toast("Токен комментариев ещё загружается — подождите секунду", Th.Warn);
+            if (!_commentsLoading) StartComments(v.VideoId);
+            return;
+        }
+        _postingComment = true;
+        var vid = v.VideoId;
+        var gen = _commentGen;
+        var cp = _createCommentParams;
+        _ = Task.Run(async () =>
+        {
+            var (ok, err) = await InnerTube.Instance.CreateCommentAsync(cp, text, vid);
+            App.Post(() =>
+            {
+                _postingComment = false;
+                if (!ok) { Shell.Toast("Не удалось отправить комментарий: " + (err ?? "ошибка YouTube"), Th.Warn, 5000); App.Invalidate(); return; }
+                if (_commentEdit != null) _commentEdit.Text = "";
+                Sfx.Like();
+                if (gen == _commentGen)
+                {
+                    var acc = AccountMenu.Current;
+                    _comments.Insert(0, new ShortCommentRow
+                    {
+                        C = new Comment
+                        {
+                            Author = acc?.Handle is { Length: > 0 } h ? h : (acc?.Name is { Length: > 0 } nm ? nm : "Вы"),
+                            Avatar = acc?.Photo,
+                            Text = text,
+                            When = "только что",
+                            Likes = "0",
+                        },
+                    });
+                }
+                Shell.Toast("Комментарий опубликован", Th.Good, 2400);
+                App.Invalidate();
+            });
         });
     }
 
@@ -199,7 +280,7 @@ public sealed class ShortsPage : IPage
                 App.Post(() =>
                 {
                     if (gen != _commentGen) return;
-                    _comments.AddRange(page.Items);
+                    foreach (var c in page.Items) _comments.Add(new ShortCommentRow { C = c });
                     _commentTok = page.Items.Count == 0 ? null : page.Continuation;
                     _commentsLoading = false;
                     App.Invalidate();
@@ -216,6 +297,7 @@ public sealed class ShortsPage : IPage
     {
         if (_loading) return;
         _loading = true; _failed = false;
+        var gen = _feedGen;
         var tok = _next;
         _ = Task.Run(async () =>
         {
@@ -224,19 +306,21 @@ public sealed class ShortsPage : IPage
                 var (ids, next) = await InnerTube.Instance.ShortsFeedAsync(tok);
                 App.Post(() =>
                 {
+                    if (gen != _feedGen) return;
                     _loading = false;
                     var have = _items.Select(v => v.VideoId).ToHashSet();
                     var wasEmpty = _items.Count == 0;
                     foreach (var id in ids) if (have.Add(id)) _items.Add(new VideoItem { VideoId = id, IsShort = true });
                     _next = ids.Count == 0 ? null : next;
                     if (wasEmpty && _items.Count > 0 && Shell.Current == this) PlayCurrent();
+                    else if (_pendingAdvance && _i + 1 < _items.Count) { _pendingAdvance = false; Step(1); }
                     App.Invalidate();
                 });
             }
             catch (Exception e)
             {
                 Paths.Log("shorts: " + e.Message);
-                App.Post(() => { _loading = false; _failed = _items.Count == 0; App.Invalidate(); });
+                App.Post(() => { if (gen != _feedGen) return; _loading = false; _pendingAdvance = false; _failed = _items.Count == 0; App.Invalidate(); });
             }
         });
     }
@@ -249,11 +333,11 @@ public sealed class ShortsPage : IPage
             Shell.Play(v, "shorts");
             MpvPlayer.Instance.Command("set", "loop-file", _loop ? "inf" : "no");
             MpvPlayer.Instance.Command("set", "volume", Math.Clamp(AppSettings.Current.Volume, 0, 100).ToString());
-            MpvPlayer.Instance.Command("set", "mute", _muted ? "yes" : "no");
         }
         NeedInfo(v);
-        if (_showComments && _commentsFor != v.VideoId) StartComments(v.VideoId);
-        // Aggressively prefetch next 3 + prev 1 (streams, metadata, and posters) so stepping is instantaneous!
+        if (_showComments) { if (_commentsFor != v.VideoId) StartComments(v.VideoId); }
+        else if (_commentsFor != null && _commentsFor != v.VideoId) ResetComments();
+
         for (int k = 3; k >= 1; k--)
             if (_i + k < _items.Count) PrefetchShort(_items[_i + k]);
         if (_i - 1 >= 0) PrefetchShort(_items[_i - 1]);
@@ -264,35 +348,61 @@ public sealed class ShortsPage : IPage
     {
         QuickStream.Prefetch(item.VideoId);
         NeedInfo(item);
-        Images.Get($"https://i.ytimg.com/vi/{item.VideoId}/oar2.jpg", 360, 640);
-        Images.Get(item.ThumbHq, 360, 270);
+        Images.Get($"https://i.ytimg.com/vi/{item.VideoId}/oar2.jpg", _videoW, _videoH);
     }
 
-    /// <summary>The feed gives bare ids: title, channel and likes come with one small request per short.</summary>
     private void NeedInfo(VideoItem v)
     {
-        if (v.Title.Length > 0 && v.Channel.Length > 0 || !_asked.Add(v.VideoId)) return;
+        if ((v.Title.Length > 0 && v.Channel.Length > 0 && _dislikes.ContainsKey(v.VideoId)) || !_asked.Add(v.VideoId)) return;
         var id = v.VideoId;
+        var gen = _feedGen;
         _ = Task.Run(async () =>
         {
             try
             {
                 var full = await InnerTube.Instance.ShortInfoAsync(id);
-                if (full == null) return;
-                App.Post(() =>
+                if (full != null)
                 {
-                    var at = _items.FindIndex(x => x.VideoId == id);
-                    if (at < 0) return;
-                    _items[at] = full;
-                    if (PlaybackTracker.Instance.Current?.VideoId == id)
+                    App.Post(() =>
                     {
-                        PlaybackTracker.Instance.UpdateMeta(full.Title, full.Channel);
-                        Shell.PushPlayerState();
-                    }
-                    App.Invalidate();
-                });
+                        if (gen != _feedGen) return;
+                        var at = _items.FindIndex(x => x.VideoId == id);
+                        if (at < 0) return;
+                        _items[at] = full;
+                        if (PlaybackTracker.Instance.Current?.VideoId == id)
+                        {
+                            PlaybackTracker.Instance.UpdateMeta(full.Title, full.Channel);
+                            Shell.PushPlayerState();
+                        }
+                        App.Invalidate();
+                    });
+                }
             }
             catch (Exception e) { Paths.Log("short info: " + e.Message); }
+
+            // Fetch dislike count via Return YouTube Dislike + comment count in parallel for the YouTube circular rail!
+            if (AppSettings.Current.ReturnDislikes)
+            {
+                try
+                {
+                    if (await Extras.DislikesAsync(id) is { } votes)
+                    {
+                        var dis = Extras.Compact(votes.Dislikes);
+                        App.Post(() => { if (gen == _feedGen) { _dislikes[id] = dis; App.Invalidate(); } });
+                    }
+                }
+                catch { }
+            }
+            try
+            {
+                var w = await InnerTube.Instance.WatchCachedAsync(id);
+                if (!string.IsNullOrEmpty(w.CommentsCount))
+                {
+                    var cc = w.CommentsCount;
+                    App.Post(() => { if (gen == _feedGen) { _commCounts[id] = cc; App.Invalidate(); } });
+                }
+            }
+            catch { }
         });
     }
 
@@ -301,7 +411,12 @@ public sealed class ShortsPage : IPage
     {
         if (UI.Now - _lastStep < 160 && _lastStep != 0) return;
         var to = _i + d;
-        if (to < 0 || to >= _items.Count) { if (to >= _items.Count && _feed && _next != null) LoadMore(); return; }
+        if (to < 0 || to >= _items.Count)
+        {
+            if (to >= _items.Count && _feed && _next != null) { _pendingAdvance = true; LoadMore(); }
+            return;
+        }
+        _pendingAdvance = false;
         _lastStep = UI.Now;
         _prevVideoId = Cur?.VideoId;
         _i = to;
@@ -314,6 +429,7 @@ public sealed class ShortsPage : IPage
     private void Rate(VideoItem v, bool like)
     {
         if (!CookieStore.IsLoggedIn) { Shell.Toast("Чтобы ставить оценки, войдите в аккаунт YouTube", Th.Warn); return; }
+        Sfx.Like();
         var want = like ? "LIKE" : "DISLIKE";
         var before = _rating.GetValueOrDefault(v.VideoId, "");
         var action = before == want ? "removelike" : like ? "like" : "dislike";
@@ -323,22 +439,23 @@ public sealed class ShortsPage : IPage
         {
             bool ok;
             try { ok = await InnerTube.Instance.RateAsync(id, action); } catch { ok = false; }
-            if (!ok) App.Post(() => { _rating[id] = before; Shell.Toast("YouTube не принял оценку", Th.Warn); });
+            if (!ok) App.Post(() => { _rating[id] = before; Shell.Toast("YouTube не принял оценку", Th.Warn); App.Invalidate(); });
         });
     }
 
     private void ContextMenuFor(VideoItem v)
     {
         var p = MpvPlayer.Instance;
+        var muted = p.Muted;
         var items = new List<MenuItem>
         {
             new(p.Paused ? "Продолжить" : "Пауза", p.TogglePause, icon: p.Paused ? Th.Play : Th.Pause, shortcut: "Space"),
-            new(_muted ? "Включить звук" : "Выключить звук", ToggleMute, icon: _muted ? Th.Volume : Th.Mute, shortcut: "M"),
+            new(muted ? "Включить звук" : "Выключить звук", ToggleMute, icon: muted ? Th.Volume : Th.Mute, shortcut: "M"),
             new("Повтор Shorts", ToggleLoop, check: _loop, icon: Th.Repeat),
             new(AppSettings.Current.ShortsPanelHidden ? "Показать боковую панель" : "Скрыть боковую панель", TogglePanel, icon: Th.Theater),
             new("Подпись поверх видео (при наведении)", ToggleInfoOverlay, check: AppSettings.Current.ShortsInfoOverlay, icon: Th.Info),
             MenuItem.Sep,
-            new("Открыть как обычное видео", () => Shell.OpenVideo(new VideoItem { VideoId = v.VideoId, Title = v.Title, Channel = v.Channel, ChannelId = v.ChannelId }, "shorts"), icon: Th.Expand),
+            new("Открыть как обычное видео", () => Shell.OpenVideo(new VideoItem { VideoId = v.VideoId, Title = v.Title, Channel = v.Channel, ChannelId = v.ChannelId }, "shorts-open"), icon: Th.Expand),
             new("Открыть в новой вкладке", () => Shell.OpenVideoInNewTab(v), icon: Th.Add),
             new("Скачать (" + Cards.QualityName(AppSettings.Current.DownloadQuality) + ")", () => Cards.Download(v, null), icon: Th.Download),
             MenuItem.Sep,
@@ -352,8 +469,7 @@ public sealed class ShortsPage : IPage
 
     private void ToggleMute()
     {
-        _muted = !_muted;
-        MpvPlayer.Instance.Command("set", "mute", _muted ? "yes" : "no");
+        MpvPlayer.Instance.Command("cycle", "mute");
         App.Invalidate();
     }
 
@@ -364,6 +480,29 @@ public sealed class ShortsPage : IPage
         App.Invalidate();
     }
 
+    /// <summary>Draws one YouTube-style circular action button with label/counter centered underneath.</summary>
+    private static bool RailCircleButton(int id, float cx, float topY, string glyph, string label, bool active, bool playSfx = true)
+    {
+        const float size = 46;
+        var circleR = new R(cx - size / 2, topY, size, size);
+        bool over = UI.Hover(circleR);
+        float hoverA = UI.Anim(id ^ 0x3311, over ? 1 : 0, 22);
+        uint bg = active
+            ? Gfx.Fade(Th.Brand, 0.26f + 0.10f * hoverA)
+            : Th.A(0.11f + 0.08f * hoverA);
+        Gfx.Fill(circleR, bg, size / 2);
+        if (active) Gfx.Stroke(circleR, Gfx.Fade(Th.Brand, 0.55f), size / 2, 1.2f);
+        else if (hoverA > 0.01f) Gfx.Stroke(circleR, Th.A(0.18f * hoverA), size / 2, 1f);
+
+        Gfx.Icon(glyph, circleR, 17, active ? Th.Brand : Th.Text);
+        if (label.Length > 0)
+        {
+            var tr = Gfx.Text(label, 11.5f, active ? 600 : 500, 74, 1);
+            Gfx.Draw(tr, Gfx.Snap(cx - tr.W / 2), topY + size + 4, active ? Th.Brand : Th.Sub);
+        }
+        return UI.Click(id, circleR, playSfx: playSfx);
+    }
+
     public void Draw(R r)
     {
         if (_volSaveAt > 0 && UI.Now >= _volSaveAt) FlushVolume();
@@ -372,6 +511,7 @@ public sealed class ShortsPage : IPage
         var v = Cur;
         if (v == null)
         {
+            _commentEdit?.Hide();
             if (_loading) UI.Spinner(r.X + r.W / 2, r.Y + r.H / 2, 16, Th.Sub);
             else
             {
@@ -384,24 +524,30 @@ public sealed class ShortsPage : IPage
 
         bool hidden = AppSettings.Current.ShortsPanelHidden;
         float panelT = UI.Smooth(UI.Id("shorts:panelT"), hidden ? 0 : 1, 16);
-        float fullSide = MathF.Min(430, MathF.Max(340, r.W * 0.34f));
+        const float railW = 68; // Always-visible YouTube circular action rail right beside the Short!
+        float fullSide = MathF.Min(410, MathF.Max(320, r.W * 0.32f));
         float side = fullSide * panelT;
-        float gap = 22 * panelT;
-        // Leave a sleek 46px peek space at bottom (and 14px top) so the next Short card peeks just like YouTube Shorts!
-        var vh = MathF.Floor(MathF.Min(r.H - 64, (r.W - side - (hidden ? 110 : 90)) * 16 / 9));
+        float panelGap = 16 * panelT;
+
+        var vh = MathF.Floor(MathF.Min(r.H - 60, (r.W - railW - side - panelGap - 56) * 16 / 9));
+        vh = MathF.Max(260, vh);
         var vw = MathF.Floor(vh * 9 / 16);
-        var vx = Gfx.Snap(r.X + MathF.Max(20, (r.W - vw - side - gap) / 2));
+        _videoW = vw; _videoH = vh;
+
+        float totalW = vw + 12 + railW + panelGap + side;
+        var vx = Gfx.Snap(r.X + MathF.Max(18, (r.W - totalW) / 2));
         var vy = Gfx.Snap(r.Y + 14);
         var video = new R(vx, vy, vw, vh);
-        var panelR = new R(video.Right + gap, video.Y, MathF.Min(fullSide, r.Right - video.Right - 36), video.H);
+        float railX = video.Right + 12;
+        var panelR = new R(railX + railW + panelGap, video.Y, MathF.Min(fullSide, r.Right - (railX + railW + panelGap) - 20), video.H);
 
         // Cinema GPU Ambient Mode glow behind the Short
         Gfx.PushClip(r);
         Ambient.Draw(video, v.VideoId, isShort: true);
         Gfx.PopClip();
 
-        // Smooth cubic-out vertical card-stack swipe animation (like YouTube Shorts!)
-        float slideT = _slideAt > 0 ? Math.Clamp((UI.Now - _slideAt) / 260f, 0, 1) : 1f;
+        // Smooth cubic-out vertical card-stack swipe animation — completely BORDERLESS (no ugly outline!)
+        float slideT = _slideAt > 0 ? Math.Clamp((UI.Now - _slideAt) / 250f, 0, 1) : 1f;
         bool sliding = slideT < 1f;
         if (sliding) UI.Animate();
         float ease = 1f - MathF.Pow(1f - slideT, 3f);
@@ -413,102 +559,131 @@ public sealed class ShortsPage : IPage
             if (rect.Bottom <= r.Y || rect.Y >= r.Bottom) return;
             Gfx.Fill(rect, 0xFF0A0A0E, 14);
             var img = Images.Get($"https://i.ytimg.com/vi/{vid}/oar2.jpg", rect.W, rect.H)
-                   ?? Images.Get($"https://i.ytimg.com/vi/{vid}/hqdefault.jpg", rect.W, rect.H);
+                   ?? Images.Get($"https://i.ytimg.com/vi/{vid}/hq720.jpg", rect.W, rect.H);
             if (img != null)
             {
                 Gfx.Image(img.Bmp!, rect, opacity * Images.Alpha(img));
                 Gfx.RoundOff(rect, 14, Th.Bg);
             }
-            Gfx.Stroke(rect, Th.A(0.10f), 14, 1f);
         }
 
-        // Clipped vertical stack column (shows peeking next/prev cards + sliding transition)
-        Gfx.PushClip(new R(video.X - 4, r.Y, video.W + 8, r.H));
+        Gfx.PushClip(new R(video.X - 2, r.Y, video.W + 4, r.H));
         if (sliding && _prevVideoId != null)
         {
             var outR = new R(video.X, curY - stride * _slideFrom, video.W, video.H);
             DrawShortPoster(_prevVideoId, outR, 0.92f - 0.15f * ease);
         }
-        // Peeking next Short card below the active one (clickable!)
         if (NextItem is { } peekNext)
         {
             var peekR = new R(video.X, curY + stride, video.W, video.H);
             if (peekR.Y < r.Bottom)
             {
-                DrawShortPoster(peekNext.VideoId, peekR, 0.55f);
+                DrawShortPoster(peekNext.VideoId, peekR, 0.52f);
                 if (!sliding && UI.Click(UI.Id("shorts:peeknext"), peekR.Intersect(r))) Step(1);
             }
         }
-        // Peeking previous Short card above during swipe
         if (_i > 0 && sliding)
         {
             var prevPeek = new R(video.X, curY - stride, video.W, video.H);
             if (prevPeek.Bottom > r.Y && _items[_i - 1].VideoId != _prevVideoId)
-                DrawShortPoster(_items[_i - 1].VideoId, prevPeek, 0.55f);
+                DrawShortPoster(_items[_i - 1].VideoId, prevPeek, 0.52f);
         }
 
         if (sliding)
         {
-            var inR = new R(video.X, curY, video.W, video.H);
-            DrawShortPoster(v.VideoId, inR, 0.95f);
+            DrawShortPoster(v.VideoId, new R(video.X, curY, video.W, video.H), 0.96f);
         }
         else
         {
-            // Settled: show the live mpv surface with matching 14px rounded corners so the contour stays crisp
+            // Settled: crisp borderless rounded live video surface
             Gfx.Fill(video, 0xFF0A0A0E, 14);
-            Gfx.Stroke(video.Inset(-1), Th.A(0.10f), 15, 1f);
             Shell.WantVideo(video, v.VideoId, radius: 14);
             if (!Shell.VideoShown(v.VideoId))
             {
-                DrawShortPoster(v.VideoId, video, 0.82f);
+                DrawShortPoster(v.VideoId, video, 0.85f);
                 UI.Spinner(video.X + vw / 2, video.Y + vh / 2, 14, 0xFFFFFFFF);
             }
         }
         Gfx.PopClip();
         if (UI.RightClick(video)) ContextMenuFor(v);
 
-        // When panel is hidden: compact floating rail + optional clean side text block (or video hover overlay via fluxosc.lua)
+        // ---- ALWAYS-VISIBLE YOUTUBE-STYLE VERTICAL CIRCULAR ACTION RAIL (bottom-right of the Short!) ----
+        float rcx = Gfx.Snap(railX + railW / 2);
+        const float itemStep = 72;
+        float avSize = 42;
+        float railItemsH = itemStep * 5 + avSize + 6;
+        float ry = MathF.Max(video.Y + 4, video.Bottom - railItemsH - 4);
+        var mine = _rating.GetValueOrDefault(v.VideoId, "");
+        var likeLbl = v.Meta.Length > 0 ? v.Meta : "Лайк";
+        var disLbl = _dislikes.TryGetValue(v.VideoId, out var dlCnt) && dlCnt.Length > 0 ? dlCnt : "Не нрав.";
+        var commLbl = _commentsFor == v.VideoId && _commentCount is { Length: > 0 } cc0 ? cc0
+                    : (_commCounts.TryGetValue(v.VideoId, out var cc1) ? cc1 : "Комм.");
+
+        if (RailCircleButton(UI.Id("shorts:rlike"), rcx, ry, Th.Like, likeLbl, mine == "LIKE", playSfx: false)) Rate(v, true);
+        ry += itemStep;
+        if (RailCircleButton(UI.Id("shorts:rdis"), rcx, ry, Th.Dislike, disLbl, mine == "DISLIKE", playSfx: false)) Rate(v, false);
+        ry += itemStep;
+        if (RailCircleButton(UI.Id("shorts:rcomm"), rcx, ry, Th.Comment, commLbl, _showComments && !hidden)) ToggleComments();
+        ry += itemStep;
+        if (RailCircleButton(UI.Id("shorts:rshare"), rcx, ry, Th.Share, "Поделиться", false)) Cards.Copy("https://youtube.com/shorts/" + v.VideoId);
+        ry += itemStep;
+        if (RailCircleButton(UI.Id("shorts:rpanel"), rcx, ry, hidden ? Th.Theater : Th.More, hidden ? "Панель" : "Скрыть", !hidden)) TogglePanel();
+        ry += itemStep + 4;
+
+        // Rounded-square Channel Avatar at the bottom of the YouTube action rail!
+        var railAv = new R(rcx - avSize / 2, ry, avSize, avSize);
+        var avImg = Images.Get(v.AvatarUrl, avSize, avSize, round: false);
+        if (avImg != null)
+        {
+            Gfx.Image(avImg.Bmp!, railAv, Images.Alpha(avImg));
+            Gfx.RoundOff(railAv, 10, Th.Bg);
+        }
+        else
+        {
+            Gfx.Fill(railAv, Th.Card, 10);
+            var cname0 = v.Channel.Length > 0 ? v.Channel.TrimStart('@') : "S";
+            var init = System.Globalization.StringInfo.GetNextTextElement(cname0).ToUpperInvariant();
+            var ir = Gfx.Text(init, 16, 600);
+            Gfx.Draw(ir, railAv.X + (avSize - ir.W) / 2, railAv.Y + (avSize - ir.H) / 2, Th.Sub);
+        }
+        Gfx.Stroke(railAv, UI.Hover(railAv) && v.ChannelId != null ? Th.Brand : Th.A(0.22f), 10, 1.3f);
+        if (v.ChannelId != null && UI.Click(UI.Id("shorts:rav"), railAv, playSfx: false))
+        {
+            var cid = v.ChannelId; var cn = v.Channel;
+            App.Post(() => Shell.OpenChannel(cid, cn));
+        }
+
+        // Top-right quick Up/Down step arrows above the rail when panel is collapsed
         if (panelT < 0.05f)
         {
-            float rx = video.Right + 14;
-            if (rx + 46 < r.Right)
+            _commentEdit?.Hide();
+            float navTop = video.Y + 6;
+            if (ry - navTop > 88)
             {
-                var rail = new R(rx, video.Y + 6, 44, 194);
-                Gfx.Fill(rail, Th.Panel, 22);
-                Gfx.Stroke(rail, Th.Line, 22, 1f);
-                if (UI.IconButton(UI.Id("shorts:showpanel"), new R(rx + 4, rail.Y + 6, 36, 36), "\uE76B", 13, Th.Text)) TogglePanel();
-                var mine0 = _rating.GetValueOrDefault(v.VideoId, "");
-                if (UI.IconButton(UI.Id("shorts:qlike"), new R(rx + 4, rail.Y + 46, 36, 36), Th.Like, 15, mine0 == "LIKE" ? Th.Brand : Th.Icon)) Rate(v, true);
-                if (UI.IconButton(UI.Id("shorts:qcomm"), new R(rx + 4, rail.Y + 86, 36, 36), Th.Comment, 15, Th.Icon)) ToggleComments();
-                if (UI.IconButton(UI.Id("shorts:qup"), new R(rx + 4, rail.Y + 126, 36, 30), Th.ChevronUp, 12, Th.Text, _i > 0)) Step(-1);
-                if (UI.IconButton(UI.Id("shorts:qdn"), new R(rx + 4, rail.Y + 158, 36, 30), Th.ChevronDown, 12, Th.Brand, _i < _items.Count - 1 || _next != null)) Step(1);
-
-                // Side text mode (right next to the rail, where the green arrow pointed!)
-                if (!AppSettings.Current.ShortsInfoOverlay)
+                if (UI.IconButton(UI.Id("shorts:qup"), new R(rcx - 19, navTop, 38, 34), Th.ChevronUp, 13, Th.Text, _i > 0)) Step(-1);
+                if (UI.IconButton(UI.Id("shorts:qdn"), new R(rcx - 19, navTop + 38, 38, 34), Th.ChevronDown, 13, Th.Brand, _i < _items.Count - 1 || _next != null)) Step(1);
+            }
+            if (!AppSettings.Current.ShortsInfoOverlay)
+            {
+                float tx = railX + railW + 18;
+                float tw = MathF.Min(260, r.Right - tx - 18);
+                if (tw > 120)
                 {
-                    float tx = rail.Right + 18;
-                    float tw = MathF.Min(280, r.Right - tx - 18);
-                    if (tw > 120)
+                    float ty = video.Y + 12;
+                    var cname = v.Channel.Length > 0 ? v.Channel : "…";
+                    var cnr = Gfx.Text(cname, 15, 600, tw);
+                    var cnrRect = new R(tx, ty, cnr.W, cnr.H);
+                    Gfx.Draw(cnr, cnrRect.X, cnrRect.Y, UI.Hover(cnrRect) && v.ChannelId != null ? Th.Brand : Th.Text);
+                    if (v.ChannelId != null && UI.Click(UI.Id("shorts:cch"), cnrRect, playSfx: false))
                     {
-                        float ty = rail.Y + 6;
-                        var cname = v.Channel.Length > 0 ? v.Channel : "…";
-                        var av0 = new R(tx, ty, 36, 36);
-                        Cards.Avatar(av0.X, av0.Y, 36, v.AvatarUrl, cname.TrimStart('@'));
-                        var cnr = Gfx.Text(cname, 14.5f, 600, tw - 46);
-                        var cnrRect = new R(av0.Right + 10, ty + 2, cnr.W, cnr.H);
-                        Gfx.Draw(cnr, cnrRect.X, cnrRect.Y, UI.Hover(cnrRect) && v.ChannelId != null ? Th.Brand : Th.Text);
-                        if (v.Meta.Length > 0) Gfx.Draw(v.Meta + " лайков", av0.Right + 10, ty + 21, 12, Th.Sub, 400, tw - 46);
-                        if (v.ChannelId != null && (UI.Click(UI.Id("shorts:cch"), cnrRect) || UI.Click(UI.Id("shorts:cav"), av0)))
-                        {
-                            var cid = v.ChannelId; var cn = cname;
-                            App.Post(() => Shell.OpenChannel(cid, cn));
-                        }
-                        if (v.Title.Length > 0)
-                        {
-                            var tr0 = Sel.Text(UI.Id("shorts:ctitle"), v.Title, tx, ty + 48, 14.5f, Th.Text, 600, tw, 5, links: true,
-                                onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
-                            Cards.CopyMenu(new R(tx, ty + 48, tr0.W, tr0.H), v.Title, "Копировать название");
-                        }
+                        var cid = v.ChannelId; var cn = cname;
+                        App.Post(() => Shell.OpenChannel(cid, cn));
+                    }
+                    if (v.Title.Length > 0)
+                    {
+                        var tr0 = Sel.Text(UI.Id("shorts:ctitle"), v.Title, tx, ty + cnr.H + 10, 14, Th.Sub, 500, tw, 6, links: true,
+                            onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
+                        Cards.CopyMenu(new R(tx, ty + cnr.H + 10, tr0.W, tr0.H), v.Title, "Копировать название");
                     }
                 }
             }
@@ -522,72 +697,71 @@ public sealed class ShortsPage : IPage
 
         if (panelR.W < 200)
         {
+            _commentEdit?.Hide();
             if (UI.Wheel != 0 && UI.Hover(r)) { Step(UI.Wheel > 0 ? -1 : 1); UI.Wheel = 0; }
             return;
         }
 
-        // ---- Structured Right-Side Card ----
+        // ---- Structured Right-Side Card (Playback Deck, Comments + Composer, Up-Next) ----
         Gfx.PushClip(new R(panelR.X - 2, panelR.Y - 2, side + 4, panelR.H + 4));
         Gfx.Fill(panelR, Th.Panel, 16);
         Gfx.Stroke(panelR, Th.Line, 16, 1f);
         if (UI.RightClick(panelR)) ContextMenuFor(v);
 
-        float pad = 18;
-        float x = panelR.X + pad, w = panelR.W - pad * 2, y = panelR.Y + 16;
+        float pad = 16;
+        float x = panelR.X + pad, w = panelR.W - pad * 2, y = panelR.Y + 14;
 
-        // 1. HEADER ZONE: Channel + Shorts Index Pill + Hide Panel button + Title
+        // 1. HEADER ZONE
         var name = v.Channel.Length > 0 ? v.Channel : "…";
-        var avR = new R(x, y, 42, 42);
-        Cards.Avatar(avR.X, avR.Y, 42, v.AvatarUrl, name.TrimStart('@'));
-        if (v.ChannelId != null && UI.Hover(avR)) Gfx.Stroke(avR.Inset(-1), Gfx.Fade(Th.Brand, 0.8f), 22, 1.5f);
+        var avR = new R(x, y, 40, 40);
+        Cards.Avatar(avR.X, avR.Y, 40, v.AvatarUrl, name.TrimStart('@'));
+        if (v.ChannelId != null && UI.Hover(avR)) Gfx.Stroke(avR.Inset(-1), Gfx.Fade(Th.Brand, 0.8f), 21, 1.5f);
 
-        var hideBtn = new R(panelR.Right - pad - 28, y + 7, 28, 28);
+        var hideBtn = new R(panelR.Right - pad - 28, y + 6, 28, 28);
         if (UI.IconButton(UI.Id("shorts:hidepanel"), hideBtn, Th.ChevronRight, 11, Th.Sub)) TogglePanel();
 
         var badge = _feed ? $"Shorts #{_i + 1}" : $"{_i + 1} / {_items.Count}";
         var br = Gfx.Text(badge, 11.5f, 600);
-        var badgeR = new R(hideBtn.X - 6 - br.W - 14, y + 9, br.W + 14, 24);
+        var badgeR = new R(hideBtn.X - 6 - br.W - 14, y + 8, br.W + 14, 24);
         Gfx.Fill(badgeR, Th.A(0.08f), 12);
         Gfx.Draw(br, badgeR.X + 7, badgeR.Y + 4, Th.Sub);
 
-        var nr = Gfx.Text(name, 15, 600, w - 54 - badgeR.W - 42);
-        var nameR = new R(x + 52, y + 4, nr.W, nr.H);
+        var nr = Gfx.Text(name, 14.5f, 600, w - 50 - badgeR.W - 40);
+        var nameR = new R(x + 50, y + 3, nr.W, nr.H);
         Gfx.Draw(nr, nameR.X, nameR.Y, UI.Hover(nameR) && v.ChannelId != null ? Th.Brand : Th.Text);
-        Gfx.Draw(v.ChannelId != null ? "Перейти на канал" : "YouTube Shorts", x + 52, y + 24, 11.5f, Th.Dim);
-        if (v.ChannelId != null && (UI.Click(UI.Id("shorts:ch"), new R(x + 52, y + 2, nr.W + 20, 38)) || UI.Click(UI.Id("shorts:av"), avR)))
+        Gfx.Draw(v.ChannelId != null ? "Перейти на канал" : "YouTube Shorts", x + 50, y + 22, 11.5f, Th.Dim);
+        if (v.ChannelId != null && (UI.Click(UI.Id("shorts:ch"), new R(x + 50, y + 2, nr.W + 20, 36), playSfx: false) || UI.Click(UI.Id("shorts:av"), avR, playSfx: false)))
         {
             var cid = v.ChannelId; var cn = name;
             App.Post(() => Shell.OpenChannel(cid, cn));
         }
-        y += 54;
+        y += 50;
 
         if (v.Title.Length > 0)
         {
-            var tr = Sel.Text(UI.Id("shorts:title"), v.Title, x, y, 15.5f, Th.Text, 600, w, _showComments ? 2 : 4, links: true,
+            var tr = Sel.Text(UI.Id("shorts:title"), v.Title, x, y, 15, Th.Text, 600, w, _showComments ? 2 : 4, links: true,
                 onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
             Cards.CopyMenu(new R(x, y, tr.W, tr.H), v.Title, "Копировать название");
-            y += tr.H + 16;
+            y += tr.H + 14;
         }
-        else { Gfx.Fill(new R(x, y, w * 0.78f, 15), UI.Pulse(Th.Thumb), 5); y += 30; }
+        else { Gfx.Fill(new R(x, y, w * 0.78f, 15), UI.Pulse(Th.Thumb), 5); y += 28; }
 
-        // 2. PLAYBACK & GLOBAL VOLUME DECK (Card inside panel)
+        // 2. PLAYBACK & SMOOTH VOLUME DECK
         var p = MpvPlayer.Instance;
-        var deck = new R(x, y, w, 86);
+        var muted = p.Muted;
+        var deck = new R(x, y, w, 84);
         Gfx.Fill(deck, Th.Card, 12);
         Gfx.Stroke(deck, Th.A(0.08f), 12, 1f);
 
-        // Top row of deck: Scrubbable Seek Bar + Timestamps
         double dur = p.Duration, pos = p.TimePos;
         float sx = deck.X + 14, sw = deck.W - 28;
-        var curTxt = Fmt.Time(pos);
-        var durTxt = dur > 0 ? Fmt.Time(dur) : "0:00";
-        var curRun = Gfx.Text(curTxt, 11.5f, 600);
-        var durRun = Gfx.Text(durTxt, 11.5f, 400);
-        Gfx.Draw(curRun, sx, deck.Y + 10, Th.Text);
-        Gfx.Draw(durRun, sx + sw - durRun.W, deck.Y + 10, Th.Sub);
+        var curRun = Gfx.Text(Fmt.Time(pos), 11.5f, 600);
+        var durRun = Gfx.Text(dur > 0 ? Fmt.Time(dur) : "0:00", 11.5f, 400);
+        Gfx.Draw(curRun, sx, deck.Y + 9, Th.Text);
+        Gfx.Draw(durRun, sx + sw - durRun.W, deck.Y + 9, Th.Sub);
 
-        var seekTrack = new R(sx, deck.Y + 29, sw, 5);
-        var seekHit = new R(sx, deck.Y + 20, sw, 22);
+        var seekTrack = new R(sx, deck.Y + 28, sw, 5);
+        var seekHit = new R(sx, deck.Y + 19, sw, 22);
         var seekHot = UI.Hover(seekHit) || _dragSeek;
         if (dur > 0)
         {
@@ -595,19 +769,16 @@ public sealed class ShortsPage : IPage
             if (_dragSeek)
             {
                 double target = dur * Math.Clamp((UI.MX - sx) / sw, 0, 1);
-                p.SeekAbsolute(target);
+                if (UI.Now - _lastDragSeekAt >= 65) { _lastDragSeekAt = UI.Now; p.SeekAbsolute(target); }
                 pos = target;
             }
             if (seekHot) UI.Hand();
         }
         double prog = dur > 0 ? Math.Clamp(pos / dur, 0, 1) : 0;
         UI.Progress(seekTrack, prog, Th.A(0.2f), Th.Brand);
-        if (seekHot && dur > 0)
-            Gfx.Circle(sx + (float)(sw * prog), seekTrack.Y + 2.5f, 6, Th.Brand);
-        if (p.HasMedia && !p.Paused) UI.Animate();
+        if (seekHot && dur > 0) Gfx.Circle(sx + (float)(sw * prog), seekTrack.Y + 2.5f, 6, Th.Brand);
 
-        // Bottom row of deck: Play/Pause + Repeat on left, Global Volume Slider on right!
-        float ctrlY = deck.Y + 44;
+        float ctrlY = deck.Y + 42;
         var playBtn = new R(deck.X + 10, ctrlY, 34, 34);
         Gfx.Fill(playBtn, Gfx.Fade(Th.Brand, p.Paused ? 0.22f : 0.14f), 17);
         if (UI.IconButton(UI.Id("shorts:play"), playBtn, p.Paused ? Th.Play : Th.Pause, 13.5f, Th.Brand))
@@ -618,9 +789,8 @@ public sealed class ShortsPage : IPage
         if (UI.IconButton(UI.Id("shorts:loop"), loopBtn, Th.Repeat, 13, _loop ? Th.Brand : Th.Dim))
             ToggleLoop();
 
-        // Global Volume Control (applies to ALL Shorts — supports click, drag, AND mouse wheel!)
-        int vol = _muted ? 0 : Math.Clamp(AppSettings.Current.Volume, 0, 100);
-        float volAreaX = loopBtn.Right + 14;
+        int vol = muted ? 0 : Math.Clamp((int)Math.Round(p.IsReady ? p.Volume : AppSettings.Current.Volume), 0, 100);
+        float volAreaX = loopBtn.Right + 12;
         var volZone = new R(volAreaX, ctrlY, deck.Right - 12 - volAreaX, 34);
         bool wheelConsumedByVol = false;
         if (UI.Wheel != 0 && UI.Hover(volZone))
@@ -630,80 +800,46 @@ public sealed class ShortsPage : IPage
             wheelConsumedByVol = true;
         }
 
-        var muteBtn = new R(volZone.X, ctrlY, 30, 34);
-        if (UI.IconButton(UI.Id("shorts:mute"), muteBtn, _muted || vol == 0 ? Th.Mute : Th.Volume, 14, _muted ? Th.Warn : Th.Text))
+        var muteBtn = new R(volZone.X, ctrlY, 28, 34);
+        if (UI.IconButton(UI.Id("shorts:mute"), muteBtn, muted || vol == 0 ? Th.Mute : Th.Volume, 14, muted ? Th.Warn : Th.Text))
             ToggleMute();
 
         var volPct = Gfx.Text($"{vol}%", 11.5f, 600);
         Gfx.Draw(volPct, volZone.Right - volPct.W, ctrlY + (34 - volPct.H) / 2, Th.Sub);
 
         float vtx = muteBtn.Right + 6;
-        float vtw = MathF.Max(40, volZone.Right - volPct.W - 10 - vtx);
+        float vtw = MathF.Max(36, volZone.Right - volPct.W - 8 - vtx);
         var volTrack = new R(vtx, ctrlY + 14.5f, vtw, 5);
         var volHit = new R(vtx - 4, ctrlY + 4, vtw + 8, 26);
         var volHot = UI.Hover(volHit) || _dragVol;
         if (UI.Pressed && UI.Hover(volHit)) _dragVol = true;
-        if (_dragVol) SetVolume((int)MathF.Round(Math.Clamp((UI.MX - vtx) / vtw, 0, 1) * 100));
+        if (_dragVol && UI.Now - _lastDragVolAt >= 45)
+        {
+            _lastDragVolAt = UI.Now;
+            SetVolume((int)MathF.Round(Math.Clamp((UI.MX - vtx) / vtw, 0, 1) * 100), smooth: false);
+        }
         if (volHot) UI.Hand();
-        UI.Progress(volTrack, vol / 100.0, Th.A(0.2f), _muted ? Th.Dim : Th.Brand);
-        Gfx.Circle(vtx + vtw * (vol / 100f), volTrack.Y + 2.5f, volHot ? 6f : 4.5f, _muted ? Th.Sub : Th.Text);
+        UI.Progress(volTrack, vol / 100.0, Th.A(0.2f), muted ? Th.Dim : Th.Brand);
+        Gfx.Circle(vtx + vtw * (vol / 100f), volTrack.Y + 2.5f, volHot ? 6f : 4.5f, muted ? Th.Sub : Th.Text);
 
-        y += deck.H + 14;
+        y += deck.H + 12;
 
-        // 3. ENGAGEMENT BAR: Unified Like|Dislike segmented pill + Comments button
-        var mine = _rating.GetValueOrDefault(v.VideoId, "");
-        var likes = v.Meta.Length > 0 ? v.Meta : "Лайк";
-        float engH = 38;
-        float splitW = MathF.Round(w * 0.52f);
-        var rateBox = new R(x, y, splitW, engH);
-        Gfx.Fill(rateBox, Th.A(0.08f), 10);
-        float likeW = MathF.Round(splitW * 0.66f);
-        var likeR = new R(rateBox.X, rateBox.Y, likeW, engH);
-        var disR = new R(rateBox.X + likeW, rateBox.Y, splitW - likeW, engH);
-        if (mine == "LIKE") Gfx.Fill(likeR, Gfx.Fade(Th.Brand, 0.22f), 10);
-        if (mine == "DISLIKE") Gfx.Fill(disR, Gfx.Fade(Th.Brand, 0.22f), 10);
-        UI.Glow(UI.Id("shorts:like"), likeR, 10, UI.Hover(likeR));
-        UI.Glow(UI.Id("shorts:dis"), disR, 10, UI.Hover(disR));
-        Gfx.Fill(new R(disR.X, rateBox.Y + 9, 1, engH - 18), Th.Line);
-
-        var lr = Gfx.Text(likes, 13, 600, likeW - 36);
-        float lx = likeR.X + (likeR.W - (18 + 6 + lr.W)) / 2;
-        uint likeCol = mine == "LIKE" ? Th.Brand : Th.Text;
-        Gfx.Icon(Th.Like, new R(lx, likeR.Y, 18, engH), 14.5f, likeCol);
-        Gfx.Draw(lr, lx + 24, likeR.Y + (engH - lr.H) / 2, likeCol);
-        Gfx.Icon(Th.Dislike, disR, 14.5f, mine == "DISLIKE" ? Th.Brand : Th.Text);
-        if (UI.Click(UI.Id("shorts:like"), likeR)) Rate(v, true);
-        if (UI.Click(UI.Id("shorts:dis"), disR)) Rate(v, false);
-
-        var commBtn = new R(rateBox.Right + 8, y, w - splitW - 8, engH);
-        Gfx.Fill(commBtn, _showComments ? Gfx.Fade(Th.Brand, 0.9f) : Th.A(0.08f), 10);
-        UI.Glow(UI.Id("shorts:commbtn"), commBtn, 10, UI.Hover(commBtn));
-        var cLabel = _commentCount is { Length: > 0 } ? _commentCount : "Комменты";
-        var cr = Gfx.Text(cLabel, 13, 600, commBtn.W - 34);
-        float cx = commBtn.X + (commBtn.W - (18 + 6 + cr.W)) / 2;
-        uint commFg = _showComments ? Th.OnBrand : Th.Text;
-        Gfx.Icon(Th.Comment, new R(cx, commBtn.Y, 18, engH), 14, commFg);
-        Gfx.Draw(cr, cx + 24, commBtn.Y + (engH - cr.H) / 2, commFg);
-        if (UI.Click(UI.Id("shorts:commbtn"), commBtn)) ToggleComments();
-        y += engH + 10;
-
-        // 4. QUICK ACTIONS GRID: 4 equal, pixel-aligned tiles (Скачать / Ссылка / Плеер / Вкладка)
-        float tileGap = 8, tileW = (w - tileGap * 3) / 4, tileH = 50;
+        // 3. QUICK ACTIONS GRID: 4 crisp tiles
+        float tileGap = 8, tileW = (w - tileGap * 3) / 4, tileH = 48;
         ActionTile(new R(x, y, tileW, tileH), UI.Id("shorts:dl"), Th.Download, "Скачать", () => Cards.Download(v, null));
-        ActionTile(new R(x + (tileW + tileGap), y, tileW, tileH), UI.Id("shorts:share"), Th.Share, "Ссылка", () => Cards.Copy("https://youtube.com/shorts/" + v.VideoId));
+        ActionTile(new R(x + (tileW + tileGap), y, tileW, tileH), UI.Id("shorts:commt"), Th.Comment, "Комм.", ToggleComments);
         ActionTile(new R(x + (tileW + tileGap) * 2, y, tileW, tileH), UI.Id("shorts:open"), Th.Expand, "Плеер", () =>
         {
             var vv = v;
-            App.Post(() => Shell.OpenVideo(new VideoItem { VideoId = vv.VideoId, Title = vv.Title, Channel = vv.Channel, ChannelId = vv.ChannelId }, "shorts"));
+            App.Post(() => Shell.OpenVideo(new VideoItem { VideoId = vv.VideoId, Title = vv.Title, Channel = vv.Channel, ChannelId = vv.ChannelId }, "shorts-open"));
         });
         ActionTile(new R(x + (tileW + tileGap) * 3, y, tileW, tileH), UI.Id("shorts:tab"), Th.Add, "Вкладка", () => Shell.OpenVideoInNewTab(v));
-        y += tileH + 14;
+        y += tileH + 12;
 
-        // Bottom navigation footer height
-        float footerY = panelR.Bottom - 56;
+        float footerY = panelR.Bottom - 54;
 
-        // 5. MIDDLE CONTENT ZONE: Inline Comments Drawer OR "Up Next" Preview Card
-        if (_showComments && footerY - y > 80)
+        // 4. MIDDLE ZONE: Comments Drawer (with comment composer!) OR Up-Next Card
+        if (_showComments && footerY - y > 100)
         {
             Gfx.Fill(new R(x, y, w, 1), Th.Line);
             y += 8;
@@ -711,41 +847,71 @@ public sealed class ShortsPage : IPage
                 ? (_commentCount.Any(char.IsLetter) ? _commentCount : $"Комментарии · {_commentCount}")
                 : "Комментарии";
             Gfx.Draw(chTitle, x, y + 3, 13.5f, Th.Text, 600);
-            if (UI.IconButton(UI.Id("shorts:commclose"), new R(x + w - 24, y, 24, 24), Th.Close, 10, Th.Sub)) _showComments = false;
+            if (UI.IconButton(UI.Id("shorts:commclose"), new R(x + w - 24, y, 24, 24), Th.Close, 10, Th.Sub))
+            {
+                _showComments = false;
+                _commentEdit?.Hide();
+            }
             y += 28;
-            var commView = new R(x, y, w + 8, footerY - y - 10);
+
+            // Inline comment composer inside Shorts drawer
+            if (CookieStore.IsLoggedIn && !_commentsOff)
+            {
+                if (_commentEdit == null)
+                {
+                    _commentEdit = new Edit("Написать комментарий…") { Bg = () => Th.Field };
+                    _commentEdit.Enter = SubmitComment;
+                }
+                const float sendSize = 32;
+                var boxR = new R(x, y, MathF.Max(100, w - sendSize - 6), 34);
+                Gfx.Fill(boxR, Th.Field, 9);
+                Gfx.Stroke(boxR, _commentEdit.Focused ? Gfx.Fade(Th.Brand, 0.8f) : Th.Line, 9, _commentEdit.Focused ? 1.2f : 1f);
+                _commentEdit.Place(boxR, 10, 10);
+                var sendR = new R(boxR.Right + 6, y + 1, sendSize, sendSize);
+                bool canSend = !_postingComment && !string.IsNullOrWhiteSpace(_commentEdit.Text);
+                Gfx.Fill(sendR, canSend ? Th.Brand : Th.A(0.08f), 9);
+                if (UI.IconButton(UI.Id("shorts:csend"), sendR, "\uE724", 13, canSend ? Th.OnBrand : Th.Dim, canSend))
+                    App.Post(SubmitComment);
+                y += 42;
+            }
+            else _commentEdit?.Hide();
+
+            var commView = new R(x, y, w + 8, MathF.Max(40, footerY - y - 10));
             DrawCommentsDrawer(commView);
         }
-        else if (!_showComments && footerY - y > 96)
+        else
         {
-            Gfx.Fill(new R(x, y, w, 1), Th.Line);
-            y += 12;
-            if (NextItem is { } nxt)
+            _commentEdit?.Hide();
+            if (footerY - y > 92)
             {
-                Gfx.Draw("Далее в ленте", x, y, 12, Th.Dim, 600);
-                y += 20;
-                var upNext = new R(x, y, w, 68);
-                Gfx.Fill(upNext, Th.Card, 10);
-                var glow = UI.Glow(UI.Id("shorts:nextcard"), upNext, 10, UI.Hover(upNext));
-                var thR = new R(upNext.X + 8, upNext.Y + 8, 36, 52);
-                Cards.ThumbUrl(thR, $"https://i.ytimg.com/vi/{nxt.VideoId}/oar2.jpg", 6, UI.GlowOn(Th.Card, glow));
-                float ntx = thR.Right + 12, ntw = upNext.Right - 12 - ntx;
-                var ntTitle = nxt.Title.Length > 0 ? nxt.Title : "Следующий Shorts…";
-                var ntRun = Gfx.Draw(ntTitle, ntx, upNext.Y + 12, 13, Th.Text, 600, ntw, 2);
-                if (nxt.Channel.Length > 0) Gfx.Draw(nxt.Channel, ntx, upNext.Y + 14 + ntRun.H, 11.5f, Th.Sub, 400, ntw);
-                if (UI.Click(UI.Id("shorts:nextcard"), upNext)) Step(1);
-            }
+                Gfx.Fill(new R(x, y, w, 1), Th.Line);
+                y += 12;
+                if (NextItem is { } nxt)
+                {
+                    Gfx.Draw("Далее в ленте", x, y, 12, Th.Dim, 600);
+                    y += 20;
+                    var upNext = new R(x, y, w, 68);
+                    Gfx.Fill(upNext, Th.Card, 10);
+                    var glow = UI.Glow(UI.Id("shorts:nextcard"), upNext, 10, UI.Hover(upNext));
+                    var thR = new R(upNext.X + 8, upNext.Y + 8, 36, 52);
+                    Cards.ThumbUrl(thR, $"https://i.ytimg.com/vi/{nxt.VideoId}/oar2.jpg", 6, UI.GlowOn(Th.Card, glow));
+                    float ntx = thR.Right + 12, ntw = upNext.Right - 12 - ntx;
+                    var ntTitle = nxt.Title.Length > 0 ? nxt.Title : "Следующий Shorts…";
+                    var ntRun = Gfx.Draw(ntTitle, ntx, upNext.Y + 12, 13, Th.Text, 600, ntw, 2);
+                    if (nxt.Channel.Length > 0) Gfx.Draw(nxt.Channel, ntx, upNext.Y + 14 + ntRun.H, 11.5f, Th.Sub, 400, ntw);
+                    if (UI.Click(UI.Id("shorts:nextcard"), upNext)) Step(1);
+                }
 
-            // Subtle compact keyboard hint bar just above footer
-            float hy = footerY - 30;
-            if (hy > y + 74)
-                Gfx.Draw("Колесо / ↑↓ — лента · Колесо по звуку — громкость · Space — пауза", x, hy, 11.5f, Th.Dim, 400, w);
+                float hy = footerY - 28;
+                if (hy > y + 74)
+                    Gfx.Draw("Колесо / ↑↓ — лента · Колесо по видео — громкость · Space — пауза", x, hy, 11.5f, Th.Dim, 400, w);
+            }
         }
 
-        // 6. BOTTOM NAVIGATION FOOTER
+        // 5. BOTTOM NAVIGATION FOOTER
         Gfx.Fill(new R(x, footerY - 8, w, 1), Th.Line);
-        var prevBtn = new R(x, footerY, (w - 10) / 2, 40);
-        var nextBtn = new R(prevBtn.Right + 10, footerY, (w - 10) / 2, 40);
+        var prevBtn = new R(x, footerY, (w - 10) / 2, 38);
+        var nextBtn = new R(prevBtn.Right + 10, footerY, (w - 10) / 2, 38);
         bool canPrev = _i > 0, canNext = _i < _items.Count - 1 || _next != null;
 
         Gfx.Fill(prevBtn, Th.A(canPrev ? 0.08f : 0.03f), 10);
@@ -767,7 +933,6 @@ public sealed class ShortsPage : IPage
         if (_loading) UI.Spinner(panelR.Right - 28, panelR.Y + 20, 7, Th.Sub);
         Gfx.PopClip();
 
-        // Wheel over the video (even while loading) adjusts volume; wheel outside video (and not in comments/volume) steps Shorts!
         if (!wheelConsumedByVol && UI.Wheel != 0)
         {
             if (UI.Hover(video))
@@ -788,9 +953,9 @@ public sealed class ShortsPage : IPage
         Gfx.Fill(tile, Th.A(0.065f), 10);
         var over = UI.Hover(tile);
         UI.Glow(id, tile, 10, over);
-        Gfx.Icon(glyph, new R(tile.X, tile.Y + 6, tile.W, 20), 14.5f, over ? Th.Text : Th.Icon);
+        Gfx.Icon(glyph, new R(tile.X, tile.Y + 5, tile.W, 20), 14, over ? Th.Text : Th.Icon);
         var tr = Gfx.Text(label, 11.5f, 500, tile.W - 8);
-        Gfx.Draw(tr, Gfx.Snap(tile.X + (tile.W - tr.W) / 2), tile.Y + 29, over ? Th.Text : Th.Sub);
+        Gfx.Draw(tr, Gfx.Snap(tile.X + (tile.W - tr.W) / 2), tile.Y + 27, over ? Th.Text : Th.Sub);
         if (UI.Click(id, tile)) onClick();
     }
 
@@ -812,12 +977,18 @@ public sealed class ShortsPage : IPage
             return;
         }
 
-        float tw = view.W - 54;
+        float tw = MathF.Max(80, view.W - 54);
         float totalH = 12;
-        foreach (var c in _comments)
+        for (int i = 0; i < _comments.Count; i++)
         {
-            var tr = Gfx.Text(c.Text, 13, 400, tw, 4);
-            totalH += 22 + tr.H + 26;
+            var row = _comments[i];
+            if (row.H <= 0 || MathF.Abs(row.W - tw) > 1f)
+            {
+                var tr = Gfx.Text(row.C.Text, 13, 400, tw, 4);
+                row.H = 22 + tr.H + 24;
+                if (tr.Layout != null) row.W = tw;
+            }
+            totalH += row.H;
         }
         if (_commentTok != null || _commentsLoading) totalH += 44;
 
@@ -825,11 +996,12 @@ public sealed class ShortsPage : IPage
         float cy = view.Y - scroll;
         for (int i = 0; i < _comments.Count; i++)
         {
-            var c = _comments[i];
-            var tr = Gfx.Text(c.Text, 13, 400, tw, 4);
-            float rh = 22 + tr.H + 26;
+            var row = _comments[i];
+            var c = row.C;
+            float rh = row.H;
             if (cy + rh > view.Y - 20 && cy < view.Bottom + 20)
             {
+                var tr = Gfx.Text(c.Text, 13, 400, tw, 4);
                 Cards.Avatar(view.X, cy + 2, 30, c.Avatar, c.Author.TrimStart('@'));
                 float tx = view.X + 40;
                 var au = Gfx.Draw(c.Author, tx, cy, 12.5f, Th.Text, 600, tw - 60);
