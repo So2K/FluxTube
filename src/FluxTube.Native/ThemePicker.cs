@@ -91,25 +91,52 @@ public static class ThemePicker
     public static void DrawMiniature(Theme t, R r, bool useAccentOverride = true)
     {
         var p = Themes.Preview(t, useAccentOverride);
-        Gfx.Fill(r, p.Bg, 11);
+        float cr = t.DefaultCorners == "sharp" ? 2f : t.DefaultCorners == "round" ? 14f : 11f;
+        Gfx.Fill(r, p.Bg, cr);
         Gfx.PushClip(r);
-        Gfx.Fill(new R(r.X + 8, r.Y + 7, 12, 8), p.Brand, 2.5f);
-        Gfx.Fill(new R(r.X + 24, r.Y + 8, 20, 5), p.Text, 2);
-        Gfx.Fill(new R(r.X + r.W / 2 - 30, r.Y + 6, 60, 10), p.Card, 5);
-        Gfx.Circle(r.Right - 12, r.Y + 11, 4.5f, p.Sub);
-        for (int i = 0; i < 4; i++) Gfx.Fill(new R(r.X + 8, r.Y + 26 + i * 15, 9, 9), i == 0 ? p.Text : p.Sub, 2.5f);
-        float gx = r.X + 26, gw = (r.W - 26 - 8 - 2 * 6) / 3;
+
+        // Signature backdrop hint inside the miniature
+        uint b2 = t.Brand2 != 0 ? t.Brand2 : p.Brand;
+        if (t.DefaultBackdrop == "orbital")
+        {
+            Gfx.Circle(r.X - r.W * 0.14f, r.Y + r.H * 0.54f, r.H * 0.68f, Gfx.Fade(p.Brand, 0.28f));
+            Gfx.Circle(r.X - r.W * 0.17f, r.Y + r.H * 0.54f, r.H * 0.63f, p.Bg);
+        }
+        else if (t.DefaultBackdrop is "neon" or "kawaii" or "mesh")
+        {
+            Gfx.Circle(r.X + 18, r.Y + 18, 44, Gfx.Fade(p.Brand, t.Light ? 0.14f : 0.18f));
+            Gfx.Circle(r.Right - 18, r.Bottom - 16, 46, Gfx.Fade(b2, t.Light ? 0.14f : 0.18f));
+        }
+
+        // Topbar & Sidebar tinted with Theme.Panel (so Kawaii pink sidebar & dark game UIs show unmistakably!)
+        Gfx.Fill(new R(r.X, r.Y, r.W, 20), Gfx.Fade(t.Panel, 0.94f));
+        Gfx.Fill(new R(r.X, r.Y + 20, 22, r.H - 20), Gfx.Fade(t.Panel, 0.92f));
+
+        Gfx.Fill(new R(r.X + 6, r.Y + 6, 12, 8), p.Brand, t.DefaultCorners == "sharp" ? 0 : 2.5f);
+        Gfx.Fill(new R(r.X + 24, r.Y + 7, 20, 5), p.Text, 2);
+        Gfx.Fill(new R(r.X + r.W / 2 - 30, r.Y + 5, 60, 10), p.Card, t.DefaultCorners == "sharp" ? 0 : 5f);
+        Gfx.Circle(r.Right - 12, r.Y + 10, 4.5f, p.Sub);
+        for (int i = 0; i < 4; i++) Gfx.Fill(new R(r.X + 7, r.Y + 26 + i * 15, 8, 8), i == 0 ? p.Brand : p.Sub, t.DefaultCorners == "sharp" ? 0 : 2.5f);
+        float gx = r.X + 27, gw = (r.W - 27 - 8 - 2 * 6) / 3;
+        float tileCr = t.DefaultCorners == "sharp" ? 0f : t.DefaultCorners == "round" ? 5f : 3f;
         for (int row = 0; row < 2; row++)
             for (int c = 0; c < 3; c++)
             {
-                float cx = gx + c * (gw + 6), cy = r.Y + 24 + row * 40;
-                Gfx.Fill(new R(cx, cy, gw, gw * 9 / 16), p.Card, 3);
+                float cx = gx + c * (gw + 6), cy = r.Y + 25 + row * 38;
+                var tr = new R(cx, cy, gw, gw * 9 / 16);
+                if (t.DefaultCardStyle == "brutal")
+                    Gfx.Fill(new R(tr.X + 2, tr.Y + 2, tr.W, tr.H), Gfx.Fade(t.Light ? 0xFF000000 : 0xFFFFFFFF, 0.28f), 0);
+                Gfx.Fill(tr, p.Card, tileCr);
+                if (t.DefaultCardStyle == "dashed") Gfx.StrokeDashed(tr, Gfx.Fade(p.Brand, 0.55f), tileCr, 0.9f);
+                else if (t.DefaultCardStyle == "brutal") Gfx.Stroke(tr, Gfx.Fade(t.Light ? 0xFF000000 : 0xFFFFFFFF, 0.7f), 0, 1f);
+                else if (t.DefaultCardStyle == "neon") Gfx.Stroke(tr, Gfx.Fade(b2, 0.65f), tileCr, 0.9f);
+                else if (t.DefaultCardStyle == "framed") Gfx.Stroke(tr, Gfx.Fade(p.Text, 0.24f), tileCr, 0.8f);
                 if (row == 0 && c == 1) Gfx.Fill(new R(cx + 2, cy + gw * 9 / 16 - 2.5f, gw * 0.6f, 2), p.Brand, 1);
                 Gfx.Fill(new R(cx, cy + gw * 9 / 16 + 3, gw * 0.9f, 3), p.Text, 1.5f);
                 Gfx.Fill(new R(cx, cy + gw * 9 / 16 + 8, gw * 0.55f, 2.5f), p.Sub, 1.2f);
             }
         var bw = 34f;
-        Gfx.Fill(new R(r.Right - bw - 8, r.Bottom - 15, bw, 9), p.Brand, 4.5f);
+        Gfx.Fill(new R(r.Right - bw - 8, r.Bottom - 15, bw, 9), p.Brand, t.DefaultCorners == "sharp" ? 0 : 4.5f);
         Gfx.Fill(new R(r.Right - bw - 2, r.Bottom - 12, bw - 12, 3), p.OnBrand, 1.5f);
         Gfx.PopClip();
     }
@@ -174,7 +201,7 @@ public static class ThemeCodeEditor
         basis ??= Themes.Current;
         var isCustom = Themes.IsCustom(basis.Name);
         _editingCustomName = isCustom ? basis.Name : null;
-        var code = Themes.ExportCode(basis, isCustom ? basis.Name : basis.Name + " Custom").Replace("\n", "\r\n");
+        var code = Themes.ExportCode(basis, isCustom || basis.Name.EndsWith(" Remix") ? basis.Name : basis.Name + " Custom").Replace("\n", "\r\n");
 
         if (_edit == null)
         {
@@ -253,7 +280,7 @@ public static class ThemeCodeEditor
 
         float pad = 20, x = card.X + pad, y = card.Y + 16, innerW = card.W - pad * 2;
         Gfx.Draw(L.T("Редактор темы (код)", "Theme Code Editor"), x, y, 18, Th.Text, 600);
-        Gfx.Draw(L.T("JSON или строки вида bg: #0A0D16  ·  Ctrl+Enter — сохранить", "JSON or key: #RRGGBB lines  ·  Ctrl+Enter to save"), x, y + 24, 12, Th.Sub);
+        Gfx.Draw(L.T("Цвета + brand2 + backdrop/pattern/corners/cardStyle/font/neonGlow  ·  Ctrl+Enter — сохранить", "Colors + brand2 + backdrop/pattern/corners/cardStyle/font/neonGlow  ·  Ctrl+Enter to save"), x, y + 24, 12, Th.Sub);
         if (UI.IconButton(UI.Id("tce:close"), new R(card.Right - 46, y, 32, 32), Th.Close, 12, Th.Sub)) { Close(); return; }
         y += 50;
 

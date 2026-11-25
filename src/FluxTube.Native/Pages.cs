@@ -133,7 +133,18 @@ public static class Cards
     {
         float x = card.X, y = card.Y, cardW = card.W;
         var over = UI.Hover(card);
-        var glow = UI.Glow(id, card.Inset(-7, -7), 14, over);
+        var cardFrame = card.Inset(-6, -6);
+        float thumbRad = Gfx.Corner(12);
+        uint behind;
+        if (AppSettings.Current.UiCardStyle != "clean")
+        {
+            Gfx.DrawCardFrame(cardFrame, 14, over, out behind);
+        }
+        else
+        {
+            var glow = UI.Glow(id, card.Inset(-7, -7), Gfx.Corner(14), over);
+            behind = UI.GlowOn(Th.Bg, glow);
+        }
         if (v.IsChannel)
         {
             var d = MathF.Min(thumbH - 12, cardW * 0.5f);
@@ -147,11 +158,10 @@ public static class Cards
         }
         if (v.PlaylistId != null)
         {
-            Gfx.Fill(new R(x + 16, y - 6, cardW - 32, 8), Th.Track, 6);
-            Gfx.Fill(new R(x + 8, y - 3, cardW - 16, 8), Gfx.Mix(Th.Track, Th.Card, 0.5f), 7);
+            Gfx.Fill(new R(x + 16, y - 6, cardW - 32, 8), Th.Track, Gfx.Corner(6));
+            Gfx.Fill(new R(x + 8, y - 3, cardW - 16, 8), Gfx.Mix(Th.Track, Th.Card, 0.5f), Gfx.Corner(7));
         }
         var thumbR = new R(x, y, cardW, thumbH);
-        var behind = UI.GlowOn(Th.Bg, glow);
         bool wantPreview = over && v.PlaylistId == null && !v.IsLive && v.VideoId.Length == 11;
         if (wantPreview)
         {
@@ -161,23 +171,23 @@ public static class Cards
             if (hSec >= 0.35)
             {
                 // Real hardware-decoded muted HD live video preview (hq720.jpg stays underneath until 1st frame renders!)
-                PreviewPlayer.Want(v.VideoId, thumbR, Gfx.Clip, 12);
+                PreviewPlayer.Want(v.VideoId, thumbR, Gfx.Clip, thumbRad);
                 bool liveReady = PreviewPlayer.IsReadyFor(v.VideoId);
-                Thumb(thumbR, v, true, 12, badge: !liveReady, behind: behind);
+                Thumb(thumbR, v, true, thumbRad, badge: !liveReady, behind: behind);
                 if (!liveReady)
                 {
                     var pr = Gfx.Text("HD", 10.5f, 700);
                     var pb = new R(thumbR.X + 8, thumbR.Y + 8, pr.W + 12, pr.H + 4);
-                    Gfx.Fill(pb, Gfx.Fade(0xFF0A0A0E, 0.72f), 5);
+                    Gfx.Fill(pb, Gfx.Fade(0xFF0A0A0E, 0.72f), Gfx.Corner(5));
                     Gfx.Draw(pr, pb.X + 6, pb.Y + 2, 0xFFFFFFFF);
                 }
             }
-            else Thumb(thumbR, v, true, 12, behind: behind);
+            else Thumb(thumbR, v, true, thumbRad, behind: behind);
         }
         else
         {
             if (_previewCardId == id && !over) _previewCardId = 0;
-            Thumb(thumbR, v, true, 12, behind: behind);
+            Thumb(thumbR, v, true, thumbRad, behind: behind);
         }
 
         float tx = x, tw = cardW;

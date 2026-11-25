@@ -274,9 +274,24 @@ public sealed class SettingsPage : IPage
     private static readonly (string Key, string Ru, string En)[] ShortsAdModes =
         [("off", "Выкл", "Off"), ("standard", "Стандарт", "Standard"), ("max", "Максимум", "Max")];
     private static readonly (string Key, string Ru, string En)[] SeasonalEffects =
-        [("none", "Выкл", "Off"), ("newyear", "❄ Новый год", "❄ New Year"), ("halloween", "🎃 Хэллоуин", "🎃 Halloween")];
+        [("none", "Выкл", "Off"), ("newyear", "❄ Новый год", "❄ New Year"), ("halloween", "🎃 Хэллоуин", "🎃 Halloween"), ("kawaii", "🌸 Кавай", "🌸 Kawaii"), ("neon", "⚡ Неон", "⚡ Neon")];
     private static readonly (string Key, string Ru, string En)[] FrostedModes =
-        [("off", "Выкл", "Off"), ("soft", "Лёгкое", "Light"), ("matte", "Матовое стекло", "Matte glass")];
+    [
+        ("off", "Чистый", "Solid"),
+        ("soft", "Лёгкое стекло", "Soft glass"),
+        ("matte", "Матовое стекло", "Matte glass"),
+        ("mesh", "Градиент", "Mesh aura"),
+        ("kawaii", "Кавай-пастель", "Kawaii pastel"),
+        ("neon", "Неон-аура", "Neon aura"),
+        ("noir", "Нуар / Хоррор", "Noir / Horror"),
+        ("orbital", "Орбита (Космос)", "Orbital Space"),
+    ];
+    private static readonly (string Key, string Ru, string En)[] CornerStyles =
+        [("sharp", "Острые (0px)", "Sharp (0px)"), ("normal", "Обычные", "Normal"), ("round", "Мягкие", "Rounded")];
+    private static readonly (string Key, string Ru, string En)[] CardStyles =
+        [("clean", "Чистый", "Clean"), ("framed", "Рамка (RE / Alien)", "Framed (RE / Alien)"), ("dashed", "Пунктир (Кавай)", "Dashed (Kawaii)"), ("brutal", "Брутализм (Ч/Б)", "Brutalist"), ("neon", "Неон-контур", "Neon Rim")];
+    private static readonly (string Key, string Ru, string En)[] FontPresets =
+        [("segoe", "Segoe UI", "Segoe UI"), ("serif", "Georgia (Requiem)", "Georgia (Serif)"), ("tech", "Bahnschrift (Village)", "Bahnschrift (Tech)"), ("mono", "Consolas (Neon)", "Consolas (Mono)"), ("soft", "Trebuchet (Kawaii)", "Trebuchet (Soft)"), ("comic", "Comic Sans", "Comic Sans")];
     private static readonly (string Code, string Ru, string En)[] AudioLangs =
     [
         ("", "Оригинал (как на YouTube)", "Original (YouTube default)"),
@@ -362,6 +377,52 @@ public sealed class SettingsPage : IPage
     {
         var r = Row(label, hint, hint == null ? 50 : 58, 90);
         if (Visible(r.Y, r.H) && UI.Toggle(UI.Id("set:" + key), new R(r.X, r.Y, r.W - 16, r.H), value)) { set(!value); Saved(); }
+    }
+
+    /// <summary>Wrapping pill selector inside a frosted settings card — never crowds or clips at any zoom/language.</summary>
+    private void PillGridRow(string key, string title, string hint, (string Key, string Ru, string En)[] items, string activeKey, Action<string> onPick)
+    {
+        float pad = 16, maxW = _w - pad * 2, pillH = 30, gap = 7;
+        // Measure total wrapped height first
+        float cx = 0; int rows = 1;
+        for (int i = 0; i < items.Length; i++)
+        {
+            float pw = UI.PillWidth(null, L.T(items[i].Ru, items[i].En)) - 4;
+            if (cx > 0 && cx + pw > maxW) { cx = 0; rows++; }
+            cx += pw + gap;
+        }
+        float h = 50 + rows * (pillH + gap) + 6;
+        var r = new R(_x, _y, _w, h);
+        if (Visible(_y, h))
+        {
+            Gfx.FillFrosted(r, Th.Card, 10, opacity: 0.46f, border: true);
+            var t = Gfx.Draw(title, _x + pad, _y + 9, 14, Th.Text, 500, maxW);
+            Gfx.Draw(hint, _x + pad, _y + 9 + t.H + 1, 12, Th.Sub, 400, maxW);
+            float px = _x + pad, py = _y + 48;
+            for (int i = 0; i < items.Length; i++)
+            {
+                var it = items[i];
+                var lbl = L.T(it.Ru, it.En);
+                float pw = UI.PillWidth(null, lbl) - 4;
+                if (px > _x + pad && px + pw > _x + _w - pad) { px = _x + pad; py += pillH + gap; }
+                bool on = activeKey == it.Key;
+                var br = new R(px, py, pw, pillH);
+                Gfx.Fill(br, on ? Th.Brand : Th.A(0.10f), Gfx.Corner(pillH / 2));
+                if (on && AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(br, Gfx.Corner(pillH / 2), Th.Brand, 0.65f);
+                if (!on) UI.Glow(UI.Id("set:" + key + ":" + it.Key), br, Gfx.Corner(pillH / 2), UI.Hover(br));
+                var tr = Gfx.Text(lbl, 12.5f, on ? 600 : 500);
+                Gfx.Draw(tr, br.X + (br.W - tr.W) / 2, Gfx.Snap(br.Y + (br.H - tr.H) / 2), on ? Th.OnBrand : Th.Text);
+                if (UI.Click(UI.Id("set:" + key + ":" + it.Key), br))
+                {
+                    var picked = it.Key;
+                    onPick(picked);
+                    Saved();
+                    App.Invalidate();
+                }
+                px += pw + gap;
+            }
+        }
+        _y += h + 6;
     }
 
     private void ChoiceRow(string key, string label, string current, IEnumerable<string> options, Action<string> set)
@@ -485,42 +546,165 @@ public sealed class SettingsPage : IPage
 
         _y += ThemePicker.Draw(_x, _y, _w);
 
-        var customThemeRow = Row(L.T("Свои темы (редактор кода)", "Custom themes (code editor)"),
-            L.T("Пишите темы в JSON или key: #RRGGBB с живым превью · ПКМ по любой теме открывает её код", "Author themes in JSON or key: #RRGGBB with live preview · Right-click any theme to view its code"), 58, 340);
+        var customThemeRow = Row(L.T("Конструктор и мутация тем", "Theme studio & mutator"),
+            L.T("Мутируйте в 1 клик, сохраните текущий вид как тему или правьте код (ПКМ по теме)", "Mutate in 1 click, save your current look as a theme, or edit code (right-click theme)"), 58, 415);
         if (Visible(customThemeRow.Y, customThemeRow.H))
         {
             float tx = customThemeRow.Right - 14;
-            var tdLbl = L.T("Папка тем", "Themes folder");
+            var tdLbl = L.T("Папка", "Folder");
             var tdW = UI.PillWidth(Th.Folder, tdLbl); tx -= tdW;
             if (UI.Pill(UI.Id("set:tdir"), tx, customThemeRow.Y + 12, 34, Th.Folder, tdLbl, out _))
                 W.Open(Themes.CustomDir);
             tx -= 8;
-            var teLbl = L.T("Создать / код темы…", "Create / edit code…");
+            var teLbl = L.T("Код / сохранить вид…", "Code / save look…");
             var teW = UI.PillWidth(Th.Add, teLbl); tx -= teW;
-            if (UI.Pill(UI.Id("set:tedit"), tx, customThemeRow.Y + 12, 34, Th.Add, teLbl, out _, accent: true))
-                App.Post(() => ThemeCodeEditor.Show());
-        }
-
-        var frostRow = Row(L.T("Матовое стекло на фон", "Frosted glass surface"),
-            L.T("Приятная шероховатая текстура матового стекла и мягкий рассеянный свет на любую тему", "Subtle matte glass texture and soft diffused lighting on any theme"), 58, 360);
-        if (Visible(frostRow.Y, frostRow.H))
-        {
-            float fx = frostRow.Right - 14;
-            for (int fi = FrostedModes.Length - 1; fi >= 0; fi--)
+            if (UI.Pill(UI.Id("set:tedit"), tx, customThemeRow.Y + 12, 34, Th.Add, teLbl, out _))
+                App.Post(() => ThemeCodeEditor.Show(Themes.CaptureCurrentLook()));
+            tx -= 8;
+            var mutLbl = L.T("Мутировать", "Mutate");
+            var mutW = UI.PillWidth(Th.Refresh, mutLbl); tx -= mutW;
+            if (UI.Pill(UI.Id("set:tmut"), tx, customThemeRow.Y + 12, 34, Th.Refresh, mutLbl, out _, accent: true))
             {
-                var (fk, fru, fen) = FrostedModes[fi];
-                var fl = L.T(fru, fen);
-                var fw = UI.PillWidth(null, fl); fx -= fw;
-                bool on = s.FrostedGlass == fk;
-                if (UI.Pill(UI.Id("set:frost:" + fk), fx, frostRow.Y + 12, 34, null, fl, out _, accent: on))
-                {
-                    s.FrostedGlass = fk;
-                    Saved();
-                    App.Invalidate();
-                }
-                fx -= 8;
+                Themes.MutateCurrent();
+                Shell.Toast(L.T("Тема мутирована! Нажмите «Код / сохранить вид…», чтобы сохранить её.", "Theme mutated! Click \"Code / save look…\" to save it."), Th.Good, 2800);
             }
         }
+
+        ToggleRow("tautostyle", L.T("Авто-стиль при выборе темы", "Auto-apply theme style preset"), s.ThemeAutoStyle, v => s.ThemeAutoStyle = v,
+            L.T("Включено: темы вроде Ультра Кавай, MiSide, RE Requiem и Неон сами включают свой фон, узор, углы и шрифт", "On: themes like Ultra Kawaii, MiSide, RE Requiem & Neon automatically set their backdrop, pattern, corners & font"));
+
+        PillGridRow("frost", L.T("Стиль фона и стекла", "Backdrop & glass style"),
+            L.T("Запекается на GPU один раз (~0.04 мс/кадр). Комбинируется с обоями и узорами.", "Pre-baked once on GPU (~0.04 ms/frame). Stacks freely with wallpapers & patterns."),
+            FrostedModes, s.FrostedGlass, v => s.FrostedGlass = v);
+
+        PillGridRow("bgpat", L.T("Узор (паттерн) на фон", "Background pattern"),
+            L.T("Бесшовный векторный GPU-тайл (~0.02 мс/кадр, 0% CPU). Работает на стекле, обоях и чистом фоне.", "Seamless vector GPU tile (~0.02 ms/frame, 0% CPU). Works on glass, wallpapers, and solid backgrounds."),
+            BgEngine.Patterns, s.BgPattern, v => s.BgPattern = v);
+
+        if (!string.IsNullOrEmpty(s.BgPattern) && s.BgPattern != "none")
+        {
+            var patCfgRow = Row(L.T("Настройки узора", "Pattern tuning"),
+                L.T("Прозрачность, размер тайла и расцветка узора (двойной неон использует 2 акцента темы)", "Opacity, tile size, and pattern coloring (Dual Neon alternates both theme accents)"), 58, 520);
+            if (Visible(patCfgRow.Y, patCfgRow.H))
+            {
+                float px = patCfgRow.Right - 14;
+                // Tint pills
+                for (int ti = BgEngine.PatternTints.Length - 1; ti >= 0; ti--)
+                {
+                    var (tk, tru, ten) = BgEngine.PatternTints[ti];
+                    var tl = L.T(tru, ten);
+                    var tw = UI.PillWidth(null, tl) - 6; px -= tw;
+                    bool on = s.BgPatternTint == tk;
+                    if (UI.Pill(UI.Id("set:ptint:" + tk), px, patCfgRow.Y + 13, 32, null, tl, out _, accent: on))
+                    { s.BgPatternTint = tk; Saved(); App.Invalidate(); }
+                    px -= 6;
+                }
+                px -= 6;
+                // Scale pills S/M/L
+                for (int si = BgEngine.PatternScales.Length - 1; si >= 0; si--)
+                {
+                    var (sc, slbl) = BgEngine.PatternScales[si];
+                    float swBtn = 32; px -= swBtn;
+                    bool on = MathF.Abs(s.BgPatternScale - sc) < 0.12f;
+                    var sr = new R(px, patCfgRow.Y + 13, swBtn, 32);
+                    Gfx.Fill(sr, on ? Th.Brand : Th.A(0.10f), Gfx.Corner(16));
+                    if (!on) UI.Glow(UI.Id("set:psc:" + si), sr, Gfx.Corner(16), UI.Hover(sr));
+                    var str = Gfx.Text(slbl, 12, 600);
+                    Gfx.Draw(str, sr.X + (sr.W - str.W) / 2, sr.Y + (sr.H - str.H) / 2, on ? Th.OnBrand : Th.Text);
+                    if (UI.Click(UI.Id("set:psc:" + si), sr)) { s.BgPatternScale = sc; Saved(); App.Invalidate(); }
+                    px -= 5;
+                }
+                px -= 6;
+                // Opacity stepper (- % +)
+                var opPlus = new R(px - 30, patCfgRow.Y + 14, 30, 30);
+                Gfx.Fill(opPlus, Th.A(0.10f), 15);
+                if (UI.IconButton(UI.Id("set:pop+"), opPlus, Th.Add, 11)) { s.BgPatternOpacity = Math.Clamp(s.BgPatternOpacity + 0.04f, 0.04f, 0.55f); Saved(); App.Invalidate(); }
+                px -= 36;
+                var opTxt = Gfx.Text($"{(int)MathF.Round(s.BgPatternOpacity * 100)}%", 12.5f, 600);
+                Gfx.Draw(opTxt, px - opTxt.W, patCfgRow.Y + (patCfgRow.H - opTxt.H) / 2, Th.Text);
+                px -= opTxt.W + 8;
+                var opMinus = new R(px - 30, patCfgRow.Y + 14, 30, 30);
+                Gfx.Fill(opMinus, Th.A(0.10f), 15);
+                if (UI.IconButton(UI.Id("set:pop-"), opMinus, "\uE738", 11)) { s.BgPatternOpacity = Math.Clamp(s.BgPatternOpacity - 0.04f, 0.04f, 0.55f); Saved(); App.Invalidate(); }
+            }
+        }
+
+        var hasWall = !string.IsNullOrWhiteSpace(s.BgImagePath) && File.Exists(s.BgImagePath);
+        var wallHint = hasWall
+            ? L.T($"Файл: {Path.GetFileName(s.BgImagePath)} · Загружается в GPU 1 раз (~0.04 мс/кадр)", $"File: {Path.GetFileName(s.BgImagePath)} · Cached on GPU once (~0.04 ms/frame)")
+            : L.T("Поставьте любое фото (PNG/JPG/WEBP) на фон вместо стекла или вместе со стеклом и узорами", "Use any image (PNG/JPG/WEBP) as wallpaper instead of glass or layered with glass & patterns");
+        var wallRow = Row(L.T("Своя картинка на фон (обои)", "Custom background image (wallpaper)"), wallHint, 58, 300);
+        if (Visible(wallRow.Y, wallRow.H))
+        {
+            float wx = wallRow.Right - 14;
+            if (hasWall)
+            {
+                var clrLbl = L.T("Убрать", "Clear");
+                var clrW = UI.PillWidth(Th.Close, clrLbl); wx -= clrW;
+                if (UI.Pill(UI.Id("set:wallclr"), wx, wallRow.Y + 12, 34, Th.Close, clrLbl, out _))
+                { s.BgImagePath = ""; BgEngine.InvalidateWallpaper(); Saved(); }
+                wx -= 8;
+            }
+            var pickLbl = L.T("Выбрать фото…", "Choose image…");
+            var pickW = UI.PillWidth(Th.Folder, pickLbl); wx -= pickW;
+            if (UI.Pill(UI.Id("set:wallpick"), wx, wallRow.Y + 12, 34, Th.Folder, pickLbl, out _, accent: !hasWall))
+            {
+                string imgFilter = L.T("Картинки (PNG, JPG, WEBP, BMP)\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0Все файлы\0*.*\0\0",
+                    "Images (PNG, JPG, WEBP, BMP)\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0All files\0*.*\0\0");
+                App.Post(() => Dialogs.PickFileAsync(imgFilter, file =>
+                {
+                    s.BgImagePath = file;
+                    BgEngine.InvalidateWallpaper();
+                    Saved();
+                    Shell.Toast(L.T("Обои применены!", "Wallpaper applied!"), Th.Good, 2000);
+                }));
+            }
+        }
+        if (hasWall)
+        {
+            var wallCfg = Row(L.T("Яркость и размытие обоев", "Wallpaper opacity & blur"),
+                L.T("Размытие запекается на GPU один раз — 0% нагрузки при прокрутке", "Blur is pre-baked once on GPU — zero cost during scrolling"), 56, 460);
+            if (Visible(wallCfg.Y, wallCfg.H))
+            {
+                float wx = wallCfg.Right - 14;
+                for (int bi = BgEngine.WallpaperBlurs.Length - 1; bi >= 0; bi--)
+                {
+                    var (bv, bru, ben) = BgEngine.WallpaperBlurs[bi];
+                    var bl = L.T(bru, ben);
+                    var bw = UI.PillWidth(null, bl) - 4; wx -= bw;
+                    bool on = MathF.Abs(s.BgImageBlur - bv) < 2f;
+                    if (UI.Pill(UI.Id("set:wblur:" + bi), wx, wallCfg.Y + 12, 32, null, bl, out _, accent: on))
+                    { s.BgImageBlur = bv; Saved(); App.Invalidate(); }
+                    wx -= 6;
+                }
+                wx -= 8;
+                var wpPlus = new R(wx - 30, wallCfg.Y + 13, 30, 30);
+                Gfx.Fill(wpPlus, Th.A(0.10f), 15);
+                if (UI.IconButton(UI.Id("set:wop+"), wpPlus, Th.Add, 11)) { s.BgImageOpacity = Math.Clamp(s.BgImageOpacity + 0.08f, 0.10f, 0.95f); Saved(); App.Invalidate(); }
+                wx -= 36;
+                var wopTxt = Gfx.Text($"{(int)MathF.Round(s.BgImageOpacity * 100)}%", 12.5f, 600);
+                Gfx.Draw(wopTxt, wx - wopTxt.W, wallCfg.Y + (wallCfg.H - wopTxt.H) / 2, Th.Text);
+                wx -= wopTxt.W + 8;
+                var wpMinus = new R(wx - 30, wallCfg.Y + 13, 30, 30);
+                Gfx.Fill(wpMinus, Th.A(0.10f), 15);
+                if (UI.IconButton(UI.Id("set:wop-"), wpMinus, "\uE738", 11)) { s.BgImageOpacity = Math.Clamp(s.BgImageOpacity - 0.08f, 0.10f, 0.95f); Saved(); App.Invalidate(); }
+            }
+        }
+
+        PillGridRow("corners", L.T("Форма углов интерфейса", "UI corner geometry"),
+            L.T("Острые 0px (RE / Alien / Монохром), стандартные или мягкие скруглённые (Кавай / MiSide)", "Sharp 0px (RE / Alien / Swiss), standard, or bubbly rounded (Kawaii / MiSide)"),
+            CornerStyles, s.UiCornerStyle, v => s.UiCornerStyle = v);
+
+        PillGridRow("cards", L.T("Стиль рамок и карточек", "Card & panel frame style"),
+            L.T("Пунктирные рамки как в Kawaii, строгие рамки RE/Alien, ч/б брутализм или неоновый контур", "Kawaii dashed borders, crisp RE/Alien frames, Swiss brutalist shadows, or neon rim"),
+            CardStyles, s.UiCardStyle, v => s.UiCardStyle = v);
+
+        PillGridRow("font", L.T("Шрифт интерфейса", "UI typography font"),
+            L.T("Мгновенно меняет шрифт всего приложения без перезапуска", "Switches typography across the entire app instantly without restart"),
+            FontPresets, s.UiFont, v => { s.UiFont = v; Gfx.ClearTextCache(); });
+
+        ToggleRow("neonglow", L.T("Неоновое свечение интерфейса (Neon Glow)", "UI Neon Glow"), s.UiNeonGlow, v => s.UiNeonGlow = v,
+            L.T("Дёшевый GPU-ореол вокруг активных кнопок, поиска и индикаторов (~0.01 мс/кадр)", "Ultra-cheap GPU neon halo around active pills, search bar & indicators (~0.01 ms/frame)"));
 
         ToggleRow("mblur", L.T("Motion Blur интерфейса (GPU)", "UI Motion Blur (GPU)"), s.UiMotionBlur, v => s.UiMotionBlur = v,
             L.T("Аппаратное направленное размытие в движении при скролле, переходах страниц и свайпе Shorts", "Hardware-accelerated directional motion blur on scrolling, page transitions, and Shorts swipes"));
@@ -698,26 +882,9 @@ public sealed class SettingsPage : IPage
             _y += gh + 8;
         }
 
-        var effRow = Row(L.T("Сезонные эффекты (на любую тему)", "Seasonal effects (any theme)"),
-            L.T("Гирлянда во всю ширину, снежинки со звёздочками или хэллоуинские тыквы и летучие мыши", "Full-width string lights, snowflakes & stars, or Halloween pumpkins & bats"), 58, 340);
-        if (Visible(effRow.Y, effRow.H))
-        {
-            float ex = effRow.Right - 14;
-            for (int ei = SeasonalEffects.Length - 1; ei >= 0; ei--)
-            {
-                var (ek, eru, een) = SeasonalEffects[ei];
-                var el = L.T(eru, een);
-                var ew = UI.PillWidth(null, el);
-                ex -= ew;
-                bool on = s.SeasonalEffect == ek;
-                if (UI.Pill(UI.Id("set:eff:" + ek), ex, effRow.Y + 12, 34, null, el, out _, accent: on))
-                {
-                    s.SeasonalEffect = ek;
-                    Saved();
-                }
-                ex -= 8;
-            }
-        }
+        PillGridRow("eff", L.T("Атмосферные и сезонные эффекты", "Ambient & seasonal effects"),
+            L.T("Гирлянда и снег, Хэллоуин, лепестки Кавай или неоновые искры (0% нагрузки когда выключено)", "Snow & string lights, Halloween, Kawaii petals, or Neon laser sparks (0% idle cost when off)"),
+            SeasonalEffects, s.SeasonalEffect, v => s.SeasonalEffect = v);
 
         Section(L.T("Плеер", "Player"));
         ChoiceRow("pq", L.T("Качество по умолчанию", "Default quality"), s.PlayerQuality, AppSettings.Qualities.Where(q => q != "audio"), v => { s.PlayerQuality = v; Resolver.Instance.Invalidate(); });

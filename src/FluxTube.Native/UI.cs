@@ -7,7 +7,7 @@ namespace FluxTube;
 public static class Th
 {
     public static uint Bg = 0xFF0E0E11, Panel = 0xFF151519, Card = 0xFF1C1C22, Hover = 0x14FFFFFF, Press = 0x22FFFFFF,
-        Text = 0xFFF2F2F4, Sub = 0xFFA6A6B2, Dim = 0xFF6C6C78, Brand = 0xFFFF3355, Line = 0x18FFFFFF, Badge = 0xD9000000,
+        Text = 0xFFF2F2F4, Sub = 0xFFA6A6B2, Dim = 0xFF6C6C78, Brand = 0xFFFF3355, Brand2 = 0xFF7B61FF, Line = 0x18FFFFFF, Badge = 0xD9000000,
         Thumb = 0xFF1E1E25, Good = 0xFF7BD88F, Warn = 0xFFFFC857,
         Field = 0xFF1A1A20, Menu = 0xFF232329, OnBrand = 0xFFFFFFFF, Ink = 0xFFFFFFFF, Icon = 0xFFD8D8DE, Track = 0xFF3A3A44;
     public static bool Light;
@@ -194,6 +194,7 @@ public static class UI
         var r = new R(x, y, w, h);
         var f = fg ?? (accent ? Th.OnBrand : Th.Text);
         Gfx.Fill(r, accent ? Th.Brand : bg != 0 ? bg : Th.A(0.12f), h / 2);
+        if (accent && Services.AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(r, h / 2, Th.Brand, 0.72f);
         Glow(id, r, h / 2, Hover(r));
         var cx = x + 14;
         if (glyph != null) { Gfx.Icon(glyph, new R(cx, y, 18, h), 15, f); cx += 18 + 6; }

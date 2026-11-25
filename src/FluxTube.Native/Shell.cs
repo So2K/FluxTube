@@ -569,7 +569,7 @@ public static class Shell
 
     private static void DrawTabs(R strip)
     {
-        Gfx.FillFrosted(strip, Th.Bg, 0, opacity: 0.84f);
+        Gfx.FillFrosted(strip, Th.Panel, 0, opacity: 0.84f);
         Gfx.Fill(new R(strip.X, strip.Bottom - 1, strip.W, 1), Th.Line);
         const float addW = 28;
         float xStart = strip.X + 24;
@@ -1072,7 +1072,7 @@ public static class Shell
                 case "--test-chip": ChannelPage.TestChip = v; break;
                 case "--test-pip-alpha": Pip.TestAlpha = int.Parse(v); break;
                 case "--test-autoplay": AppSettings.Current.Autoplay = v == "1"; break;
-                case "--theme": AppSettings.Current.Theme = v; Themes.Load(); break;
+                case "--theme": Themes.Apply(theme: v, save: !App.Test); break;
                 case "--test-menu": App.After(int.Parse(v), () => AccountMenu.Toggle(Gfx.W - 46 * 3 - 8, TopH - 2)); break;
                 case "--test-dsp": App.After(int.Parse(v), AudioStudioPanel.Show); break;
                 case "--test-login": App.After(int.Parse(v), () => LoginModal.Show()); break;
@@ -1682,9 +1682,9 @@ public static class Shell
             UI.Animate();
         }
 
-        // top bar: clean 8px symmetric grid with frosted matte glass sheen
+        // top bar: clean 8px symmetric grid with theme Panel tint (strawberry pink on Kawaii, obsidian on Neon, etc.)
         _topHits.Clear();
-        Gfx.FillFrosted(new R(0, 0, w, TopH), Th.Bg, 0, opacity: 0.84f);
+        Gfx.FillFrosted(new R(0, 0, w, TopH), Th.Panel, 0, opacity: 0.88f);
         var menuR = new R(16, 8, 36, 36);
         _topHits.Add(menuR);
         if (UI.IconButton(UI.Id("sidebar:toggle"), menuR, Th.Hamburger, 15, AppSettings.Current.SidebarCollapsed ? Th.Sub : Th.Text)) App.Post(ToggleSidebar);
@@ -1715,8 +1715,17 @@ public static class Shell
         float contentCenter = sideW + (w - sideW) * 0.5f;
         float searchX = Math.Clamp(contentCenter - sw * 0.5f, logo.Right + 16, MathF.Max(logo.Right + 16, rightEdge - sw - 64));
         _searchBox = new R(Gfx.Snap(searchX), 8, sw, 36);
-        Gfx.Fill(_searchBox, Th.Card, 18);
-        if (_search.Focused) Gfx.Stroke(_searchBox, Gfx.Fade(Th.Brand, 0.8f), 18, 1.2f);
+        float searchRad = Gfx.Corner(18);
+        Gfx.Fill(_searchBox, Th.Card, searchRad);
+        if (_search.Focused)
+        {
+            if (AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(_searchBox, searchRad, Th.Brand, 0.9f);
+            else Gfx.Stroke(_searchBox, Gfx.Fade(Th.Brand, 0.85f), searchRad, 1.35f);
+        }
+        else if (AppSettings.Current.UiCardStyle == "dashed") Gfx.StrokeDashed(_searchBox, Gfx.Fade(Th.Brand, 0.36f), searchRad, 1.2f);
+        else if (AppSettings.Current.UiCardStyle == "brutal") Gfx.Stroke(_searchBox, Gfx.Fade(Th.Ink, 0.7f), searchRad, 1.4f);
+        else if (AppSettings.Current.UiCardStyle == "framed") Gfx.Stroke(_searchBox, Th.Line, searchRad, 1f);
+        else if (AppSettings.Current.UiCardStyle == "neon" && AppSettings.Current.UiNeonGlow) Gfx.Stroke(_searchBox, Gfx.Fade(Th.Brand2, 0.42f), searchRad, 1f);
         _topHits.Add(_searchBox);
         _search.Place(_searchBox, 18, 44);
         if (UI.IconButton(UI.Id("go"), new R(_searchBox.Right - 40, 10, 34, 32), Th.Search, 14, Th.Sub)) App.Post(() => Submit(_search.Text));
@@ -1779,7 +1788,7 @@ public static class Shell
             bool sideMb = Gfx.PushMotionBlur(sideClip, sideVelX, 0f);
             Gfx.PushClip(sideClip);
             float sx = sideW - SideW;
-            Gfx.FillFrosted(new R(sx, TopH, SideW, h - TopH), Th.Bg, 0, opacity: 0.82f);
+            Gfx.FillFrosted(new R(sx, TopH, SideW, h - TopH), Th.Panel, 0, opacity: 0.88f);
             Gfx.Fill(new R(sx + SideW - 1, TopH, 1, h - TopH), Gfx.Fade(Th.Line, 0.7f));
             float y = TopH + 4;
             var tag = _cur?.Tag ?? "";
@@ -1797,7 +1806,12 @@ public static class Shell
             if (sy > y) SideItem(sx, ref sy, Th.Settings, L.T("Настройки", "Settings"), "settings", tag);
             var markA = UI.Anim(UI.Id("sidemark:a"), _markY >= 0 ? 1 : 0, 18);
             if (_markY >= 0) _markShown = UI.Smooth(UI.Id("sidemark:y"), _markY, 20);
-            if (markA > 0.01f) Gfx.Fill(new R(sx + 3, _markShown, 3, 22), Gfx.Fade(Th.Brand, markA), 1.5f);
+            if (markA > 0.01f)
+            {
+                var markR = new R(sx + 3, _markShown, 3, 22);
+                Gfx.Fill(markR, Gfx.Fade(Th.Brand, markA), Gfx.Corner(1.5f));
+                if (AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(markR, Gfx.Corner(1.5f), Th.Brand, 0.7f * markA);
+            }
             _markY = -1;
             Gfx.PopClip();
             Gfx.PopMotionBlur(sideMb);
@@ -1815,6 +1829,8 @@ public static class Shell
         var eff = AppSettings.Current.SeasonalEffect;
         if (eff == "halloween") DrawHalloweenFestive(w, h);
         else if (eff == "newyear") DrawNewYearFestive(w, h);
+        else if (eff == "kawaii") DrawKawaiiAmbient(w, h);
+        else if (eff == "neon") DrawNeonAmbient(w, h);
         UI.DrawAutoScrollIndicator();
         UI.Modal = null;
         DrawTabPreview();
@@ -1828,6 +1844,70 @@ public static class Shell
     private static readonly (float X, float Y, float R, float Spd, float Phase, float Alpha, byte Kind)[] _snow = InitSnow();
     private static readonly uint[] _garlandCols = [0xFFFFD166, 0xFFFF4D6D, 0xFF2EC4B6, 0xFF56CFE1, 0xFFFF9F1C, 0xFF80ED99, 0xFFC77DFF];
     private static readonly uint[] _halloCols = [0xFFFF6D00, 0xFF9D4EDD, 0xFFFFB703, 0xFF70E000, 0xFFFF006E];
+    private static readonly uint[] _kawaiiCols = [0xFFFF7EB6, 0xFFFFB3D9, 0xFFC7A4FF, 0xFF93E5FF, 0xFFFFD6E8, 0xFFFFA8C8];
+
+    /// <summary>Dreamy ultra-cheap kawaii pastel ambient: soft fairy-sparkle ribbon + drifting sakura petals &amp; twinkling anime stars.</summary>
+    private static void DrawKawaiiAmbient(float w, float h)
+    {
+        float t = (UI.Now - UI.StartTick) / 1000f;
+        DrawFullWidthGarland(w, t, _kawaiiCols, 1.8f);
+        for (int i = 0; i < 34; i++)
+        {
+            var f = _snow[i];
+            float y = (f.Y * h + t * (f.Spd * 0.72f)) % (h + 28) - 14;
+            float x = (f.X * w + MathF.Sin(t * 0.85f + f.Phase) * 34f + t * 9f + w * 4f) % w;
+            uint col = _kawaiiCols[i % _kawaiiCols.Length];
+            float a = f.Alpha * (Th.Light ? 0.88f : 0.75f);
+            if (f.Kind == 2)
+            {
+                // Twinkling 4-point pastel anime star
+                float pulse = 0.65f + 0.35f * MathF.Sin(t * 3.1f + f.Phase);
+                float r = f.R * 1.45f;
+                Gfx.Circle(x, y, r * 1.8f, Gfx.Fade(col, 0.14f * a * pulse));
+                Gfx.Fill(new R(x - r, y - 0.7f, r * 2f, 1.4f), Gfx.Fade(col, a * pulse), 0.7f);
+                Gfx.Fill(new R(x - 0.7f, y - r, 1.4f, r * 2f), Gfx.Fade(col, a * pulse), 0.7f);
+                Gfx.Circle(x, y, r * 0.38f, Gfx.Fade(0xFFFFFFFF, a * pulse));
+            }
+            else
+            {
+                // Soft sakura petal oval
+                float pr = 2.6f + f.R * 0.9f;
+                Gfx.Circle(x, y, pr * 1.5f, Gfx.Fade(col, 0.14f * a));
+                Gfx.Fill(new R(x - pr, y - pr * 0.58f, pr * 2f, pr * 1.16f), Gfx.Fade(col, a * 0.86f), pr * 0.58f);
+            }
+        }
+        UI.Animate();
+    }
+
+    /// <summary>Ultra-cheap cyberpunk neon ambient: full-width dual-accent top laser strip + rising neon bokeh sparks.</summary>
+    private static void DrawNeonAmbient(float w, float h)
+    {
+        float t = (UI.Now - UI.StartTick) / 1000f;
+        uint c1 = Th.Brand, c2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
+        // Thin dual-tone pulsing neon plasma rail along the top edge (16 cheap segments)
+        int segs = 16;
+        float segW = w / segs;
+        for (int s = 0; s < segs; s++)
+        {
+            float mix = 0.5f + 0.5f * MathF.Sin(t * 1.6f + s * 0.45f);
+            uint col = Gfx.Mix(c1, c2, mix);
+            Gfx.Fill(new R(s * segW, 0, segW + 1, 2.2f), Gfx.Fade(col, 0.88f));
+            Gfx.Fill(new R(s * segW, 2, segW + 1, 5f), Gfx.Fade(col, 0.16f));
+        }
+        // Slow rising neon sparks
+        for (int i = 0; i < 32; i++)
+        {
+            var f = _snow[i];
+            float y = h - ((f.Y * h + t * (f.Spd * 0.85f)) % (h + 24)) + 12;
+            float x = (f.X * w + MathF.Sin(t * 0.9f + f.Phase) * 20f + w) % w;
+            uint col = (i & 1) == 0 ? c1 : c2;
+            float pulse = 0.55f + 0.45f * MathF.Sin(t * 3.4f + f.Phase);
+            float a = f.Alpha * pulse;
+            Gfx.Circle(x, y, f.R * 2.4f, Gfx.Fade(col, 0.14f * a));
+            Gfx.Circle(x, y, f.R * 0.95f, Gfx.Fade(col, 0.90f * a));
+        }
+        UI.Animate();
+    }
 
     private static (float, float, float, float, float, float, byte)[] InitSnow()
     {

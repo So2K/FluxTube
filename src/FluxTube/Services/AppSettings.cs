@@ -127,8 +127,32 @@ public sealed class AppSettings
     public bool AutoSuspendVideoWhenHidden { get; set; } = false;
     /// <summary>Live audio visualizer style ("bars_wave", "ribbon", "bars", "off").</summary>
     public string VisualizerStyle { get; set; } = "bars_wave";
-    /// <summary>Tactile frosted/matte textured glass backdrop ("off", "soft", "matte").</summary>
+    /// <summary>Backdrop &amp; frosted glass style ("off", "soft", "matte", "mesh", "kawaii", "neon").</summary>
     public string FrostedGlass { get; set; } = "matte";
+    /// <summary>Seamless GPU background pattern overlay ("none", "paws", "lines", "grid", "dots", "waves", "hex", "hearts", "stars", "circuit", "sakura").</summary>
+    public string BgPattern { get; set; } = "none";
+    /// <summary>Background pattern opacity (0.04..0.55).</summary>
+    public float BgPatternOpacity { get; set; } = 0.14f;
+    /// <summary>Background pattern tile scale multiplier (0.7 = S, 1.0 = M, 1.45 = L).</summary>
+    public float BgPatternScale { get; set; } = 1.0f;
+    /// <summary>Background pattern coloring ("theme", "brand", "dual").</summary>
+    public string BgPatternTint { get; set; } = "theme";
+    /// <summary>Optional path to a local custom wallpaper image (PNG/JPG/WEBP/BMP), pre-scaled &amp; cached once on GPU.</summary>
+    public string BgImagePath { get; set; } = "";
+    /// <summary>Custom wallpaper visibility / blend opacity (0.10..0.95).</summary>
+    public float BgImageOpacity { get; set; } = 0.38f;
+    /// <summary>Pre-baked one-shot GPU Gaussian blur radius for custom wallpaper (0 = crisp, 6 = soft, 18 = dreamy).</summary>
+    public float BgImageBlur { get; set; } = 0f;
+    /// <summary>Ultra-cheap neon rim glow on active chrome (search bar, tabs, accent pills, sidebar marker, modals).</summary>
+    public bool UiNeonGlow { get; set; } = false;
+    /// <summary>UI corner geometry ("sharp" = 0px, "normal" = default, "round" = bubbly soft kawaii).</summary>
+    public string UiCornerStyle { get; set; } = "normal";
+    /// <summary>Card &amp; panel frame style ("clean", "framed", "dashed", "brutal", "neon").</summary>
+    public string UiCardStyle { get; set; } = "clean";
+    /// <summary>UI typography font preset ("segoe", "serif", "tech", "mono", "soft", "comic").</summary>
+    public string UiFont { get; set; } = "segoe";
+    /// <summary>When switching to a signature theme (Ultra Kawaii, Ultra Neon, RE Requiem, etc.), automatically apply its matching backdrop, pattern, corners, card style &amp; font.</summary>
+    public bool ThemeAutoStyle { get; set; } = true;
     /// <summary>Application UI language ("ru" or "en"). Separate from YouTube content language (Hl).</summary>
     public string UiLanguage { get; set; } = "ru";
     /// <summary>Hardware-accelerated GPU DirectionalBlur motion blur on UI scrolling, transitions, and Shorts swipes.</summary>

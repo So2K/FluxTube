@@ -90,9 +90,11 @@ public static unsafe class Gfx
     private static ID2D1Bitmap1? _sheenBmp;
     private static ID2D1BitmapBrush? _sheenBrush;
     private static ID2D1Bitmap1? _backdropBmp;
-    private static uint _backdropBg, _backdropBrand;
-    private static bool _backdropLight, _backdropStrong;
+    private static uint _backdropBg, _backdropBrand, _backdropBrand2;
+    private static bool _backdropLight;
+    private static string _backdropMode = "";
     private static long _backdropBakedAt;
+    private static ID2D1StrokeStyle? _dashStyle;
     // Hardware-accelerated Direct2D DirectionalBlur resources (lazily allocated only when UI Motion Blur triggers)
     private static ID2D1Bitmap1? _mbBmp;
     private static ID2D1Effect? _mbEffect;
@@ -287,32 +289,55 @@ public static unsafe class Gfx
         _sheenBrush = DC.CreateBitmapBrush(_sheenBmp, new BitmapBrushProperties(ExtendMode.Wrap, ExtendMode.Clamp, BitmapInterpolationMode.Linear));
     }
 
-    /// <summary>
-    /// Pre-bakes a 384×240 linear-light studio path-traced frosted GI lightfield once per theme change (~2ms CPU once,
-    /// then 0.04ms GPU per frame as a single HighQualityCubic DrawBitmap). Includes TPDF dithering so deep dark gradients
-    /// never exhibit 8-bit banding.
-    /// </summary>
-    private static void EnsureBackdropBaked(bool strong)
+    public static string ActiveFontName() => Services.AppSettings.Current.UiFont switch
+    {
+        "serif" => "Georgia",
+        "tech" => "Bahnschrift",
+        "mono" => "Consolas",
+        "soft" => "Trebuchet MS",
+        "comic" => "Comic Sans MS",
+        _ => Font,
+    };
+
+    public static float Corner(float baseRadius) => Services.AppSettings.Current.UiCornerStyle switch
+    {
+        "sharp" => 0f,
+        "round" => baseRadius * 1.45f,
+        _ => baseRadius,
+    };
+
+    private static ID2D1StrokeStyle DashStyle()
+        => _dashStyle ??= _d2dFactory.CreateStrokeStyle(new StrokeStyleProperties
+        {
+            DashStyle = Vortice.Direct2D1.DashStyle.Custom,
+            DashCap = CapStyle.Round,
+            StartCap = CapStyle.Round,
+            EndCap = CapStyle.Round,
+        }, [3.5f, 3.2f]);
+
+    /// <summary>Pre-bakes a 384×240 linear-light studio backdrop ONCE per theme/mode change (~2ms CPU once, 0.04ms GPU/frame).</summary>
+    private static void EnsureBackdropBaked(string mode)
     {
         uint bgQ = Th.Bg & 0x00FEFEFEu;
         uint brQ = Th.Brand & 0x00FEFEFEu;
-        if (_backdropBmp != null && _backdropBg == bgQ && _backdropBrand == brQ && _backdropLight == Th.Light && _backdropStrong == strong)
+        uint br2Q = Th.Brand2 & 0x00FEFEFEu;
+        if (_backdropBmp != null && _backdropBg == bgQ && _backdropBrand == brQ && _backdropBrand2 == br2Q && _backdropLight == Th.Light && _backdropMode == mode)
             return;
         long now = Environment.TickCount64;
-        if (_backdropBmp != null && now - _backdropBakedAt < 85 && _backdropLight == Th.Light && _backdropStrong == strong)
+        if (_backdropBmp != null && now - _backdropBakedAt < 85 && _backdropLight == Th.Light && _backdropMode == mode)
             return;
 
         _backdropBakedAt = now;
         _backdropBg = bgQ;
         _backdropBrand = brQ;
+        _backdropBrand2 = br2Q;
         _backdropLight = Th.Light;
-        _backdropStrong = strong;
+        _backdropMode = mode;
         _backdropBmp?.Dispose();
 
         const int bw = 384, bh = 240;
         var px = new byte[bw * bh * 4];
 
-        // Convert theme base & brand into linear light for true path-traced soft falloff
         float bgr = ((Th.Bg >> 16) & 255) / 255f;
         float bgg = ((Th.Bg >> 8) & 255) / 255f;
         float bgb = (Th.Bg & 255) / 255f;
@@ -321,19 +346,18 @@ public static unsafe class Gfx
         float ar = ((Th.Brand >> 16) & 255) / 255f;
         float ag = ((Th.Brand >> 8) & 255) / 255f;
         float ab = (Th.Brand & 255) / 255f;
-        // Soft pearl-tinted studio key light derived from the theme's accent
-        float keyR = ar * ar * 0.62f + 0.28f;
-        float keyG = ag * ag * 0.62f + 0.27f;
-        float keyB = ab * ab * 0.62f + 0.30f;
-        // Cool prismatic frosted glass bounce light (subtle sapphire-silver sheen)
-        float rimR = ar * ar * 0.18f + 0.24f;
-        float rimG = ag * ag * 0.24f + 0.34f;
-        float rimB = ab * ab * 0.28f + 0.56f;
-        // Warm silk caustic accent
-        float silkR = ar * ar * 0.45f + 0.36f;
-        float silkG = ag * ag * 0.42f + 0.36f;
-        float silkB = ab * ab * 0.48f + 0.44f;
+        uint b2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
+        float b2r = ((b2 >> 16) & 255) / 255f;
+        float b2g = ((b2 >> 8) & 255) / 255f;
+        float b2b = (b2 & 255) / 255f;
 
+        float keyR = ar * ar * 0.62f + 0.28f, keyG = ag * ag * 0.62f + 0.27f, keyB = ab * ab * 0.62f + 0.30f;
+        float rimR = b2r * b2r * 0.56f + 0.22f, rimG = b2g * b2g * 0.56f + 0.26f, rimB = b2b * b2b * 0.56f + 0.34f;
+        float silkR = (ar * ar + b2r * b2r) * 0.26f + 0.32f;
+        float silkG = (ag * ag + b2g * b2g) * 0.26f + 0.30f;
+        float silkB = (ab * ab + b2b * b2b) * 0.26f + 0.38f;
+
+        bool strong = mode != "soft";
         float mul = strong ? 1.0f : 0.52f;
         bool light = Th.Light;
         uint rng = 0xA3C59AC3u;
@@ -341,61 +365,145 @@ public static unsafe class Gfx
         for (int y = 0; y < bh; y++)
         {
             float v = y / (float)(bh - 1);
-            // Smooth top studio softbox grazing sheen across the top bezel
             float topGrazing = MathF.Exp(-v * 5.2f);
             for (int x = 0; x < bw; x++)
             {
                 float u = x / (float)(bw - 1);
-
-                // 1. Primary diffused studio softbox (upper-left multi-bounce subsurface lobe)
-                float dx1 = (u - 0.13f) * 1.15f, dy1 = (v + 0.04f) * 1.35f;
-                float d1 = dx1 * dx1 + dy1 * dy1;
-                float l1 = MathF.Exp(-d1 * 2.5f) * 0.68f + 0.32f / (1f + d1 * 4.2f);
-
-                // 2. Complementary prismatic refraction fill (upper-right frosted glass depth)
-                float dx2 = (u - 0.90f) * 1.10f, dy2 = (v - 0.16f) * 1.25f;
-                float d2 = dx2 * dx2 + dy2 * dy2;
-                float l2 = MathF.Exp(-d2 * 2.3f) * 0.65f + 0.35f / (1f + d2 * 3.8f);
-
-                // 3. Soft diagonal refracted caustic ribbon sweeping gently behind the glass
-                float waveY = 0.30f + 0.16f * MathF.Sin(u * 2.65f - 0.45f) + 0.08f * u;
-                float dyC = v - waveY;
-                float caustic = MathF.Exp(-dyC * dyC * 16.0f) * (0.45f + 0.55f * MathF.Sin(u * MathF.PI));
-
-                // 4. Gentle bottom ambient bounce
-                float dx3 = (u - 0.48f) * 0.95f, dy3 = (v - 1.06f) * 1.55f;
-                float l3 = MathF.Exp(-(dx3 * dx3 + dy3 * dy3) * 2.4f);
-
-                // 5. Smooth optical velvet vignette (keeps edges deep & rich, center subtly luminous)
-                float vx = (u - 0.5f) * 1.65f, vy = (v - 0.46f) * 1.55f;
-                float r2 = vx * vx + vy * vy;
-                float vig = light ? (1f - 0.045f * r2) : (1f - 0.22f * MathF.Min(1.2f, r2));
-
                 float r, g, b;
-                if (light)
+
+                if (mode == "orbital")
                 {
-                    // Light mode: pearlescent studio daylight bounce with subtle velvet shading
-                    float s1 = 0.055f * mul * l1, s2 = 0.045f * mul * l2, sc = 0.030f * mul * caustic, s3 = 0.030f * mul * l3;
-                    r = lBgR * vig + keyR * s1 + rimR * s2 + silkR * sc + keyR * s3 + 0.025f * mul * topGrazing;
-                    g = lBgG * vig + keyG * s1 + rimG * s2 + silkG * sc + keyG * s3 + 0.025f * mul * topGrazing;
-                    b = lBgB * vig + keyB * s1 + rimB * s2 + silkB * sc + keyB * s3 + 0.028f * mul * topGrazing;
+                    // Alien: Isolation deep-space planetary limb silhouette + atmospheric golden-white corona + pinpoint stars
+                    float aspect = bw / (float)bh;
+                    float pxU = (u - (-0.34f)) * aspect;
+                    float pyV = (v - 0.54f);
+                    float dist = MathF.Sqrt(pxU * pxU + pyV * pyV);
+                    const float planetR = 1.18f;
+                    float edge = dist - planetR;
+                    if (edge < 0f)
+                    {
+                        // Inside planet disc: dark terminator with warm sunlit upper-right crescent atmosphere
+                        float rim = MathF.Exp(edge * 16.0f);
+                        float mid = MathF.Exp(edge * 4.5f);
+                        float sunAngle = Math.Clamp(1.05f - MathF.Abs(v - 0.44f) * 1.45f, 0.15f, 1.0f);
+                        float band = 0.85f + 0.15f * MathF.Sin((v * 18f + u * 5f));
+                        r = lBgR * 0.45f + (ar * ar * 0.55f + 0.42f) * rim * 0.88f * sunAngle + (ar * ar * 0.32f + 0.12f) * mid * 0.34f * band * sunAngle;
+                        g = lBgG * 0.45f + (ag * ag * 0.52f + 0.38f) * rim * 0.84f * sunAngle + (ag * ag * 0.26f + 0.09f) * mid * 0.28f * band * sunAngle;
+                        b = lBgB * 0.45f + (ab * ab * 0.40f + 0.32f) * rim * 0.72f * sunAngle + (ab * ab * 0.16f + 0.06f) * mid * 0.20f * band * sunAngle;
+                    }
+                    else
+                    {
+                        // Outer space: crisp atmospheric scatter falloff + tiny distant star dust
+                        float halo = MathF.Exp(-edge * 14.0f) * 0.58f + MathF.Exp(-edge * 4.2f) * 0.14f;
+                        float sunAngle = Math.Clamp(1.05f - MathF.Abs(v - 0.44f) * 1.45f, 0.15f, 1.0f);
+                        r = lBgR * 0.75f + (b2r * b2r * 0.45f + 0.38f) * halo * sunAngle;
+                        g = lBgG * 0.75f + (b2g * b2g * 0.48f + 0.38f) * halo * sunAngle;
+                        b = lBgB * 0.75f + (b2b * b2b * 0.56f + 0.48f) * halo * sunAngle;
+                        // Deterministic crisp starfield pixels in deep space
+                        uint sh = (uint)(x * 73856093 ^ y * 19349663) * 2654435761u;
+                        if ((sh & 0x3FFu) == 0u && edge > 0.06f)
+                        {
+                            float sb = 0.22f + ((sh >> 10) & 255) / 255f * 0.55f;
+                            r += sb; g += sb; b += sb * 1.08f;
+                        }
+                    }
+                }
+                else if (mode == "noir")
+                {
+                    // Resident Evil Requiem / Village moody foggy monochrome spotlight + atmospheric smoke vignette
+                    float dx1 = (u - 0.36f) * 1.25f, dy1 = (v - 0.32f) * 1.45f;
+                    float spot = MathF.Exp(-(dx1 * dx1 + dy1 * dy1) * 2.2f);
+                    float fog = 0.5f + 0.5f * MathF.Sin(u * 4.7f + MathF.Sin(v * 3.1f)) * MathF.Cos(v * 3.8f - u * 1.7f);
+                    float vx = (u - 0.5f) * 1.85f, vy = (v - 0.5f) * 1.85f;
+                    float vig = MathF.Max(0.28f, 1f - 0.42f * (vx * vx + vy * vy));
+                    float lift = (spot * 0.052f + fog * 0.020f) * vig;
+                    r = lBgR * vig + lift * (0.95f + ar * 0.08f);
+                    g = lBgG * vig + lift * (0.95f + ag * 0.05f);
+                    b = lBgB * vig + lift * (0.98f + ab * 0.06f);
+                }
+                else if (mode == "neon")
+                {
+                    // Ultra Neon / Cyberpunk vivid dual-lobe cyan/magenta plasma edge glow on deep obsidian
+                    float dx1 = (u - 0.08f) * 1.25f, dy1 = (v - 0.12f) * 1.35f;
+                    float l1 = MathF.Exp(-(dx1 * dx1 + dy1 * dy1) * 2.4f);
+                    float dx2 = (u - 0.92f) * 1.25f, dy2 = (v - 0.86f) * 1.35f;
+                    float l2 = MathF.Exp(-(dx2 * dx2 + dy2 * dy2) * 2.3f);
+                    float waveY = 0.45f + 0.18f * MathF.Sin(u * 3.4f - 0.6f);
+                    float ribbon = MathF.Exp(-(v - waveY) * (v - waveY) * 24f) * 0.55f;
+                    float vx = (u - 0.5f) * 1.6f, vy = (v - 0.5f) * 1.6f;
+                    float vig = 1f - 0.28f * MathF.Min(1.2f, vx * vx + vy * vy);
+                    r = lBgR * vig + ar * ar * (0.14f * l1 + 0.045f * ribbon) + b2r * b2r * (0.12f * l2 + 0.03f * ribbon);
+                    g = lBgG * vig + ag * ag * (0.14f * l1 + 0.045f * ribbon) + b2g * b2g * (0.12f * l2 + 0.03f * ribbon);
+                    b = lBgB * vig + ab * ab * (0.14f * l1 + 0.045f * ribbon) + b2b * b2b * (0.12f * l2 + 0.03f * ribbon);
+                }
+                else if (mode == "kawaii")
+                {
+                    // Dreamy cotton-candy / strawberry-milk pastel clouds (works on both Light & Dark kawaii!)
+                    float l1 = MathF.Exp(-((u - 0.15f) * (u - 0.15f) * 2.2f + (v - 0.15f) * (v - 0.15f) * 2.6f));
+                    float l2 = MathF.Exp(-((u - 0.86f) * (u - 0.86f) * 2.0f + (v - 0.25f) * (v - 0.25f) * 2.4f));
+                    float l3 = MathF.Exp(-((u - 0.55f) * (u - 0.55f) * 1.9f + (v - 0.92f) * (v - 0.92f) * 2.5f));
+                    if (light)
+                    {
+                        float k1 = 0.09f * l1, k2 = 0.085f * l2, k3 = 0.07f * l3;
+                        r = lBgR * (1f - k1 - k2 - k3) + (ar * ar * 0.45f + 0.55f) * k1 + (b2r * b2r * 0.45f + 0.55f) * k2 + (ar * ar * 0.3f + 0.7f) * k3;
+                        g = lBgG * (1f - k1 - k2 - k3) + (ag * ag * 0.45f + 0.55f) * k1 + (b2g * b2g * 0.45f + 0.55f) * k2 + (ag * ag * 0.3f + 0.7f) * k3;
+                        b = lBgB * (1f - k1 - k2 - k3) + (ab * ab * 0.45f + 0.55f) * k1 + (b2b * b2b * 0.45f + 0.55f) * k2 + (ab * ab * 0.3f + 0.7f) * k3;
+                    }
+                    else
+                    {
+                        r = lBgR + ar * ar * (0.10f * l1 + 0.06f * l3) + b2r * b2r * 0.09f * l2;
+                        g = lBgG + ag * ag * (0.10f * l1 + 0.06f * l3) + b2g * b2g * 0.09f * l2;
+                        b = lBgB + ab * ab * (0.10f * l1 + 0.06f * l3) + b2b * b2b * 0.09f * l2;
+                    }
+                }
+                else if (mode == "mesh")
+                {
+                    // Rich 4-corner liquid gradient mesh derived from Bg + Brand + Brand2
+                    float wTL = (1f - u) * (1f - v), wTR = u * (1f - v), wBL = (1f - u) * v, wBR = u * v;
+                    float k = light ? 0.10f : 0.11f;
+                    r = lBgR * (1f - k * (wTL + wBR) * 0.4f) + ar * ar * k * (wTL * 0.9f + wBL * 0.35f) + b2r * b2r * k * (wBR * 0.9f + wTR * 0.45f);
+                    g = lBgG * (1f - k * (wTL + wBR) * 0.4f) + ag * ag * k * (wTL * 0.9f + wBL * 0.35f) + b2g * b2g * k * (wBR * 0.9f + wTR * 0.45f);
+                    b = lBgB * (1f - k * (wTL + wBR) * 0.4f) + ab * ab * k * (wTL * 0.9f + wBL * 0.35f) + b2b * b2b * k * (wBR * 0.9f + wTR * 0.45f);
                 }
                 else
                 {
-                    // Dark mode: deep velvety obsidian glass with soft multi-bounce GI glow & filmic shoulder
-                    float s1 = 0.046f * mul * l1, s2 = 0.036f * mul * l2, sc = 0.017f * mul * caustic, s3 = 0.022f * mul * l3;
-                    float top = 0.012f * mul * topGrazing;
-                    r = lBgR * vig + keyR * s1 + rimR * s2 + silkR * sc + (keyR + rimR) * 0.5f * s3 + top;
-                    g = lBgG * vig + keyG * s1 + rimG * s2 + silkG * sc + (keyG + rimG) * 0.5f * s3 + top;
-                    b = lBgB * vig + keyB * s1 + rimB * s2 + silkB * sc + (keyB + rimB) * 0.5f * s3 + top * 1.15f;
+                    // Classic soft / matte frosted studio path-traced GI lightfield
+                    float dx1 = (u - 0.13f) * 1.15f, dy1 = (v + 0.04f) * 1.35f;
+                    float d1 = dx1 * dx1 + dy1 * dy1;
+                    float l1 = MathF.Exp(-d1 * 2.5f) * 0.68f + 0.32f / (1f + d1 * 4.2f);
+                    float dx2 = (u - 0.90f) * 1.10f, dy2 = (v - 0.16f) * 1.25f;
+                    float d2 = dx2 * dx2 + dy2 * dy2;
+                    float l2 = MathF.Exp(-d2 * 2.3f) * 0.65f + 0.35f / (1f + d2 * 3.8f);
+                    float waveY = 0.30f + 0.16f * MathF.Sin(u * 2.65f - 0.45f) + 0.08f * u;
+                    float dyC = v - waveY;
+                    float caustic = MathF.Exp(-dyC * dyC * 16.0f) * (0.45f + 0.55f * MathF.Sin(u * MathF.PI));
+                    float dx3 = (u - 0.48f) * 0.95f, dy3 = (v - 1.06f) * 1.55f;
+                    float l3 = MathF.Exp(-(dx3 * dx3 + dy3 * dy3) * 2.4f);
+                    float vx = (u - 0.5f) * 1.65f, vy = (v - 0.46f) * 1.55f;
+                    float r2 = vx * vx + vy * vy;
+                    float vig = light ? (1f - 0.045f * r2) : (1f - 0.22f * MathF.Min(1.2f, r2));
+
+                    if (light)
+                    {
+                        float s1 = 0.055f * mul * l1, s2 = 0.045f * mul * l2, sc = 0.030f * mul * caustic, s3 = 0.030f * mul * l3;
+                        r = lBgR * vig + keyR * s1 + rimR * s2 + silkR * sc + keyR * s3 + 0.025f * mul * topGrazing;
+                        g = lBgG * vig + keyG * s1 + rimG * s2 + silkG * sc + keyG * s3 + 0.025f * mul * topGrazing;
+                        b = lBgB * vig + keyB * s1 + rimB * s2 + silkB * sc + keyB * s3 + 0.028f * mul * topGrazing;
+                    }
+                    else
+                    {
+                        float s1 = 0.046f * mul * l1, s2 = 0.036f * mul * l2, sc = 0.017f * mul * caustic, s3 = 0.022f * mul * l3;
+                        float top = 0.012f * mul * topGrazing;
+                        r = lBgR * vig + keyR * s1 + rimR * s2 + silkR * sc + (keyR + rimR) * 0.5f * s3 + top;
+                        g = lBgG * vig + keyG * s1 + rimG * s2 + silkG * sc + (keyG + rimG) * 0.5f * s3 + top;
+                        b = lBgB * vig + keyB * s1 + rimB * s2 + silkB * sc + (keyB + rimB) * 0.5f * s3 + top * 1.15f;
+                    }
                 }
 
-                // Soft filmic velvet compression (never harsh or neon)
-                r = r / (1f + 0.22f * MathF.Max(0f, r));
-                g = g / (1f + 0.22f * MathF.Max(0f, g));
-                b = b / (1f + 0.22f * MathF.Max(0f, b));
+                r = r / (1f + 0.20f * MathF.Max(0f, r));
+                g = g / (1f + 0.20f * MathF.Max(0f, g));
+                b = b / (1f + 0.20f * MathF.Max(0f, b));
 
-                // Linear -> sRGB + Triangular-PDF dither (zero banding on deep dark themes!)
                 rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
                 float d1n = (rng & 255) * (1f / 255f);
                 rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
@@ -439,6 +547,9 @@ public static unsafe class Gfx
         _backdropBmp?.Dispose();
         _backdropBmp = null;
         _backdropBg = 0;
+        _dashStyle?.Dispose();
+        _dashStyle = null;
+        BgEngine.DisposeGpuResources();
         DisposeMotionBlurResources();
         foreach (var s in _radials) s.Dispose();
         ClearTextCache();
@@ -726,6 +837,59 @@ public static unsafe class Gfx
         DC.DrawRoundedRectangle(rr, Scratch(color), width);
     }
 
+    public static void StrokeDashed(R r, uint color, float radius, float width = 1.25f)
+    {
+        var rr = new RoundedRectangle { Rect = Raw(r.Inset(width / 2)), RadiusX = radius, RadiusY = radius };
+        DC.DrawRoundedRectangle(rr, Scratch(color), width, DashStyle());
+    }
+
+    /// <summary>Ultra-cheap 2-stroke GPU neon bloom halo (~0.01ms, zero blur pass).</summary>
+    public static void NeonGlow(R r, float radius, uint color, float strength = 1f)
+    {
+        var halo = new RoundedRectangle { Rect = Raw(r.Inset(-1.2f)), RadiusX = radius + 1.2f, RadiusY = radius + 1.2f };
+        DC.DrawRoundedRectangle(halo, Scratch(Fade(color, 0.22f * strength)), 4.2f);
+        var rim = new RoundedRectangle { Rect = Raw(r.Inset(0.5f)), RadiusX = radius, RadiusY = radius };
+        DC.DrawRoundedRectangle(rim, Scratch(Fade(color, 0.82f * strength)), 1.25f);
+    }
+
+    /// <summary>Draws modular video/content card frame matching UiCardStyle (clean / framed / dashed / brutal / neon).</summary>
+    public static void DrawCardFrame(R box, float radius, bool hovered, out uint surfaceBehind)
+    {
+        float cr = Corner(radius);
+        var style = Services.AppSettings.Current.UiCardStyle;
+        switch (style)
+        {
+            case "dashed":
+                Fill(box, Fade(Th.Card, hovered ? 0.98f : 0.88f), cr);
+                StrokeDashed(box, Fade(Th.Brand, hovered ? 0.65f : 0.34f), cr, 1.35f);
+                if (hovered && Services.AppSettings.Current.UiNeonGlow) NeonGlow(box, cr, Th.Brand, 0.45f);
+                surfaceBehind = Th.Card;
+                break;
+            case "brutal":
+                Fill(new R(box.X + 4, box.Y + 4, box.W, box.H), Fade(Th.Ink, hovered ? 0.28f : 0.14f), cr);
+                Fill(box, Th.Card, cr);
+                Stroke(box, hovered ? Th.Brand : Fade(Th.Ink, 0.72f), cr, hovered ? 2.0f : 1.5f);
+                surfaceBehind = Th.Card;
+                break;
+            case "framed":
+                Fill(box, Fade(Th.Card, hovered ? 0.86f : 0.50f), cr);
+                Stroke(box, hovered ? Fade(Th.Text, 0.68f) : Th.Line, cr, 1f);
+                if (hovered) Fill(new R(box.X + 1, box.Y + 1, box.W - 2, 1.2f), Fade(Th.Brand, 0.78f));
+                surfaceBehind = Mix(Th.Bg, Th.Card, hovered ? 0.86f : 0.50f);
+                break;
+            case "neon":
+                Fill(box, Fade(Th.Card, hovered ? 0.86f : 0.58f), cr);
+                uint rimCol = hovered ? Th.Brand : (Th.Brand2 != 0 ? Th.Brand2 : Th.Brand);
+                if (hovered || Services.AppSettings.Current.UiNeonGlow) NeonGlow(box, cr, rimCol, hovered ? 0.82f : 0.32f);
+                else Stroke(box, Fade(rimCol, 0.38f), cr, 1f);
+                surfaceBehind = Mix(Th.Bg, Th.Card, hovered ? 0.86f : 0.58f);
+                break;
+            default:
+                surfaceBehind = Th.Bg;
+                break;
+        }
+    }
+
     public static void Circle(float cx, float cy, float radius, uint color)
         => DC.FillEllipse(new Ellipse(new Vector2(cx, cy), radius, radius), Scratch(color));
 
@@ -760,73 +924,99 @@ public static unsafe class Gfx
     }
 
     /// <summary>
-    /// Draws a pre-baked velvety path-traced studio frosted glass backdrop behind the entire UI:
-    /// one HighQualityCubic DrawBitmap for the baked linear-light GI lightfield (~0.04ms GPU)
-    /// plus 1:1 physical-pixel blue-noise satin micro-frost texture.
+    /// Draws the complete zero-cost GPU backdrop stack:
+    /// 1) Pre-baked backdrop lighting (soft/matte/mesh/kawaii/neon/noir/orbital — 1 DrawBitmap, 0.04ms)
+    /// 2) Optional custom user wallpaper image (pre-scaled &amp; pre-blurred once — 1 DrawBitmap, 0.04ms)
+    /// 3) Optional seamless SDF background pattern (Cat Paws, Lines, Cyber Grid, Circuit, Sakura, Noir Board... — 1 FillRectangle, 0.02ms)
+    /// 4) Tactile 1:1 physical-pixel frost / film grain when glass or noir is enabled.
     /// </summary>
     public static void DrawFrostedBackdrop(float w, float h)
     {
         var mode = Services.AppSettings.Current.FrostedGlass;
-        if (mode == "off") return;
-        bool strong = mode != "soft";
-        float mul = strong ? 1.0f : 0.58f;
-
-        EnsureBackdropBaked(strong);
-        if (_backdropBmp != null)
-            DC.DrawBitmap(_backdropBmp, new Vortice.RawRectF(0, 0, w, h), 1f, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
-
-        // 1:1 physical-pixel bead-blasted velvety satin frost grain
-        if (_grainBrush != null)
+        if (mode != "off")
         {
+            EnsureBackdropBaked(mode);
+            if (_backdropBmp != null)
+                DC.DrawBitmap(_backdropBmp, new Vortice.RawRectF(0, 0, w, h), 1f, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
+        }
+
+        // Custom wallpaper image (works WITH glass or INSTEAD of glass!)
+        BgEngine.DrawWallpaper(DC, w, h);
+
+        // Seamless GPU SDF pattern overlay (works on solid color, glass, AND wallpapers!)
+        BgEngine.DrawPattern(DC, w, h);
+
+        // 1:1 physical-pixel bead-blasted velvety satin frost / noir film grain
+        if (mode != "off" && _grainBrush != null)
+        {
+            float mul = mode switch { "soft" => 0.55f, "noir" => 1.35f, "orbital" => 0.35f, "kawaii" => 0.38f, _ => 0.95f };
             _grainBrush.Transform = Matrix3x2.CreateScale(1f / MathF.Max(0.5f, Scale));
-            _grainBrush.Opacity = (Th.Light ? 0.046f : 0.058f) * mul;
+            _grainBrush.Opacity = (Th.Light ? 0.044f : 0.058f) * mul;
             DC.FillRectangle(new Vortice.RawRectF(0, 0, w, h), _grainBrush);
         }
     }
 
-    /// <summary>Draws a velvety matte frosted glass surface with baked Fresnel studio sheen, satin micro-frost, and soft top bevel.</summary>
+    /// <summary>Draws a modular surface honoring FrostedGlass, UiCornerStyle, UiCardStyle &amp; UiNeonGlow.</summary>
     public static void FillFrosted(R r, uint baseColor, float radius = 0, float opacity = 0.80f, bool border = false)
     {
-        var mode = Services.AppSettings.Current.FrostedGlass;
-        if (mode == "off")
+        var s = Services.AppSettings.Current;
+        var mode = s.FrostedGlass;
+        float cr = radius > 0 ? Corner(radius) : 0f;
+        bool hasWallOrPat = !string.IsNullOrEmpty(s.BgImagePath) || (s.BgPattern != "none" && !string.IsNullOrEmpty(s.BgPattern));
+
+        if (mode == "off" && !hasWallOrPat)
         {
-            Fill(r, baseColor, radius);
-            if (border) Stroke(r, Th.Line, radius);
+            Fill(r, baseColor, cr);
+            if (border)
+            {
+                if (s.UiCardStyle == "dashed") StrokeDashed(r, Fade(Th.Brand, 0.34f), cr, 1.25f);
+                else if (s.UiCardStyle == "brutal") Stroke(r, Fade(Th.Ink, 0.72f), cr, 1.5f);
+                else Stroke(r, Th.Line, cr);
+            }
             return;
         }
-        bool strong = mode != "soft";
-        float effOp = strong ? MathF.Max(0.52f, opacity * 0.93f) : MathF.Min(0.92f, opacity + 0.06f);
-        Fill(r, Fade(baseColor, effOp), radius);
+        bool strong = mode != "soft" && mode != "off";
+        float effOp = strong ? MathF.Max(0.52f, opacity * 0.92f) : MathF.Min(0.92f, opacity + 0.05f);
+        Fill(r, Fade(baseColor, effOp), cr);
 
-        // 1. Pre-baked vertical Fresnel studio sheen (silky top light catch + velvety lower depth)
-        if (_sheenBrush != null && r.H > 2)
+        // 1. Pre-baked vertical Fresnel studio sheen
+        if (mode != "off" && _sheenBrush != null && r.H > 2)
         {
             _sheenBrush.Transform = Matrix3x2.CreateScale(1f, r.H / 128f) * Matrix3x2.CreateTranslation(0f, r.Y);
-            _sheenBrush.Opacity = strong ? (Th.Light ? 0.85f : 1.0f) : 0.55f;
-            if (radius > 0)
-                DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = radius, RadiusY = radius }, _sheenBrush);
+            _sheenBrush.Opacity = strong ? (Th.Light ? 0.80f : 0.95f) : 0.50f;
+            if (cr > 0)
+                DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr }, _sheenBrush);
             else
                 DC.FillRectangle(Raw(r), _sheenBrush);
         }
 
         // 2. 1:1 physical-pixel high-pass satin frost grain
-        if (_grainBrush != null)
+        if (mode != "off" && _grainBrush != null)
         {
             _grainBrush.Transform = Matrix3x2.CreateScale(1f / MathF.Max(0.5f, Scale));
-            _grainBrush.Opacity = (Th.Light ? 0.040f : 0.052f) * (strong ? 1f : 0.55f);
-            if (radius > 0)
-                DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = radius, RadiusY = radius }, _grainBrush);
+            _grainBrush.Opacity = (Th.Light ? 0.036f : 0.048f) * (strong ? 1f : 0.55f);
+            if (cr > 0)
+                DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr }, _grainBrush);
             else
                 DC.FillRectangle(Raw(r), _grainBrush);
         }
 
-        // 3. Soft glass perimeter rim + top specular edge catch
+        // 3. Modular border style (dashed kawaii / brutalist ink / neon rim / subtle studio rim)
         if (border)
         {
-            Stroke(r, Th.A(Th.Light ? 0.16f : 0.14f), radius, 1f);
-            float inset = MathF.Max(radius * 0.72f, 6f);
-            if (r.W > inset * 2 + 8)
-                Fill(new R(r.X + inset, r.Y + 0.5f, r.W - inset * 2, 1f), Th.A(Th.Light ? 0.24f : 0.16f));
+            if (s.UiCardStyle == "dashed")
+                StrokeDashed(r, Fade(Th.Brand, 0.34f), cr, 1.25f);
+            else if (s.UiCardStyle == "brutal")
+                Stroke(r, Fade(Th.Ink, 0.72f), cr, 1.5f);
+            else if (s.UiCardStyle == "neon" && s.UiNeonGlow)
+                Stroke(r, Fade(Th.Brand2 != 0 ? Th.Brand2 : Th.Brand, 0.36f), cr, 1.1f);
+            else
+            {
+                Stroke(r, Th.A(Th.Light ? 0.16f : 0.14f), cr, 1f);
+                float inset = MathF.Max(cr * 0.72f, 6f);
+                if (r.W > inset * 2 + 8)
+                    Fill(new R(r.X + inset, r.Y + 0.5f, r.W - inset * 2, 1f), Th.A(Th.Light ? 0.24f : 0.16f));
+            }
         }
     }
 
@@ -897,7 +1087,7 @@ public static unsafe class Gfx
     private static (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH) FormatLocked(FKey k)
     {
         if (_formats.TryGetValue(k, out var f)) return f;
-        var fmt = _dw.CreateTextFormat(k.Lucide ? "lucide" : k.Icon ? IconFont : Font, k.Lucide ? _lucideFonts : null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, Services.L.En ? "en-us" : "ru-ru");
+        var fmt = _dw.CreateTextFormat(k.Lucide ? "lucide" : k.Icon ? IconFont : ActiveFontName(), k.Lucide ? _lucideFonts : null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, Services.L.En ? "en-us" : "ru-ru");
         using var probe = _dw.CreateTextLayout("Ag", fmt, 1000, 1000);
         return _formats[k] = (fmt, _dw.CreateEllipsisTrimmingSign(fmt), probe.Metrics.Height);
     }
