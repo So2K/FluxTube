@@ -92,8 +92,6 @@ public static class BgPlayers
                 }
                 Opt(ctx, "volume", vol.ToString(CultureInfo.InvariantCulture));
                 if (muted) Opt(ctx, "mute", "yes");
-                var proxy = AppSettings.Current.Proxy;
-                if (!string.IsNullOrWhiteSpace(proxy)) Opt(ctx, "http-proxy", proxy);
                 Opt(ctx, "ytdl", "yes");
                 Opt(ctx, "ytdl-format", "ba/b");
                 Opt(ctx, "script-opts", "ytdl_hook-ytdl_path=" + Paths.YtDlp.Replace('\\', '/'));

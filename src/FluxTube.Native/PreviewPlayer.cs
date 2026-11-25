@@ -100,8 +100,6 @@ public static class PreviewPlayer
                     mpv_set_option_string(ctx, "input-vo-keyboard", "no");
                     mpv_set_option_string(ctx, "gpu-shader-cache", "yes");
                     mpv_set_option_string(ctx, "gpu-shader-cache-dir", Path.Combine(Paths.Data, "mpv-shaders").Replace('\\', '/'));
-                    var proxy = AppSettings.Current.Proxy;
-                    if (!string.IsNullOrWhiteSpace(proxy)) mpv_set_option_string(ctx, "http-proxy", proxy);
 
                     if (mpv_initialize(ctx) < 0)
                     {

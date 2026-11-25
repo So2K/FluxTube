@@ -146,7 +146,8 @@ public sealed class MpvPlayer : IDisposable
         mpv_set_option_string(ctx, "ytdl-raw-options", "");
         foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
             mpv_set_option_string(ctx, "ytdl-raw-options-append", kv);
-        mpv_set_option_string(ctx, "http-proxy", YtDlp.EffectiveProxy ?? "");
+        // Streams are served to mpv over loopback; StreamProxy handles the upstream proxy.
+        mpv_set_option_string(ctx, "http-proxy", "");
         mpv_set_option_string(ctx, "af", s.PlayerAudio8D ? Audio8DFilter : "");
     }
 
@@ -164,7 +165,7 @@ public sealed class MpvPlayer : IDisposable
         Set("ytdl-raw-options", "");
         foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
             Command("set", "ytdl-raw-options-append", kv);
-        Set("http-proxy", YtDlp.EffectiveProxy ?? "");
+        Set("http-proxy", "");
         Set("af", s.PlayerAudio8D ? Audio8DFilter : "");
     }
 

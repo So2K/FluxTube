@@ -453,7 +453,7 @@ public sealed class StreamProxy
         {
             // mpv closed the connection (seek or stop)
         }
-        catch (HttpRequestException) { /* upstream refused (a preview ran out, or the link died): the stream just ends here */ }
+        catch (HttpRequestException ex) { Paths.Log("proxy request: " + ex.Message); }
         catch (Exception ex) { Paths.Log("proxy: " + ex.Message); }
         finally
         {
