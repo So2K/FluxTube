@@ -225,6 +225,24 @@ public static unsafe class Gfx
     public static void Circle(float cx, float cy, float radius, uint color)
         => DC.FillEllipse(new Ellipse(new Vector2(cx, cy), radius, radius), Brush(color));
 
+    /// <summary>Hardware-accelerated Direct2D radial Gaussian-like light glow (zero CPU pixel work).</summary>
+    public static void RadialGlow(float cx, float cy, float rx, float ry, float r, float g, float b, float alpha)
+    {
+        if (alpha <= 0.004f || rx <= 1 || ry <= 1) return;
+        GradientStop[] stops =
+        [
+            new(0.00f, new Color4(r, g, b, alpha)),
+            new(0.28f, new Color4(r, g, b, alpha * 0.68f)),
+            new(0.55f, new Color4(r, g, b, alpha * 0.28f)),
+            new(0.80f, new Color4(r, g, b, alpha * 0.07f)),
+            new(1.00f, new Color4(r, g, b, 0f)),
+        ];
+        using var col = DC.CreateGradientStopCollection(stops, Gamma.StandardRgb, ExtendMode.Clamp);
+        var props = new RadialGradientBrushProperties(new Vector2(cx, cy), Vector2.Zero, rx, ry);
+        using var brush = DC.CreateRadialGradientBrush(props, col);
+        DC.FillEllipse(new Ellipse(new Vector2(cx, cy), rx, ry), brush);
+    }
+
     public static void Image(ID2D1Bitmap bmp, R dest, float opacity = 1)
         => DC.DrawBitmap(bmp, Raw(dest), opacity, BitmapInterpolationMode.Linear, null);
 

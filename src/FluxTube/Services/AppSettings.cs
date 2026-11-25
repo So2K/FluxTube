@@ -48,6 +48,8 @@ public sealed class AppSettings
     public float UiScale { get; set; } = 1.0f;
     /// <summary>Hides the right-side info/comments panel on the Shorts page for distraction-free viewing.</summary>
     public bool ShortsPanelHidden { get; set; } = false;
+    /// <summary>Soft GPU radial ambient glow around video players matching the current scene colors.</summary>
+    public bool AmbientMode { get; set; } = true;
 
     public string PlayerFormat => FormatFor(PlayerQuality);
     public string DownloadFormat => FormatFor(DownloadQuality);

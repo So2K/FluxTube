@@ -43,6 +43,57 @@ public static class Storyboard
         return c;
     }
 
+    /// <summary>Samples 5 smooth RGB zone colors (TL, TR, BL, BR, Center) from the storyboard frame at this timestamp for Ambient Mode.</summary>
+    public static bool TrySampleColors(string videoId, double seconds,
+        out (float R, float G, float B) tl, out (float R, float G, float B) tr,
+        out (float R, float G, float B) bl, out (float R, float G, float B) br,
+        out (float R, float G, float B) center)
+    {
+        tl = tr = bl = br = center = default;
+        if (string.IsNullOrEmpty(videoId)) return false;
+        _lastUse = Environment.TickCount64;
+        var book = BookFor(videoId);
+        if (book == null) return false;
+        int idx = Math.Clamp((int)(seconds / book.Interval), 0, Math.Max(0, book.Total - 1));
+        int per = Math.Max(1, book.Cols * book.Rows), sheet = idx / per, cell = idx % per;
+        if (!book.Sheets.TryGetValue(sheet, out var px))
+        {
+            book.Sheets[sheet] = null;
+            _ = Task.Run(() => LoadSheet(videoId, book, sheet));
+            return false;
+        }
+        if (px == null || !book.Size.TryGetValue(sheet, out var size)) return false;
+        var (sw, sh) = size;
+        int sx = cell % book.Cols * book.TileW, sy = cell / book.Cols * book.TileH;
+        if (sx + book.TileW > sw || sy + book.TileH > sh) return false;
+
+        tl = AvgRegion(px, sw, sx, sy, book.TileW / 2, book.TileH / 2);
+        tr = AvgRegion(px, sw, sx + book.TileW / 2, sy, book.TileW / 2, book.TileH / 2);
+        bl = AvgRegion(px, sw, sx, sy + book.TileH / 2, book.TileW / 2, book.TileH / 2);
+        br = AvgRegion(px, sw, sx + book.TileW / 2, sy + book.TileH / 2, book.TileW / 2, book.TileH / 2);
+        center = AvgRegion(px, sw, sx + book.TileW / 4, sy + book.TileH / 4, book.TileW / 2, book.TileH / 2);
+        return true;
+    }
+
+    private static (float R, float G, float B) AvgRegion(byte[] px, int strideW, int x0, int y0, int w, int h)
+    {
+        int stepX = Math.Max(1, w / 6), stepY = Math.Max(1, h / 4);
+        double sr = 0, sg = 0, sb = 0;
+        int n = 0;
+        for (int y = y0; y < y0 + h; y += stepY)
+        {
+            int row = y * strideW * 4;
+            for (int x = x0; x < x0 + w; x += stepX)
+            {
+                int o = row + x * 4;
+                sb += px[o]; sg += px[o + 1]; sr += px[o + 2];
+                n++;
+            }
+        }
+        if (n == 0) return (0.2f, 0.2f, 0.25f);
+        return ((float)(sr / (n * 255.0)), (float)(sg / (n * 255.0)), (float)(sb / (n * 255.0)));
+    }
+
     /// <summary>The player script asks for the frame at this moment; the answer comes back as a script message.</summary>
     public static void Request(string? videoId, double seconds)
     {

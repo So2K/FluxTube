@@ -1159,6 +1159,7 @@ public sealed class WatchPage : IPage
 
         void DrawVideoBox(R video, R? clip)
         {
+            Ambient.Draw(video, id, isShort: false);
             Shell.WantVideo(video, id, clip);
             if (Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id)
             {

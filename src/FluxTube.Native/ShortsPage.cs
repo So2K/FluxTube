@@ -367,11 +367,19 @@ public sealed class ShortsPage : IPage
         float fullSide = MathF.Min(430, MathF.Max(340, r.W * 0.34f));
         float side = fullSide * panelT;
         float gap = 22 * panelT;
-        var vh = MathF.Floor(MathF.Min(r.H - 28, (r.W - side - (hidden ? 110 : 90)) * 16 / 9));
+        // When side panel is hidden, reserve a sleek 74px YouTube-style channel+title bar right below the centered Short
+        float belowH = 74 * (1 - panelT);
+        var vh = MathF.Floor(MathF.Min(r.H - 28 - belowH, (r.W - side - (hidden ? 110 : 90)) * 16 / 9));
         var vw = MathF.Floor(vh * 9 / 16);
         var vx = Gfx.Snap(r.X + MathF.Max(20, (r.W - vw - side - gap) / 2));
-        var video = new R(vx, Gfx.Snap(r.Y + (r.H - vh) / 2), vw, vh);
+        var vy = Gfx.Snap(r.Y + (r.H - vh - belowH) / 2);
+        var video = new R(vx, vy, vw, vh);
         var panelR = new R(video.Right + gap, video.Y, MathF.Min(fullSide, r.Right - video.Right - 36), video.H);
+
+        // Cinema GPU Ambient Mode glow behind the Short
+        Gfx.PushClip(r);
+        Ambient.Draw(video, v.VideoId, isShort: true);
+        Gfx.PopClip();
 
         // Subtle elevated frame around the 9:16 player
         Gfx.Fill(video.Inset(-2), 0xFF000000, 14);
@@ -393,9 +401,34 @@ public sealed class ShortsPage : IPage
         }
         if (UI.RightClick(video)) ContextMenuFor(v);
 
-        // When panel is hidden: compact floating toggle + quick nav rail beside the centered Short
+        // When panel is hidden: YouTube-style channel + title bar under the centered Short + compact floating rail
         if (panelT < 0.05f)
         {
+            // YouTube-style channel & title bar right underneath the centered video
+            float by = video.Bottom + 10;
+            var cname = v.Channel.Length > 0 ? v.Channel : "…";
+            var av0 = new R(video.X + 2, by, 32, 32);
+            Cards.Avatar(av0.X, av0.Y, 32, v.AvatarUrl, cname.TrimStart('@'));
+            var cnr = Gfx.Text(cname, 14, 600, MathF.Max(80, video.W - 140));
+            var cnrRect = new R(av0.Right + 10, by + (32 - cnr.H) / 2, cnr.W, cnr.H);
+            Gfx.Draw(cnr, cnrRect.X, cnrRect.Y, UI.Hover(cnrRect) && v.ChannelId != null ? Th.Brand : Th.Text);
+            if (v.ChannelId != null && (UI.Click(UI.Id("shorts:cch"), cnrRect) || UI.Click(UI.Id("shorts:cav"), av0)))
+            {
+                var cid = v.ChannelId; var cn = cname;
+                App.Post(() => Shell.OpenChannel(cid, cn));
+            }
+            if (v.Meta.Length > 0)
+            {
+                var lr0 = Gfx.Text(v.Meta, 12, 600);
+                Gfx.Draw(lr0, video.Right - lr0.W - 4, by + (32 - lr0.H) / 2, Th.Sub);
+            }
+            if (v.Title.Length > 0)
+            {
+                var tr0 = Sel.Text(UI.Id("shorts:ctitle"), v.Title, video.X + 2, by + 37, 14.5f, Th.Text, 600, video.W - 4, 2, links: true,
+                    onLink: l => { if (l.Kind == '#') Shell.OpenSearch(l.Value); else if (l.Kind == 'u') W.Open(l.Value); });
+                Cards.CopyMenu(new R(video.X + 2, by + 37, tr0.W, tr0.H), v.Title, "Копировать название");
+            }
+
             float rx = video.Right + 14;
             if (rx + 46 < r.Right)
             {
