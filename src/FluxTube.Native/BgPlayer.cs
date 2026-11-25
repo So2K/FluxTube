@@ -19,6 +19,7 @@ public static class BgPlayers
     private sealed class Instance : IDisposable
     {
         public readonly string VideoId;
+        public readonly string Key;
         public readonly long CreatedAt = Environment.TickCount64;
         private readonly object _stateLock = new();
         private IntPtr _ctx;
@@ -38,8 +39,9 @@ public static class BgPlayers
         public volatile int Volume = 100;
         public long PausedSince;
 
-        public Instance(string videoId, double initialPos)
+        public Instance(string key, string videoId, double initialPos)
         {
+            Key = key;
             VideoId = videoId;
             Volatile.Write(ref _timePos, initialPos);
             var liveVol = MpvPlayer.Instance.IsReady ? MpvPlayer.Instance.Volume : AppSettings.Current.Volume;
@@ -52,7 +54,19 @@ public static class BgPlayers
         public double Duration => Volatile.Read(ref _duration);
 
         /// <summary>Non-blocking cached live position (updated continuously by mpv's event thread).</summary>
-        public double LivePos() => Volatile.Read(ref _timePos);
+        public double LivePos()
+        {
+            lock (_stateLock)
+            {
+                var ctx = Volatile.Read(ref _ctx);
+                if (ctx != IntPtr.Zero && !_disposed && mpv_get_property(ctx, "time-pos", Format.Double, out double pos) >= 0 && pos > 0)
+                {
+                    Volatile.Write(ref _timePos, pos);
+                    return pos;
+                }
+            }
+            return Volatile.Read(ref _timePos);
+        }
 
         public void Start(string? localFile, StreamInfo? stream, string fallbackUrl, double startSeconds)
         {
@@ -161,8 +175,8 @@ public static class BgPlayers
                     var ef = Marshal.PtrToStructure<MpvEventEndFile>(ev.data);
                     if (ef.reason == 4)
                     {
-                        var vid = VideoId;
-                        App.Post(() => Stop(vid, saveToDb: false));
+                        var key = Key;
+                        App.Post(() => Stop(key, saveToDb: false));
                         return;
                     }
                     continue;
@@ -309,7 +323,8 @@ public static class BgPlayers
 
     private static readonly ConcurrentDictionary<string, Instance> _all = new();
 
-    public static bool Has(string videoId) => _all.ContainsKey(videoId);
+    public static bool Has(string key) => _all.ContainsKey(key);
+    public static bool HasVideo(string videoId) => _all.Values.Any(i => i.VideoId == videoId);
     public static bool IsPlaying(string videoId) => _all.TryGetValue(videoId, out var i) && !i.Paused;
     public static bool IsPaused(string videoId) => _all.TryGetValue(videoId, out var i) && i.Paused;
     public static bool IsMuted(string videoId) => _all.TryGetValue(videoId, out var i) && i.Muted;
@@ -324,10 +339,12 @@ public static class BgPlayers
     public static int ActiveCount => _all.Values.Count(i => !i.Paused);
 
     /// <summary>Starts playing videoId in a background audio player (or resumes it if already loaded).</summary>
-    public static void Play(string videoId, double? startOverride = null)
+    public static void Play(string key, double? startOverride = null)
     {
+        var split = key.IndexOf('|');
+        var videoId = split >= 0 ? key[(split + 1)..] : key;
         if (string.IsNullOrEmpty(videoId)) return;
-        if (_all.TryGetValue(videoId, out var existing))
+        if (_all.TryGetValue(key, out var existing))
         {
             existing.SetPause(false);
             App.Invalidate();
@@ -338,11 +355,12 @@ public static class BgPlayers
         {
             var victim = _all.Values.OrderByDescending(i => i.Paused).ThenBy(i => i.CreatedAt).FirstOrDefault();
             if (victim == null) break;
-            Stop(victim.VideoId);
+            var victimKey = _all.FirstOrDefault(kv => ReferenceEquals(kv.Value, victim)).Key;
+            if (victimKey != null) Stop(victimKey);
         }
         var start = startOverride ?? Shell.GetSavedTabPos(videoId) ?? Db.ResumePosition(videoId) ?? 0;
-        var inst = new Instance(videoId, start);
-        if (!_all.TryAdd(videoId, inst)) return;
+        var inst = new Instance(key, videoId, start);
+        if (!_all.TryAdd(key, inst)) return;
         App.Invalidate();
         _ = Task.Run(async () =>
         {
@@ -363,7 +381,7 @@ public static class BgPlayers
                         try { stream = await Resolver.Instance.GetAsync(videoId); } catch { }
                     }
                 }
-                if (!_all.TryGetValue(videoId, out var current) || !ReferenceEquals(current, inst))
+                if (!_all.TryGetValue(key, out var current) || !ReferenceEquals(current, inst))
                 {
                     inst.Dispose();
                     return;
@@ -373,8 +391,8 @@ public static class BgPlayers
             catch (Exception e)
             {
                 Paths.Log($"bg play {videoId}: {e.Message}");
-                if (_all.TryGetValue(videoId, out var current) && ReferenceEquals(current, inst))
-                    Stop(videoId, saveToDb: false);
+                if (_all.TryGetValue(key, out var current) && ReferenceEquals(current, inst))
+                    Stop(key, saveToDb: false);
                 else
                     inst.Dispose();
             }
@@ -402,13 +420,14 @@ public static class BgPlayers
         var dur = inst.Duration;
         if (saveToDb && pos > 2)
         {
-            var id = videoId;
+            var id = inst.VideoId;
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 try { Db.UpdateLatestPosition(id, pos, dur); }
                 catch { }
             });
         }
+        inst.Cmd("set", "mute", "yes");
         ThreadPool.QueueUserWorkItem(_ => inst.Dispose());
         App.Invalidate();
         return pos;

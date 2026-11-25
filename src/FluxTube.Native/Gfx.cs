@@ -68,6 +68,21 @@ public static unsafe class Gfx
 
     public const string Font = "Segoe UI";
     public static string IconFont = "Segoe Fluent Icons";
+    private static IDWriteFontCollection? _lucideFonts;
+    private static readonly Dictionary<string, string> LucideGlyphs = new()
+    {
+        [Th.Back] = "\ue04c", [Th.Home] = "\ue0f8", [Th.Subs] = "\ue472", [Th.Later] = "\ue24f",
+        [Th.Like] = "\ue189", [Th.Dislike] = "\ue188", [Th.History] = "\ue1f4", [Th.Eye] = "\ue0be",
+        [Th.Download] = "\ue0b6", [Th.TikTok] = "\ue29a", [Th.Settings] = "\ue157", [Th.Refresh] = "\ue148",
+        [Th.Search] = "\ue154", [Th.Account] = "\ue46c", [Th.Play] = "\ue13f", [Th.Pause] = "\ue131",
+        [Th.Close] = "\ue1b1", [Th.More] = "\ue0ba", [Th.Folder] = "\ue0dc", [Th.Delete] = "\ue18d",
+        [Th.Expand] = "\ue115", [Th.Rewind] = "\ue14b", [Th.Forward] = "\ue14c", [Th.Check] = "\ue070",
+        [Th.Link] = "\ue107", [Th.Share] = "\ue159", [Th.Hamburger] = "\ue118", [Th.Add] = "\ue140",
+        [Th.Volume] = "\ue1aa", [Th.Mute] = "\ue1ab", [Th.Copy] = "\ue0a2", [Th.Globe] = "\ue0eb",
+        [Th.Comment] = "\ue119", [Th.Headphones] = "\ue0f4", [Th.Info] = "\ue0fe",
+        [Th.ChevronRight] = "\ue073", [Th.ChevronUp] = "\ue074", [Th.ChevronDown] = "\ue071",
+        [Th.OpenNew] = "\ue0bd", [Th.Restart] = "\ue14b",
+    };
 
     private static ID2D1SolidColorBrush? _scratchBrush;
     private static ID2D1Bitmap1? _grainBmp;
@@ -89,6 +104,22 @@ public static unsafe class Gfx
         _d2dFactory = D2D1.D2D1CreateFactory<ID2D1Factory1>(Vortice.Direct2D1.FactoryType.SingleThreaded);
         using (var fonts = _dw.GetSystemFontCollection(false))
             if (!fonts.FindFamilyName(IconFont, out _)) IconFont = "Segoe MDL2 Assets";
+        try
+        {
+            var file = Path.Combine(AppContext.BaseDirectory, "Assets", "fonts", "lucide.ttf");
+            if (File.Exists(file))
+            {
+                using var factory = _dw.QueryInterface<IDWriteFactory5>();
+                using var fontFile = _dw.CreateFontFileReference(file);
+                using var builder = factory.CreateFontSetBuilder();
+                builder.AddFontFile(fontFile);
+                using var fontSet = builder.CreateFontSet();
+                _lucideFonts = factory.CreateFontCollectionFromFontSet(fontSet);
+                if (!_lucideFonts.FindFamilyName("lucide", out _)) throw new InvalidOperationException("Lucide font family missing");
+                FluxTube.Services.Paths.Log("Lucide icons loaded");
+            }
+        }
+        catch (Exception e) { _lucideFonts = null; FluxTube.Services.Paths.Log("Lucide icons unavailable: " + e.Message); }
         CreateDevice();
     }
 
@@ -479,8 +510,8 @@ public static unsafe class Gfx
 
     // ---------------- text ----------------
 
-    private readonly record struct FKey(int Size10, int Weight, bool Icon);
-    private readonly record struct TKey(string Text, int Size10, int Weight, int MaxW, int Lines, bool Icon);
+    private readonly record struct FKey(int Size10, int Weight, bool Icon, bool Lucide = false);
+    private readonly record struct TKey(string Text, int Size10, int Weight, int MaxW, int Lines, bool Icon, bool Lucide = false);
 
     private static readonly Dictionary<FKey, (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH)> _formats = new();
     private static Dictionary<TKey, TextRun> _cur = new(), _prev = new();
@@ -493,7 +524,7 @@ public static unsafe class Gfx
     private static (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH) FormatLocked(FKey k)
     {
         if (_formats.TryGetValue(k, out var f)) return f;
-        var fmt = _dw.CreateTextFormat(k.Icon ? IconFont : Font, null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, "ru-ru");
+        var fmt = _dw.CreateTextFormat(k.Lucide ? "lucide" : k.Icon ? IconFont : Font, k.Lucide ? _lucideFonts : null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, "ru-ru");
         using var probe = _dw.CreateTextLayout("Ag", fmt, 1000, 1000);
         return _formats[k] = (fmt, _dw.CreateEllipsisTrimmingSign(fmt), probe.Metrics.Height);
     }
@@ -508,7 +539,7 @@ public static unsafe class Gfx
 
     private static TextRun Shape(TKey key)
     {
-        var (fmt, ellipsis, lineH) = FormatFor(new FKey(key.Size10, key.Weight, key.Icon));
+        var (fmt, ellipsis, lineH) = FormatFor(new FKey(key.Size10, key.Weight, key.Icon, key.Lucide));
         var width = key.MaxW == 0 ? 100000f : key.MaxW;
         var layout = _dw.CreateTextLayout(key.Text, fmt, width, key.Lines > 0 ? lineH * key.Lines + 1 : 100000f);
         layout.WordWrapping = key.Lines == 1 ? WordWrapping.NoWrap : WordWrapping.Wrap;
@@ -589,6 +620,13 @@ public static unsafe class Gfx
     /// <summary>Icon glyph centred in the box.</summary>
     public static void Icon(string glyph, R box, float size, uint color)
     {
+        if (_lucideFonts != null && LucideGlyphs.TryGetValue(glyph, out var lucide))
+        {
+            var key = Key(lucide, size, 400, 0, 1, true) with { Lucide = true };
+            var runLucide = _cur.TryGetValue(key, out var cached) ? cached : _cur[key] = Shape(key);
+            Draw(runLucide, Snap(box.X + (box.W - runLucide.W) / 2), Snap(box.Y + (box.H - runLucide.H) / 2), color);
+            return;
+        }
         var run = Text(glyph, size, 400, 0, 1, icon: true);
         Draw(run, Snap(box.X + (box.W - run.W) / 2), Snap(box.Y + (box.H - run.H) / 2), color);
     }

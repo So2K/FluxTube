@@ -47,6 +47,7 @@
     <None Include="..\..\third_party\dl\yt-dlp.exe" Link="tools\yt-dlp.exe" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\FluxTube\Assets\ytsrv.py" Link="Assets\ytsrv.py" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\FluxTube\Assets\browsercookies.py" Link="Assets\browsercookies.py" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Assets\fonts\lucide.ttf;Assets\fonts\LICENSE-lucide.txt" LinkBase="Assets\fonts" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\FluxTube\Assets\mpv\**" LinkBase="Assets\mpv" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -206,7 +206,8 @@ public static class Cards
             return;
         }
         if (over) hover.Over(v);
-        if (UI.MiddleClick(card)) Shell.OpenVideoInNewTab(v);
+        // On the home feed, leave MMB to the scroll view's autoscroll handler.
+        if (source != "home" && UI.MiddleClick(card)) Shell.OpenVideoInNewTab(v);
         else if (overChannel) { }
         else if (UI.Click(id, card, playSfx: false)) App.Post(() => Shell.OpenVideo(v, source));
         else if (UI.RightClick(card)) Menus.Popup(MenuFor(v));
@@ -1148,7 +1149,7 @@ public sealed class WatchPage : IPage
 
     public void Shown()
     {
-        if (PlaybackTracker.Instance.Current?.VideoId != Video.VideoId || !MpvPlayer.Instance.HasMedia)
+        if (!Shell.CurrentTabOwnsMainPlayer || PlaybackTracker.Instance.Current?.VideoId != Video.VideoId || !MpvPlayer.Instance.HasMedia)
         {
             Shell.Play(Video, _source);
             _subKey = ""; _audioId = "";

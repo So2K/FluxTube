@@ -79,6 +79,9 @@ public static class Shell
         public string Title = "";
         public string Sub = "";
         public bool KeepInBg = true;
+        public double Position;
+        public readonly string Key = Guid.NewGuid().ToString("N");
+        public string PlayKey => Key + "|" + Arg;
     }
 
     private static readonly List<Tab> _tabs = [];
@@ -89,6 +92,7 @@ public static class Shell
     private static long _hoverTabSince, _tabVolBoostUntil;
 
     public static IReadOnlyList<Tab> Tabs => _tabs;
+    public static bool CurrentTabOwnsMainPlayer => _tab >= 0 && _tab < _tabs.Count && _mainTabKey == _tabs[_tab].Key;
     public static R TabPreviewRect => _tabPreviewRect;
     public static void SyncCookieStamp() { _cookieStamp = CookieStamp(); _wasLoggedIn = CookieStore.IsLoggedIn; }
 
@@ -115,6 +119,11 @@ public static class Shell
         if (_tab >= 0 && _tab < _tabs.Count)
         {
             var t = _tabs[_tab];
+            if (t.Kind != kind || t.Arg != arg)
+            {
+                if (t.Kind == "video") BgPlayers.Stop(t.PlayKey);
+                t.Position = 0;
+            }
             t.Kind = kind; t.Arg = arg; t.Title = title; t.Sub = sub;
         }
         else
@@ -157,7 +166,7 @@ public static class Shell
         }
     }
 
-    public static void OpenVideoInNewTab(VideoItem v, bool activate = false) => OpenInNewTab("video", v.VideoId, v.Title, v.Channel, activate);
+    public static void OpenVideoInNewTab(VideoItem v, bool activate = false) => NewTab("video", v.VideoId, v.Title, v.Channel, activate);
 
     public static void ReopenClosedTab()
     {
@@ -175,7 +184,8 @@ public static class Shell
         if (i < 0 || i >= _tabs.Count) return;
         Sfx.Tab();
         var s = _tabs[i];
-        _tabs.Insert(i + 1, new Tab { Kind = s.Kind, Arg = s.Arg, Title = s.Title, Sub = s.Sub, KeepInBg = s.KeepInBg });
+        _tabs.Insert(i + 1, new Tab { Kind = s.Kind, Arg = s.Arg, Title = s.Title, Sub = s.Sub, KeepInBg = s.KeepInBg,
+            Position = s.Kind == "video" && s.Key == _mainTabKey ? CurrentLivePos() : s.Position });
         GoTab(i + 1);
     }
 
@@ -190,6 +200,8 @@ public static class Shell
 
     // Exact live playback position per video tab (bounded to avoid unbounded growth)
     private static readonly Dictionary<string, double> _tabPos = new();
+    private static string? _pendingBgHandoff;
+    private static string? _pendingBgVideoId, _mainTabKey;
 
     private static void SaveTabPos(string videoId, double pos)
     {
@@ -205,7 +217,11 @@ public static class Shell
     public static double? GetSavedTabPos(string videoId)
         => _tabPos.TryGetValue(videoId, out var p) && p > 0.3 ? p : null;
 
-    private static double CurrentLivePos() => P.TimePos;
+    private static double CurrentLivePos()
+    {
+        var live = P.GetDouble("time-pos");
+        return live > 0 ? live : P.TimePos;
+    }
 
     private static bool VideoStillOpenInOtherTab(string videoId, int excludeIdx)
     {
@@ -225,19 +241,20 @@ public static class Shell
         if (cur == null || cur.VideoId == newVideoId || !P.HasMedia || T.CurrentSource == "shorts") return;
         var pos = CurrentLivePos();
         SaveTabPos(cur.VideoId, pos);
-        if (P.Paused || BgPlayers.Has(cur.VideoId)) return;
+        if (P.Paused) return;
         // Only keep playing in background if that video is open in another tab with KeepInBg enabled
         bool allowBg = false;
         for (int i = 0; i < _tabs.Count; i++)
         {
             if (i != _tab && _tabs[i].Kind == "video" && _tabs[i].Arg == cur.VideoId && _tabs[i].KeepInBg)
             {
-                allowBg = true;
+                allowBg = !BgPlayers.Has(_tabs[i].PlayKey);
                 break;
             }
         }
         if (!allowBg) return;
-        BgPlayers.Play(cur.VideoId, pos);
+        var owner = _tabs.FirstOrDefault(t => t.Key == _mainTabKey);
+        if (owner?.Kind == "video" && owner.Arg == cur.VideoId) BgPlayers.Play(owner.PlayKey, pos);
     }
 
     public static void GoTab(int i)
@@ -249,18 +266,20 @@ public static class Shell
         if (_tab >= 0 && _tab < _tabs.Count)
         {
             var prev = _tabs[_tab];
-            if (prev.Kind == "video" && T.Current?.VideoId == prev.Arg && P.HasMedia)
+            if (prev.Kind == "video" && _mainTabKey == prev.Key && T.Current?.VideoId == prev.Arg && P.HasMedia)
             {
                 var pos = CurrentLivePos();
+                prev.Position = pos;
                 SaveTabPos(prev.Arg, pos);
-                if (target.Kind == "video" && target.Arg != prev.Arg && !P.Paused && prev.KeepInBg && !BgPlayers.Has(prev.Arg))
-                    BgPlayers.Play(prev.Arg, pos);
+                if (target.Kind == "video" && target.Key != prev.Key && !P.Paused && prev.KeepInBg && !BgPlayers.Has(prev.PlayKey))
+                    BgPlayers.Play(prev.PlayKey, pos);
             }
         }
         // If target video tab is currently playing in background, capture its exact live position before switching
-        if (target.Kind == "video" && BgPlayers.Has(target.Arg))
+        if (target.Kind == "video" && BgPlayers.Has(target.PlayKey))
         {
-            var pos = BgPlayers.Stop(target.Arg, saveToDb: false);
+            var pos = BgPlayers.GetTimePos(target.PlayKey);
+            target.Position = pos;
             SaveTabPos(target.Arg, pos);
         }
         _tab = i;
@@ -278,18 +297,19 @@ public static class Shell
         var wasActive = i == _tab;
         _tabs.RemoveAt(i);
 
-        if (removed.Kind == "video" && !VideoStillOpenInOtherTab(removed.Arg, -1))
+        if (removed.Kind == "video")
         {
-            BgPlayers.Stop(removed.Arg);
-            _tabPos.Remove(removed.Arg);
+            BgPlayers.Stop(removed.PlayKey);
+            if (!VideoStillOpenInOtherTab(removed.Arg, -1)) _tabPos.Remove(removed.Arg);
             // If this closed tab was the last owner of the main player's video, stop main player cleanly (no ghost mini-player!)
-            if (T.Current?.VideoId == removed.Arg && T.CurrentSource != "shorts")
+            if (_mainTabKey == removed.Key && T.CurrentSource != "shorts")
             {
                 T.Stop();
+                _mainTabKey = null;
                 VideoReady = false;
             }
         }
-        _closedTabs.Add(new Tab { Kind = removed.Kind, Arg = removed.Arg, Title = removed.Title, Sub = removed.Sub, KeepInBg = removed.KeepInBg });
+        _closedTabs.Add(new Tab { Kind = removed.Kind, Arg = removed.Arg, Title = removed.Title, Sub = removed.Sub, KeepInBg = removed.KeepInBg, Position = removed.Position });
         if (_closedTabs.Count > 12) _closedTabs.RemoveAt(0);
 
         if (_tabs.Count == 0) { _tab = -1; _back.Clear(); OpenRoot("home"); return; }
@@ -312,13 +332,14 @@ public static class Shell
         {
             if (i == keep) continue;
             var rem = _tabs[i];
-            if (rem.Kind == "video" && rem.Arg != kept.Arg)
+            if (rem.Kind == "video")
             {
-                BgPlayers.Stop(rem.Arg);
-                _tabPos.Remove(rem.Arg);
-                if (T.Current?.VideoId == rem.Arg && T.CurrentSource != "shorts")
+                BgPlayers.Stop(rem.PlayKey);
+                if (rem.Arg != kept.Arg) _tabPos.Remove(rem.Arg);
+                if (_mainTabKey == rem.Key && T.CurrentSource != "shorts")
                 {
                     T.Stop();
+                    _mainTabKey = null;
                     VideoReady = false;
                 }
             }
@@ -327,9 +348,10 @@ public static class Shell
         _tab = 0;
         if (_cur == null || needSwitch)
         {
-            if (kept.Kind == "video" && BgPlayers.Has(kept.Arg))
+            if (kept.Kind == "video" && BgPlayers.Has(kept.PlayKey))
             {
-                var pos = BgPlayers.Stop(kept.Arg, saveToDb: false);
+                var pos = BgPlayers.GetTimePos(kept.PlayKey);
+                kept.Position = pos;
                 SaveTabPos(kept.Arg, pos);
             }
             Navigate(PageFor(kept), push: false);
@@ -346,13 +368,14 @@ public static class Shell
         {
             var rem = _tabs[i];
             _tabs.RemoveAt(i);
-            if (rem.Kind == "video" && !VideoStillOpenInOtherTab(rem.Arg, -1))
+            if (rem.Kind == "video")
             {
-                BgPlayers.Stop(rem.Arg);
-                _tabPos.Remove(rem.Arg);
-                if (T.Current?.VideoId == rem.Arg && T.CurrentSource != "shorts")
+                BgPlayers.Stop(rem.PlayKey);
+                if (!VideoStillOpenInOtherTab(rem.Arg, -1)) _tabPos.Remove(rem.Arg);
+                if (_mainTabKey == rem.Key && T.CurrentSource != "shorts")
                 {
                     T.Stop();
+                    _mainTabKey = null;
                     VideoReady = false;
                 }
             }
@@ -368,8 +391,8 @@ public static class Shell
         var items = new List<MenuItem>();
         if (t.Kind == "video")
         {
-            var isMain = T.Current?.VideoId == t.Arg && P.HasMedia;
-            var isBg = BgPlayers.Has(t.Arg);
+            var isMain = _mainTabKey == t.Key && T.Current?.VideoId == t.Arg && P.HasMedia;
+            var isBg = BgPlayers.Has(t.PlayKey);
             if (isMain)
             {
                 items.Add(new(P.Paused ? "Продолжить воспроизведение" : "Поставить на паузу", P.TogglePause, icon: P.Paused ? Th.Play : Th.Pause, shortcut: "Space"));
@@ -377,14 +400,14 @@ public static class Shell
             }
             else if (isBg)
             {
-                var bgPaused = BgPlayers.IsPaused(t.Arg);
-                items.Add(new(bgPaused ? "Продолжить в фоне" : "Пауза (в фоне)", () => BgPlayers.TogglePause(t.Arg), icon: bgPaused ? Th.Play : Th.Pause));
-                items.Add(new(BgPlayers.IsMuted(t.Arg) ? "Включить звук" : "Выключить звук", () => BgPlayers.ToggleMute(t.Arg), icon: BgPlayers.IsMuted(t.Arg) ? Th.Volume : Th.Mute));
-                items.Add(new("Остановить фоновое воспроизведение", () => BgPlayers.Stop(t.Arg), icon: Th.Stop));
+                var bgPaused = BgPlayers.IsPaused(t.PlayKey);
+                items.Add(new(bgPaused ? "Продолжить в фоне" : "Пауза (в фоне)", () => BgPlayers.TogglePause(t.PlayKey), icon: bgPaused ? Th.Play : Th.Pause));
+                items.Add(new(BgPlayers.IsMuted(t.PlayKey) ? "Включить звук" : "Выключить звук", () => BgPlayers.ToggleMute(t.PlayKey), icon: BgPlayers.IsMuted(t.PlayKey) ? Th.Volume : Th.Mute));
+                items.Add(new("Остановить фоновое воспроизведение", () => BgPlayers.Stop(t.PlayKey), icon: Th.Stop));
             }
             else
             {
-                items.Add(new("Запустить в фоне (звук)", () => { t.KeepInBg = true; BgPlayers.Play(t.Arg); Toast("Играет в фоне: " + TabLabel(t), Th.Good, 2000); }, icon: Th.Headphones));
+                items.Add(new("Запустить в фоне (звук)", () => { t.KeepInBg = true; BgPlayers.Play(t.PlayKey); Toast("Играет в фоне: " + TabLabel(t), Th.Good, 2000); }, icon: Th.Headphones));
             }
             items.Add(MenuItem.Sep);
         }
@@ -436,10 +459,10 @@ public static class Shell
             if (!active) UI.Glow(id, r, 8, over);
 
             var isVideo = t.Kind == "video";
-            var isMainPlaying = isVideo && T.Current?.VideoId == t.Arg && P.HasMedia;
-            var isBg = isVideo && BgPlayers.Has(t.Arg);
-            var playingNow = (isMainPlaying && !P.Paused) || (isBg && BgPlayers.IsPlaying(t.Arg));
-            var bgLoading = isBg && BgPlayers.IsLoading(t.Arg);
+            var isMainPlaying = isVideo && _mainTabKey == t.Key && T.Current?.VideoId == t.Arg && P.HasMedia;
+            var isBg = isVideo && BgPlayers.Has(t.PlayKey);
+            var playingNow = (isMainPlaying && !P.Paused) || (isBg && BgPlayers.IsPlaying(t.PlayKey));
+            var bgLoading = isBg && BgPlayers.IsLoading(t.PlayKey);
 
             // Mouse wheel over any video tab smoothly adjusts THAT tab's volume with video-scaled volume SFX!
             if (over && isVideo && UI.Wheel != 0)
@@ -457,8 +480,8 @@ public static class Shell
                 }
                 else if (isBg)
                 {
-                    BgPlayers.AdjustVolume(t.Arg, delta);
-                    PlayVolumeSfx(BgPlayers.GetVolume(t.Arg));
+                    BgPlayers.AdjustVolume(t.PlayKey, delta);
+                    PlayVolumeSfx(BgPlayers.GetVolume(t.PlayKey));
                 }
             }
 
@@ -482,8 +505,8 @@ public static class Shell
                     if (UI.IconButton(UI.Id(id, 2), iconR, glyph, 10, col))
                     {
                         btnHandled = true;
-                        var tabRef = t;
-                        deferred ??= isMainPlaying ? P.TogglePause : () => { tabRef.KeepInBg = true; BgPlayers.TogglePause(tabRef.Arg); };
+                        // The icon is part of the tab's hit area when that tab is inactive.
+                        deferred ??= active && isMainPlaying ? P.TogglePause : () => GoTab(tabIdx);
                     }
                 }
             }
@@ -498,12 +521,12 @@ public static class Shell
             if (isBg)
             {
                 var muteR = new R(close.X - 22, r.Y + (r.H - 21) / 2, 21, 21);
-                var muted = BgPlayers.IsMuted(t.Arg);
+                var muted = BgPlayers.IsMuted(t.PlayKey);
                 if (UI.IconButton(UI.Id(id, 3), muteR, muted ? Th.Mute : Th.Volume, 10.5f, muted ? Th.Warn : Th.Brand))
                 {
                     btnHandled = true;
                     var vid = t.Arg;
-                    deferred ??= () => BgPlayers.ToggleMute(vid);
+                    deferred ??= () => BgPlayers.ToggleMute(t.PlayKey);
                 }
                 rightUsed += 22;
             }
@@ -553,8 +576,8 @@ public static class Shell
         if (t.Kind == "video")
         {
             const float cw = 276, pad = 10, tw = cw - pad * 2, th = 144;
-            var isMain = T.Current?.VideoId == t.Arg && P.HasMedia;
-            var isBg = BgPlayers.Has(t.Arg);
+            var isMain = _mainTabKey == t.Key && T.Current?.VideoId == t.Arg && P.HasMedia;
+            var isBg = BgPlayers.Has(t.PlayKey);
             bool hasAudio = isMain || isBg;
             var title = TabLabel(t);
             var titleRun = Gfx.Text(title, 13, 600, tw, 2);
@@ -574,18 +597,18 @@ public static class Shell
             var thumbUrl = t.Arg.Length == 11 ? $"https://i.ytimg.com/vi/{t.Arg}/hq720.jpg" : null;
             Cards.ThumbUrl(thumbR, thumbUrl, 8, Th.Menu);
 
-            string? status = isMain ? (P.Paused ? "Пауза" : "Играет") : isBg ? (BgPlayers.IsPaused(t.Arg) ? "Пауза (фон)" : "В фоне") : null;
+            string? status = isMain ? (P.Paused ? "Пауза" : "Играет") : isBg ? (BgPlayers.IsPaused(t.PlayKey) ? "Пауза (фон)" : "В фоне") : null;
             if (status != null)
             {
                 var sr = Gfx.Text(status, 11, 600);
                 var sb = new R(thumbR.X + 7, thumbR.Y + 7, sr.W + 14, sr.H + 5);
-                bool activePlay = (isMain && !P.Paused) || (isBg && BgPlayers.IsPlaying(t.Arg));
+                bool activePlay = (isMain && !P.Paused) || (isBg && BgPlayers.IsPlaying(t.PlayKey));
                 Gfx.Fill(sb, Gfx.Fade(activePlay ? Th.Brand : 0xFF141418, 0.88f * ease), 5);
                 Gfx.Draw(sr, sb.X + 7, sb.Y + 2.5f, Gfx.Fade(0xFFFFFFFF, ease));
             }
 
-            double pos = isMain ? P.TimePos : isBg ? BgPlayers.GetTimePos(t.Arg) : (GetSavedTabPos(t.Arg) ?? 0);
-            double dur = isMain ? P.Duration : isBg ? BgPlayers.GetDuration(t.Arg) : 0;
+            double pos = isMain ? P.TimePos : isBg ? BgPlayers.GetTimePos(t.PlayKey) : t.Position;
+            double dur = isMain ? P.Duration : isBg ? BgPlayers.GetDuration(t.PlayKey) : 0;
             if (dur > 1 && pos > 0)
                 UI.Progress(new R(thumbR.X + 6, thumbR.Bottom - 5, thumbR.W - 12, 3), pos / dur, Th.A(0.28f));
 
@@ -600,8 +623,8 @@ public static class Shell
             if (hasAudio)
             {
                 ty += 4;
-                int vol = isMain ? Math.Clamp((int)Math.Round(P.Volume), 0, 150) : BgPlayers.GetVolume(t.Arg);
-                bool muted = isMain ? P.Muted : BgPlayers.IsMuted(t.Arg);
+                int vol = isMain ? Math.Clamp((int)Math.Round(P.Volume), 0, 150) : BgPlayers.GetVolume(t.PlayKey);
+                bool muted = isMain ? P.Muted : BgPlayers.IsMuted(t.PlayKey);
                 var rowR = new R(card.X + pad, ty, tw, 24);
                 Gfx.Fill(rowR, Gfx.Fade(Th.A(0.08f), ease), 6);
                 Gfx.Icon(muted || vol == 0 ? Th.Mute : Th.Volume, new R(rowR.X + 6, rowR.Y + 4, 16, 16), 11, Gfx.Fade(muted ? Th.Warn : Th.Brand, ease));
@@ -697,7 +720,7 @@ public static class Shell
     {
         _args = args;
         ThumbPack.Open();
-        MediaCache.IsActive = BgPlayers.Has;
+        MediaCache.IsActive = BgPlayers.HasVideo;
         ThreadPool.SetMinThreads(4, 2);
         _search = new Edit("Поиск или ссылка YouTube…") { Bg = () => Th.Card };
         _search.Enter = () => Submit(_search.Text);
@@ -754,7 +777,17 @@ public static class Shell
         _ = Task.Run(Images.CleanDisk);
         _ = Task.Run(QuickStream.Warm);
         _ = Task.Run(MediaCache.Enforce);
-        P.FileLoaded += () => Storyboard.Forget();
+        P.FileLoaded += () =>
+        {
+            Storyboard.Forget();
+            var id = _pendingBgHandoff;
+            if (id == null || P.CurrentVideoId != _pendingBgVideoId) return;
+            _pendingBgHandoff = null;
+            _pendingBgVideoId = null;
+            var live = BgPlayers.Stop(id, saveToDb: false);
+            if (live > 0.3 && Math.Abs(live - P.TimePos) > 0.2) P.SeekAbsolute(live);
+            P.Command("set", "mute", App.Mute ? "yes" : "no");
+        };
         _ = Task.Run(YtDlp.UpdateIfStaleAsync);
         _cookieStamp = CookieStamp();
         _wasLoggedIn = CookieStore.IsLoggedIn;
@@ -968,10 +1001,17 @@ public static class Shell
         CancelSpace2x();
         MaybeHandoffToBg(v.VideoId);
         double? exactStart = null;
-        if (BgPlayers.Has(v.VideoId))
+        var tab = _tab >= 0 && _tab < _tabs.Count ? _tabs[_tab] : null;
+        var playKey = tab?.Kind == "video" && tab.Arg == v.VideoId ? tab.PlayKey : v.VideoId;
+        var fromBackground = BgPlayers.Has(playKey);
+        if (fromBackground)
         {
-            var pos = BgPlayers.Stop(v.VideoId, saveToDb: false);
+            var pos = BgPlayers.GetTimePos(playKey);
             if (pos > 0.3) exactStart = pos;
+        }
+        else if (!v.IsShort && tab?.Position is > 0.3)
+        {
+            exactStart = tab.Position;
         }
         else if (!v.IsShort && _tabPos.TryGetValue(v.VideoId, out var savedPos) && savedPos > 0.3)
         {
@@ -983,6 +1023,11 @@ public static class Shell
         void StartNow()
         {
             if (reqGen != _playReqGen || !P.IsReady) return;
+            _mainTabKey = tab?.Key;
+            _pendingBgHandoff = fromBackground ? playKey : null;
+            _pendingBgVideoId = fromBackground ? v.VideoId : null;
+            if (fromBackground) P.Command("set", "mute", "yes");
+            else P.Command("set", "mute", App.Mute ? "yes" : "no");
             if (v.IsShort && source == "shorts") P.Command("set", "loop-file", "inf");
             else if (T.Current?.VideoId != v.VideoId || T.CurrentSource == "shorts") P.Command("set", "loop-file", "no");
             T.Play(v, source, exactStart);
