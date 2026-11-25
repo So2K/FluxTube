@@ -27,6 +27,8 @@ public sealed class PlaybackTracker
     public string? CurrentSource { get; private set; }
     public bool IsLocal { get; private set; }
     public event Action? CurrentChanged;
+    public event Action<string>? PlaybackUnavailable;
+    public event Action? VerificationRequired;
 
     private long _clickAt, _clickAt2;
     private bool _frameLogged = true;
@@ -217,8 +219,17 @@ public sealed class PlaybackTracker
                         {
                             if (gen != _gen) return;
                             if (s != null) LoadFull(s, v.Title, start, false);
-                            else _p.Load(v.Url, id, start); // fallback: mpv's own ytdl hook
-                            Paths.Log($"play {id}: yt-dlp link after {Elapsed():0} ms (no quick start)");
+                            else
+                            {
+                                var error = Resolver.Instance.FailureFor(id);
+                                var needsLogin = error?.Contains("Sign in to confirm", StringComparison.OrdinalIgnoreCase) == true
+                                    || error?.Contains("not a bot", StringComparison.OrdinalIgnoreCase) == true;
+                                PlaybackUnavailable?.Invoke(needsLogin
+                                    ? "YouTube запросил проверку. Пройдите её в браузере и закройте окно браузера — FluxTube сохранит вход."
+                                    : "Не удалось получить видеопоток YouTube. Проверьте подключение и попробуйте ещё раз.");
+                                if (needsLogin) VerificationRequired?.Invoke();
+                            }
+                            Paths.Log($"play {id}: {(s != null ? "yt-dlp link" : "no playable link")} after {Elapsed():0} ms (no quick start)");
                         });
                     }
                 });

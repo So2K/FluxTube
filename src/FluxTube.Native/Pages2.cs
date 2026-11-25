@@ -535,7 +535,7 @@ public sealed class SettingsPage : IPage
                 Sfx.RebuildBuffers(); Sfx.Preview("click"); Saved();
             }
         }
-        ToggleRow("sfx8d", "8D Реверберация звуков интерфейса", s.UiSoundsReverb8D, v => { s.UiSoundsReverb8D = v; Sfx.RebuildBuffers(); Sfx.Preview("video_open"); }, "Объёмный 8D стерео-ревербератор (пространственное эхо вокруг головы на все стандартные и свои звуки)");
+        ToggleRow("sfx8d", "Реверберация звуков интерфейса", s.UiSoundsReverb8D, v => { s.UiSoundsReverb8D = v; Sfx.RebuildBuffers(); Sfx.Preview("video_open"); }, "Короткое мягкое эхо по центру для стандартных и своих звуков");
 
         var sfxCustomRow = Row("Свои звуки интерфейса (WAV / MP3 / OGG / FLAC / ZIP)",
             s.CustomSfx.Count > 0 ? $"Заменено звуков: {s.CustomSfx.Count} из {Sfx.Slots.Length}. Можно закинуть сразу .zip архив со звуками."
@@ -646,7 +646,6 @@ public sealed class SettingsPage : IPage
             }
         }
         ToggleRow("audio8d", "8D Аудио и реверберация в плеере", s.PlayerAudio8D, v => s.PlayerAudio8D = v, "Плавный 8D-эффект вращения звука и глубокая реверберация на видео и музыку (включается на лету)");
-        ToggleRow("wscroll", "Прокручивать всю страницу с видео", s.ScrollWholeWatchPage, v => s.ScrollWholeWatchPage = v, "Включено: при прокрутке вниз видео скрывается, удобно читать комментарии. Выключено: комментарии листаются отдельно.");
         ToggleRow("shov", "Подпись Shorts поверх видео при наведении", s.ShortsInfoOverlay, v => { s.ShortsInfoOverlay = v; Shell.PushPlayerState(); }, "Включено: когда панель Shorts скрыта, канал и название появляются поверх видео при наведении. Выключено: аккуратный блок текста сбоку.");
         ToggleRow("sb", "SponsorBlock", s.SponsorBlock, v => s.SponsorBlock = v, "Пропускать рекламные вставки авторов (выделяются жирной зелёной полосой на таймлайне)");
         var cr = Row("Что пропускать", null, 50, 560);

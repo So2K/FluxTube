@@ -267,6 +267,11 @@ public sealed unsafe class Edit
         {
             if (m == W.WM_KEYDOWN)
             {
+                if ((int)w == 'R' && W.KeyDown(W.VK_CONTROL))
+                {
+                    Shell.Key('R', true, false);
+                    return 0;
+                }
                 if ((int)w == 'A' && W.KeyDown(W.VK_CONTROL))
                 {
                     W.SendMessageW(h, 0x00B1 /*EM_SETSEL*/, 0, -1);

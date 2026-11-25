@@ -132,6 +132,7 @@ public sealed class Resolver
     public static Resolver Instance { get; } = new();
 
     private readonly ConcurrentDictionary<string, Task<StreamInfo?>> _cache = new();
+    private readonly ConcurrentDictionary<string, string> _failures = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<StreamInfo?>> _pending = new();
     private readonly ConcurrentDictionary<string, byte> _onClickServer = new();
     private readonly LinkedList<string> _queue = new(); // front = most urgent
@@ -160,6 +161,8 @@ public sealed class Resolver
     /// <summary>Ready stream if it is already resolved, without waiting.</summary>
     public StreamInfo? TryGet(string videoId)
         => _cache.TryGetValue(videoId, out var t) && t.IsCompletedSuccessfully && t.Result is { Fresh: true } s ? s : null;
+
+    public string? FailureFor(string videoId) => _failures.TryGetValue(videoId, out var reason) ? reason : null;
 
     /// <summary>The user wants this one now: it goes straight to the reserved process, whatever the background is doing.</summary>
     public Task<StreamInfo?> GetAsync(string videoId)
@@ -226,9 +229,9 @@ public sealed class Resolver
         _ = Task.Run(Pump);
     }
 
-    public void Invalidate() => _cache.Clear(); // quality or cookies changed
+    public void Invalidate() { _cache.Clear(); _failures.Clear(); } // quality or cookies changed
 
-    public void Forget(string videoId) { _cache.TryRemove(videoId, out _); _pending.TryRemove(videoId, out _); }
+    public void Forget(string videoId) { _cache.TryRemove(videoId, out _); _pending.TryRemove(videoId, out _); _failures.TryRemove(videoId, out _); }
 
     /// <summary>Starts both Python processes early so their import cost is paid before the first click.</summary>
     public void Warm() { _click.Ensure(); _bg.Ensure(); }
@@ -238,7 +241,7 @@ public sealed class Resolver
     /// <summary>First finished attempt wins; a failure only counts when nobody else is still trying.</summary>
     private void Finish(string id, TaskCompletionSource<StreamInfo?> tcs, StreamInfo? s)
     {
-        if (s != null) tcs.TrySetResult(s);
+        if (s != null) { _failures.TryRemove(id, out _); tcs.TrySetResult(s); }
         else if (!_onClickServer.ContainsKey(id) && !_running.ContainsKey(id)) tcs.TrySetResult(null);
         if (tcs.Task.IsCompleted)
         {
@@ -316,7 +319,9 @@ public sealed class Resolver
             var n = await srv.Ask(req, id);
             if (n["ok"]?.GetValue<bool>() != true)
             {
-                Paths.Log($"resolve {id}: {n.S("error")}");
+                var error = n.S("error") ?? "YouTube не вернул ссылку на видео";
+                _failures[id] = error;
+                Paths.Log($"resolve {id}: {error}");
                 return null;
             }
             return ToStream(id, n);

@@ -36,7 +36,6 @@ public static class Shell
     private static bool _fullscreen;
     private static W.WINDOWPLACEMENT _savedPlacement;
     private static nint _savedStyle;
-    private static bool _mini = true;
 
     private static R _videoRect, _videoClip, _hostRect;
     private static R? _miniVideoRect;
@@ -51,6 +50,7 @@ public static class Shell
 
     private static string _toast = "";
     private static uint _toastColor;
+    private static Action? _toastAction;
     private static long _toastUntil;
     private static R _toastRect;
 
@@ -728,6 +728,8 @@ public static class Shell
             App.Invalidate();
         };
         P.MuteChanged += m => { Sfx.Toggle(!m); App.Invalidate(); };
+        T.PlaybackUnavailable += msg => Toast(msg, Th.Brand, 9000);
+        T.VerificationRequired += VerifyYouTube;
         P.LoadFailed += msg =>
         {
             if (T.Retrying) Toast("Поток оборвался, открываю заново…", Th.Warn, 2500);
@@ -1504,26 +1506,14 @@ public static class Shell
             UI.Wheel = 0;
         }
 
-        if (_mini)
-        {
-            float mw = 384, mh = 216;
-            var mr = new R(w - mw - 18, h - BarH - mh - 14, mw, mh);
-            _miniVideoRect = mr;
-            Gfx.Fill(mr.Inset(-4), Gfx.Fade(0xFF000000, 0.36f), 15);
-            Gfx.Fill(mr.Inset(-1), 0xFF0A0A0E, 13);
-            Gfx.Stroke(mr.Inset(-1), Th.A(0.18f), 13, 1f);
-            WantVideo(mr, cur.VideoId, radius: 12);
-            if (!VideoShown(cur.VideoId)) UI.Spinner(mr.X + mr.W / 2, mr.Y + mr.H / 2, 12, Th.Text);
-        }
-
         var thumb = new R(r.X + 14, r.Y + 9, 78, 44);
         Cards.Thumb(thumb, cur, false, 7, badge: false, behind: Th.Panel);
         if (UI.Click(UI.Id("np:thumb"), thumb)) App.Post(() => OpenVideo(cur, T.CurrentSource ?? "home"));
 
-        // Right controls: optional inline volume slider + 6 transport buttons
+        // Right controls: optional inline volume slider + transport buttons
         bool showVol = r.W > 740;
         float volW = showVol ? 132 : 0;
-        float bx = r.Right - 14 - 6 * 40;
+        float bx = r.Right - 14 - 5 * 40;
         float volX = bx - volW - (showVol ? 10 : 0);
         float tx = thumb.Right + 12, tw = (showVol ? volX : bx) - tx - 14;
 
@@ -1613,9 +1603,8 @@ public static class Shell
         if (UI.IconButton(UI.Id("np:b"), new R(bx, by, 36, 36), Th.Rewind)) P.Command("seek", "-10");
         if (UI.IconButton(UI.Id("np:p"), new R(bx + 40, by, 36, 36), P.Paused ? Th.Play : Th.Pause)) P.TogglePause();
         if (UI.IconButton(UI.Id("np:f"), new R(bx + 80, by, 36, 36), Th.Forward)) P.Command("seek", "10");
-        if (UI.IconButton(UI.Id("np:m"), new R(bx + 120, by, 36, 36), Th.Mini, 16, _mini ? Th.Brand : Th.Text)) _mini = !_mini;
-        if (UI.IconButton(UI.Id("np:o"), new R(bx + 160, by, 36, 36), Th.Expand)) App.Post(() => OpenVideo(cur, T.CurrentSource ?? "home"));
-        if (UI.IconButton(UI.Id("np:x"), new R(bx + 200, by, 36, 36), Th.Close)) App.Post(() => { T.Stop(); VideoReady = false; });
+        if (UI.IconButton(UI.Id("np:o"), new R(bx + 120, by, 36, 36), Th.Expand)) App.Post(() => OpenVideo(cur, T.CurrentSource ?? "home"));
+        if (UI.IconButton(UI.Id("np:x"), new R(bx + 160, by, 36, 36), Th.Close)) App.Post(() => { T.Stop(); VideoReady = false; });
     }
 
     private static void DrawToast(float w, float bottom)
@@ -1632,12 +1621,19 @@ public static class Shell
         Gfx.Stroke(r, Gfx.Fade(Th.Line, a), 12);
         Gfx.Fill(new R(r.X, r.Y + 8, 3, r.H - 16), Gfx.Fade(_toastColor, a), 1.5f);
         Gfx.Draw(run, r.X + 18, r.Y + 10, Gfx.Fade(Th.Text, a));
+        if (_toastAction != null && UI.Click(UI.Id("toast:action"), r))
+        {
+            var action = _toastAction;
+            _toastAction = null;
+            _toastUntil = 0;
+            App.Post(action);
+        }
         if (left < 260) UI.Animate();
     }
 
-    public static void Toast(string text, uint? color = null, int ms = 4000)
+    public static void Toast(string text, uint? color = null, int ms = 4000, Action? action = null)
     {
-        _toast = text; _toastColor = color ?? Th.Sub; _toastAt = Environment.TickCount64; _toastUntil = _toastAt + ms;
+        _toast = text; _toastColor = color ?? Th.Sub; _toastAction = action; _toastAt = Environment.TickCount64; _toastUntil = _toastAt + ms;
         App.After(ms - 250, App.Invalidate);
         App.After(ms + 20, App.Invalidate);
         App.Invalidate();
@@ -1883,7 +1879,7 @@ public static class Shell
             if (idx >= 0 && idx < _tabs.Count) GoTab(idx);
             return true;
         }
-        if (vk == W.VK_F5) { _cur?.Refresh(); return true; }
+        if (vk == W.VK_F5 || ctrl && vk == 'R') { _cur?.Refresh(); return true; }
         if (ctrl) return false;
 
         if (_cur is ShortsPage shorts)
@@ -1959,7 +1955,10 @@ public static class Shell
     public static void Login() => LoginNewAccount();
 
     /// <summary>Primary sign-in: opens the user's real DEFAULT Windows browser (Chrome/Edge/Brave/etc.) with clean profile + auto cookie capture.</summary>
-    public static void LoginNewAccount() => BrowserLogin.LoginWithDefaultBrowser();
+    public static void LoginNewAccount() => BrowserLogin.OpenExistingBrowserForLogin();
+
+    /// <summary>Open the default browser for a YouTube challenge and capture the refreshed session.</summary>
+    public static void VerifyYouTube() => BrowserLogin.OpenExistingBrowserForLogin();
 
     /// <summary>Secondary fallback: opens the built-in WebView2 Login Window with a clean session.</summary>
     public static void LoginWebView()

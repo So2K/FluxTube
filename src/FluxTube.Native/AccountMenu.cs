@@ -380,8 +380,8 @@ public static class AccountMenu
         else
         {
             Gfx.Draw("Вы не вошли", x + 16, y, 15, Th.Text, 600);
-            Gfx.Draw($"Вход через {BrowserLogin.DefaultBrowserName}: добавляйте несколько аккаунтов и меняйте их в 1 клик.", x + 16, y + 22, 12.5f, Th.Sub, 400, r.W - 32, 3);
-            if (UI.Pill(UI.Id("am:login"), x + 16, y + 66, 34, Th.Globe, "Войти через " + BrowserLogin.DefaultBrowserName, out _, accent: true)) { Close(); App.Post(Shell.LoginNewAccount); }
+            Gfx.Draw("Откройте YouTube в обычном браузере и возьмите вход из его профиля.", x + 16, y + 22, 12.5f, Th.Sub, 400, r.W - 32, 3);
+            if (UI.Pill(UI.Id("am:login"), x + 16, y + 66, 34, Th.Globe, "Открыть YouTube", out _, accent: true)) { Close(); App.Post(Shell.LoginNewAccount); }
             y += 110;
         }
         Sep(r, ref y);
@@ -409,7 +409,7 @@ public static class AccountMenu
         float x = r.X + slide, y = r.Y + 8;
         Header(r, x, ref y, "Аккаунты YouTube");
         var view = new R(r.X, y, r.W, MathF.Max(40, r.Bottom - y - 4));
-        float totalH = (_saved.Count == 0 ? 34 : _saved.Count * 54 + 12) + 164;
+        float totalH = (_saved.Count == 0 ? 34 : _saved.Count * 54 + 12) + 252;
         var scroll = UI.BeginScroll(_scrollAcc, view, totalH);
         y -= scroll;
 
@@ -459,7 +459,9 @@ public static class AccountMenu
             Sep(r, ref y);
         }
 
-        if (Item(r, x, ref y, Th.Globe, "Войти через " + BrowserLogin.DefaultBrowserName, false)) { Close(); App.Post(Shell.LoginNewAccount); }
+        if (Item(r, x, ref y, Th.Globe, "Открыть YouTube в браузере", false)) { Close(); App.Post(Shell.LoginNewAccount); }
+        if (Item(r, x, ref y, Th.Account, "Взять вход из Chrome", false)) { Close(); App.Post(() => BrowserLogin.ImportFromBrowser("chrome")); }
+        if (Item(r, x, ref y, Th.Account, "Взять вход из Firefox", false)) { Close(); App.Post(() => BrowserLogin.ImportFromBrowser("firefox")); }
         if (Item(r, x, ref y, Th.Account, "Встроенное окно входа…", false)) { Close(); App.Post(Shell.LoginWebView); }
         if (Item(r, x, ref y, Th.Folder, "Импорт из cookies.txt…", false))
         {

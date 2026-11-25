@@ -878,10 +878,10 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
 
     public void Draw(R r)
     {
-        float x0 = r.X + 24;
+        float x0 = r.X + 16;
         var headRun = Gfx.Draw(Header, x0, r.Y + 8, 22, Th.Text, 600, r.W - 260);
         var rw = UI.PillWidth(Th.Refresh, "Обновить");
-        float rightBtnX = r.Right - rw - 22;
+        float rightBtnX = r.Right - rw - 16;
         if (UI.Pill(UI.Id("refresh", _scroll), rightBtnX, r.Y + 8, 32, Th.Refresh, "Обновить", out _, Th.A(0.08f))) App.Post(Refresh);
         if (_loading && _items.Count > 0) UI.Spinner(rightBtnX - 24, r.Y + 24, 8, Th.Sub);
 
@@ -913,9 +913,9 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
             }
         }
 
-        float top = r.Y + 48;
-        if (kind == "home") top += DrawHomeChips(x0, top, r.W - 48);
-        if (kind == "search") top += DrawSearchBar(x0, top, r.W - 48);
+        float top = r.Y + 44;
+        if (kind == "home") top += DrawHomeChips(x0, top, r.W - 32);
+        if (kind == "search") top += DrawSearchBar(x0, top, r.W - 32);
         if (kind == "playlist" && _items.Count > 0 && arg is { Length: > 2 })
         {
             if (UI.Pill(UI.Id("pl:play", _scroll), x0, top, 36, Th.Play, "Воспроизвести все", out var pw, accent: true))
@@ -929,7 +929,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         if (_message != null && !_messageInline && !_messageDismissed)
         {
             var run = Gfx.Text(_message, 13.5f, 400, r.W - 110, 3);
-            var box = new R(x0, top, r.W - 48, run.H + 20);
+            var box = new R(x0, top, r.W - 32, run.H + 20);
             Gfx.Fill(box, Th.A(0.07f), 10);
             Gfx.Fill(new R(box.X, box.Y + 8, 3, box.H - 16), _messageColor, 1.5f);
             Gfx.Draw(run, box.X + 18, box.Y + 10, Th.Text);
@@ -938,13 +938,13 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
             top += box.H + 10;
         }
 
-        const float gap = 18;
-        var view = new R(x0, top, r.Right - x0 - 4, r.Bottom - top);
-        var usable = view.W - 14;
-        var cols = Math.Max(1, (int)((usable + gap) / (296 + gap)));
+        const float gap = 14;
+        var view = new R(x0, top, r.Right - x0 - 16, r.Bottom - top);
+        var usable = view.W - 12;
+        var cols = Math.Max(1, (int)((usable + gap) / (270 + gap)));
         var cardW = MathF.Floor((usable - gap * (cols - 1)) / cols);
         var thumbH = MathF.Round(cardW * 9 / 16);
-        var rowH = thumbH + 108;
+        var rowH = thumbH + 96;
         _cardW = cardW;
 
         if (_loading && _items.Count == 0)
@@ -973,7 +973,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 if (i >= _items.Count) break;
                 var v = _items[i];
                 float x = view.X + col * (cardW + gap), y = view.Y + row * rowH - scroll;
-                Cards.GridCard(new R(x, y, cardW, rowH - 14), thumbH, v, UI.Id(_scroll, i), _hover, Source);
+                Cards.GridCard(new R(x, y, cardW, rowH - 10), thumbH, v, UI.Id(_scroll, i), _hover, Source);
                 if (v.PlaylistId == null && !v.IsChannel && _seen.Add(v.VideoId)) LogSeen(v);
             }
         if (_loadingMore) UI.Spinner(view.X + usable / 2, view.Y + rows * rowH - scroll + 26, 10, Th.Sub);
@@ -1561,15 +1561,14 @@ public sealed class WatchPage : IPage
     {
         var savedModal = UI.Modal;
         if (SharePanel.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
-        var side = !AppSettings.Current.TheaterMode && r.W >= 980;
-        var sideT = UI.Smooth(UI.Id(_relScroll, 5), side ? 1 : 0, 14);
-        const float padX = 24, topPad = 12, colGap = 24;
-        float sideW = MathF.Min(400, r.W * 0.29f) * sideT;
+        const float padX = 20, topPad = 10;
         float x0 = Gfx.Snap(r.X + padX);
-        float mainW = Gfx.Snap(r.W - padX * 2 - sideW - colGap * sideT);
-        float videoH = MathF.Round(MathF.Min(mainW * 9 / 16, MathF.Max(240, r.H * 0.76f)));
+        float mainW = Gfx.Snap(r.W - padX * 2);
+        float maxVideoH = MathF.Max(360, r.H * (AppSettings.Current.TheaterMode ? 1.45f : 1.08f));
+        float videoW = Gfx.Snap(MathF.Min(mainW, maxVideoH * 16 / 9));
+        float videoH = MathF.Round(videoW * 9 / 16);
+        float videoX = Gfx.Snap(x0 + (mainW - videoW) / 2);
         var id = Video.VideoId;
-        bool wholePage = AppSettings.Current.ScrollWholeWatchPage;
 
         void DrawVideoBox(R video, R? clip)
         {
@@ -1604,27 +1603,16 @@ public sealed class WatchPage : IPage
         var descRun = desc.Length > 0 ? Gfx.Text(desc, 13.5f, 400, mainW - 32, _descOpen ? 0 : 4) : null;
         var canToggle = desc.Length > 280 || desc.Count(c => c == '\n') > 3;
         float descBoxH = 14 + 20 + (descRun != null ? descRun.H + 6 : 0) + (canToggle ? 24 : 0) + 12;
-        var listInline = _list != null && sideT < 0.03f;
-        float infoContentH = 14 + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + 30 + _commentsH + (listInline ? _listInlineH : 0);
+        var listInline = _list != null;
+        int relatedCols = mainW >= 1440 ? 3 : mainW >= 900 ? 2 : 1;
+        float relatedH = 52 + (int)Math.Ceiling(_related.Count / (double)relatedCols) * 112 + (_relCont != null ? 54 : 16);
+        float infoContentH = 14 + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + relatedH + 30 + _commentsH + (listInline ? _listInlineH : 0);
 
-        R video, view;
-        float scroll, y;
-        if (wholePage)
-        {
-            view = new R(x0, r.Y, mainW + 12, r.H);
-            scroll = UI.BeginScroll(_infoScroll, view, topPad + videoH + infoContentH);
-            video = new R(Gfx.Snap(x0), Gfx.Snap(view.Y + topPad - scroll), Gfx.Snap(mainW), videoH);
-            DrawVideoBox(video, view);
-            y = video.Bottom + 16;
-        }
-        else
-        {
-            video = new R(Gfx.Snap(x0), Gfx.Snap(r.Y + topPad), Gfx.Snap(mainW), videoH);
-            DrawVideoBox(video, null);
-            view = new R(x0, video.Bottom, mainW + 12, r.Bottom - video.Bottom);
-            scroll = UI.BeginScroll(_infoScroll, view, infoContentH);
-            y = view.Y + 16 - scroll;
-        }
+        var view = new R(x0, r.Y, mainW + 12, r.H);
+        var scroll = UI.BeginScroll(_infoScroll, view, topPad + videoH + infoContentH);
+        var video = new R(videoX, Gfx.Snap(view.Y + topPad - scroll), videoW, videoH);
+        DrawVideoBox(video, view);
+        float y = video.Bottom + 16;
         if (Title.Length > 0) Sel.Text(UI.Id(_infoScroll, 8001), Title, x0, y, 20, Th.Text, 600, mainW, 3);
         Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, "Копировать название");
         y += titleRun.H + 14;
@@ -1721,6 +1709,7 @@ public sealed class WatchPage : IPage
         }
         y += descBoxH + 10;
         if (_note != null) { Gfx.Draw(_note, x0, y, 13, Th.Warn, 400, mainW, 2); y += 40; }
+        y = DrawRelatedInline(x0, y + 14, mainW, view);
         var cy0 = y;
         y = DrawComments(x0, y + 14, mainW, view);
         var ch = y - cy0;
@@ -1736,20 +1725,6 @@ public sealed class WatchPage : IPage
             SharePanel.Draw(new R(px, py, SharePanel.W, SharePanel.H));
         }
 
-        if (sideT > 0.03f)
-        {
-            var full = MathF.Min(400, r.W * 0.29f);
-            float sx = Gfx.Snap(r.Right - padX - sideW);
-            Gfx.PushClip(new R(sx, r.Y, sideW + padX, r.H));
-            var sideR = new R(sx, r.Y + topPad, full, r.H - topPad);
-            if (_list != null)
-            {
-                var used = DrawPlaylist(sideR);
-                sideR = new R(sideR.X, sideR.Y + used, sideR.W, sideR.H - used);
-            }
-            DrawRelated(sideR);
-            Gfx.PopClip();
-        }
         UI.Modal = savedModal;
     }
 
@@ -1843,6 +1818,53 @@ public sealed class WatchPage : IPage
                 App.Post(() => { _relLoadingMore = false; _relCont = null; App.Invalidate(); });
             }
         });
+    }
+
+    private float DrawRelatedInline(float x, float y, float width, R view)
+    {
+        Gfx.Draw("Похожие видео", x, y + 4, 18, Th.Text, 700);
+        var settings = AppSettings.Current;
+        var label = Gfx.Text("Автовоспроизведение", 12.5f);
+        var toggle = new R(x + width - label.W - 60, y, label.W + 60, 30);
+        Gfx.Draw(label, toggle.X, toggle.Y + (30 - label.H) / 2, Th.Sub);
+        if (UI.Toggle(UI.Id("auto", _relScroll), toggle, settings.Autoplay))
+        {
+            settings.Autoplay = !settings.Autoplay;
+            settings.Save();
+        }
+        y += 40;
+        int cols = width >= 1440 ? 3 : width >= 900 ? 2 : 1;
+        const float gap = 14, rowH = 112, thumbW = 168, thumbH = 94;
+        float cardW = (width - gap * (cols - 1)) / cols;
+        for (int i = 0; i < _related.Count; i++)
+        {
+            var v = _related[i];
+            var row = new R(x + (i % cols) * (cardW + gap), y + (i / cols) * rowH, cardW, rowH - 8);
+            if (row.Bottom < view.Y - 30 || row.Y > view.Bottom + 30) continue;
+            var id = UI.Id(_relScroll, i);
+            var over = UI.Hover(row);
+            var glow = UI.Glow(id, row.Inset(-4), 9, over);
+            Cards.Thumb(new R(row.X, row.Y + 2, thumbW, thumbH), v, false, 8, behind: UI.GlowOn(Th.Bg, glow));
+            float tx = row.X + thumbW + 12, textW = row.W - thumbW - 12;
+            var title = Gfx.Draw(v.Title, tx, row.Y + 2, 13.5f, Th.Text, 600, textW, 2);
+            Gfx.Draw(v.Channel, tx, row.Y + title.H + 5, 12, Th.Sub, 400, textW, 1);
+            Gfx.Draw(v.Meta, tx, row.Y + title.H + 25, 12, Th.Sub, 400, textW, 1);
+            if (over) _hover.Over(v);
+            if (UI.MiddleClick(row)) Shell.OpenVideoInNewTab(v);
+            else if (UI.Click(id, row, playSfx: false)) OpenRelated(v);
+            else if (UI.RightClick(row)) Menus.Popup(Cards.MenuFor(v));
+            if (_seen.Add(v.VideoId)) LogSeen(v);
+        }
+        y += (int)Math.Ceiling(_related.Count / (double)cols) * rowH;
+        if (_related.Count == 0 && _infoLoading) UI.Spinner(x + width / 2, y + 12, 9, Th.Sub);
+        if (_relCont != null)
+        {
+            if (y < view.Bottom + 30 && UI.Pill(UI.Id("rel:more", _relScroll), x, y + 6, 34, Th.More, "Ещё похожие", out _)) LoadMoreRelated();
+            if (_relLoadingMore) UI.Spinner(x + 160, y + 23, 8, Th.Sub);
+            y += 54;
+        }
+        else y += 16;
+        return y;
     }
 
     private void DrawRelated(R r)

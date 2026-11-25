@@ -28,6 +28,8 @@ public static class QuickStream
 
     private static readonly HttpClient Http = Make();
     private static readonly ConcurrentDictionary<string, Task<StreamInfo?>> _cache = new();
+    private static long _blockedUntil;
+    public static bool IsBlocked => Environment.TickCount64 < Interlocked.Read(ref _blockedUntil);
     private static readonly object _visitorLock = new();
     private static Task<string?>? _visitor;
     private static DateTime _visitorAt;
@@ -97,7 +99,7 @@ public static class QuickStream
     /// <summary>Background hint (a card in view, a card under the pointer). Bounded concurrency so scrolling never storms.</summary>
     public static void Prefetch(string videoId)
     {
-        if (!AppSettings.Current.QuickStart || videoId.Length != 11) return;
+        if (!AppSettings.Current.QuickStart || videoId.Length != 11 || IsBlocked) return;
         if (Waiting.Count >= 6) return;
         if (_cache.TryGetValue(videoId, out var t) && Good(t)) return;
         TrimCache(_cache, 240);
@@ -114,7 +116,7 @@ public static class QuickStream
         });
     }
 
-    public static void Invalidate() => _cache.Clear(); // quality changed
+    public static void Invalidate() { _cache.Clear(); Interlocked.Exchange(ref _blockedUntil, 0); } // quality or account changed
 
     // ---- subtitles and dubbed audio: listed in the player answer we already have ----
     public sealed record CaptionTrack(string Lang, string Name, bool Auto, string Url);
@@ -330,6 +332,7 @@ public static class QuickStream
     /// <summary>The user clicked: answered at once, never queued behind background hints.</summary>
     public static Task<StreamInfo?> GetAsync(string videoId)
     {
+        if (IsBlocked) return Task.FromResult<StreamInfo?>(null);
         // a hint that is still waiting for its turn does not count: do it now
         if (_cache.TryGetValue(videoId, out var t) && Good(t) && !Waiting.ContainsKey(videoId)) return t;
         TrimCache(_cache, 240);
@@ -392,6 +395,7 @@ public static class QuickStream
             // the whole-stream client first; the beginning-only one is asked only when it refuses
             foreach (var client in wantV == 0 ? new[] { Vision, Quest } : [Vision])
             {
+                if (IsBlocked) break;
                 JsonNode? n;
                 try { n = await PlayerAsync(client, id, visitor); } catch (Exception e) { Paths.Log($"quick {id} {client.Name}: {e.Message}"); continue; }
                 if (n == null) continue;
@@ -415,7 +419,16 @@ public static class QuickStream
 
     private static async Task<StreamInfo?> FromResponse(Client c, string id, JsonNode n, int wantV, int wantA)
     {
-        if (n.S("playabilityStatus", "status") != "OK") { Paths.Log($"quick {id} {c.Name}: {n.S("playabilityStatus", "status")} {n.S("playabilityStatus", "reason")}"); return null; }
+        if (n.S("playabilityStatus", "status") != "OK")
+        {
+            var status = n.S("playabilityStatus", "status");
+            var reason = n.S("playabilityStatus", "reason") ?? "";
+            if (status == "LOGIN_REQUIRED" && (reason.Contains("бот", StringComparison.OrdinalIgnoreCase)
+                || reason.Contains("bot", StringComparison.OrdinalIgnoreCase)))
+                Interlocked.Exchange(ref _blockedUntil, Environment.TickCount64 + 5 * 60_000);
+            Paths.Log($"quick {id} {c.Name}: {status} {reason}");
+            return null;
+        }
         if (n.S("storyboards", "playerStoryboardSpecRenderer", "spec") is { Length: > 0 } spec)
         {
             if (_specs.Count > 200) _specs.Clear();

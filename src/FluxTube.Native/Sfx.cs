@@ -9,7 +9,7 @@ namespace FluxTube;
 /// <summary>
 /// Synthesized PS1/PS2-era UI sound effects inspired by Silent Hill 1/2 and Metal Gear Solid 1/2,
 /// with per-slot custom sound replacement (WAV, MP3, OGG, FLAC, M4A), 1-click ZIP soundpack import,
-/// adjustable master UI sound volume (10..300%), video-volume-scaled slider ticks, and stereo 8D reverb.
+/// adjustable master UI sound volume (10..300%), video-volume-scaled slider ticks, and centered reverb.
 /// </summary>
 public static partial class Sfx
 {
@@ -275,8 +275,7 @@ public static partial class Sfx
                 _rawBuiltin.TryGetValue(key, out src);
             if (src == null || src.Length == 0) continue;
 
-            double phase = s * 0.85;
-            _rendered[key] = RenderStereoWav(src, masterGain, reverb8d, phase);
+            _rendered[key] = RenderStereoWav(src, masterGain, reverb8d);
 
             if (key == "volume")
             {
@@ -296,7 +295,7 @@ public static partial class Sfx
                             return (Math.Sin(2 * Math.PI * f * sec) + 0.28 * Math.Sin(2 * Math.PI * f * 2.0 * sec)) * env * 0.095;
                         });
                     }
-                    _volTierBufs[t] = RenderStereoWav(tierSrc, masterGain * tierMul, reverb8d, t * 0.62);
+                    _volTierBufs[t] = RenderStereoWav(tierSrc, masterGain * tierMul, reverb8d);
                 }
             }
         }
@@ -304,11 +303,11 @@ public static partial class Sfx
 
     /// <summary>
     /// Renders mono float PCM to a native 16-bit 44.1kHz stereo WAV buffer with master gain scaling,
-    /// soft tanh limiting, and optional spatial 8D stereo hall reverb (Haas ITD rotation + 4 detuned stereo combs + 2 allpasses).
+    /// soft tanh limiting, and optional centered, low-noise hall reverb.
     /// </summary>
-    private static unsafe nint RenderStereoWav(float[] src, double gain, bool reverb8d, double panPhase)
+    private static unsafe nint RenderStereoWav(float[] src, double gain, bool reverb8d)
     {
-        int tail = reverb8d ? (int)(Rate * 0.54) : 0;
+        int tail = reverb8d ? (int)(Rate * 0.24) : 0;
         int frames = src.Length + tail;
         var outL = new float[frames];
         var outR = new float[frames];
@@ -324,70 +323,34 @@ public static partial class Sfx
         }
         else
         {
-            // 1. 8D spatial panning + Haas interaural micro-delay (~0.36ms = 16 samples)
-            const int haas = 16;
-            var dryL = new float[frames];
-            var dryR = new float[frames];
-            for (int i = 0; i < src.Length; i++)
+            // Both output channels receive the same signal, so the sound stays in front of the listener.
+            ReadOnlySpan<int> delays = [1277, 1601, 1877];
+            ReadOnlySpan<float> feedback = [0.48f, 0.46f, 0.44f];
+            var wet = new float[frames];
+            for (int c = 0; c < delays.Length; c++)
             {
-                double t = (double)i / Rate;
-                double pan = Math.Sin(panPhase + t * 2.0 * Math.PI * 0.85); // -1..+1 sweeping around listener
-                float gL = (float)Math.Cos((pan + 1.0) * Math.PI * 0.25);
-                float gR = (float)Math.Sin((pan + 1.0) * Math.PI * 0.25);
-                float s = (float)(src[i] * gain);
-                int idxL = pan > 0 ? Math.Min(frames - 1, i + (int)(haas * pan)) : i;
-                int idxR = pan < 0 ? Math.Min(frames - 1, i + (int)(haas * -pan)) : i;
-                dryL[idxL] += s * gL;
-                dryR[idxR] += s * gR;
-            }
-
-            // 2. Stereo Schroeder/Moorer hall reverb (detuned L/R comb lengths for ultra-wide 8D space)
-            ReadOnlySpan<int> combsL = [1309, 1637, 1811, 1931];
-            ReadOnlySpan<int> combsR = [1381, 1583, 1889, 1997];
-            ReadOnlySpan<float> fbs = [0.74f, 0.72f, 0.75f, 0.71f];
-            var wetL = new float[frames];
-            var wetR = new float[frames];
-            const float damp = 0.34f;
-
-            for (int c = 0; c < 4; c++)
-            {
-                var bufL = new float[combsL[c]];
-                var bufR = new float[combsR[c]];
-                int pL = 0, pR = 0;
-                float lpL = 0, lpR = 0, fb = fbs[c];
+                var comb = new float[delays[c]];
+                int pos = 0;
+                float lowpass = 0;
                 for (int i = 0; i < frames; i++)
                 {
-                    float yL = bufL[pL];
-                    lpL = yL * (1f - damp) + lpL * damp;
-                    bufL[pL] = (dryL[i] + dryR[i] * 0.22f) + lpL * fb;
-                    if (++pL >= bufL.Length) pL = 0;
-                    wetL[i] += yL;
-
-                    float yR = bufR[pR];
-                    lpR = yR * (1f - damp) + lpR * damp;
-                    bufR[pR] = (dryR[i] + dryL[i] * 0.22f) + lpR * fb;
-                    if (++pR >= bufR.Length) pR = 0;
-                    wetR[i] += yR;
+                    var delayed = comb[pos];
+                    lowpass = lowpass * 0.4f + delayed * 0.6f;
+                    comb[pos] = (i < src.Length ? (float)(src[i] * gain) : 0) + lowpass * feedback[c];
+                    if (++pos == comb.Length) pos = 0;
+                    wet[i] += delayed / delays.Length;
                 }
             }
-
-            // 3. Two stereo allpass diffusers for silky reverberation tail
-            ApplyAllpass(wetL, 241, 0.5f);
-            ApplyAllpass(wetL, 557, 0.5f);
-            ApplyAllpass(wetR, 263, 0.5f);
-            ApplyAllpass(wetR, 587, 0.5f);
-
-            // 4. Slow 8D rotation on the wet tail + fade-out end guard (no click)
-            int fadeLen = Math.Min(1200, frames / 4);
+            ApplyAllpass(wet, 223, 0.35f);
+            float filtered = 0;
             for (int i = 0; i < frames; i++)
             {
-                double t = (double)i / Rate;
-                double rot = 0.5 + 0.5 * Math.Sin(panPhase * 1.3 + t * 2.0 * Math.PI * 0.9);
-                float wL = wetL[i] * 0.22f * (float)(0.65 + 0.35 * rot);
-                float wR = wetR[i] * 0.22f * (float)(0.65 + 0.35 * (1.0 - rot));
-                float fade = i > frames - fadeLen ? (frames - i) / (float)fadeLen : 1f;
-                outL[i] = SoftClip((dryL[i] * 0.80f + wL) * fade);
-                outR[i] = SoftClip((dryR[i] * 0.80f + wR) * fade);
+                filtered += (wet[i] - filtered) * 0.12f; // suppress the high-frequency hiss in the tail
+                var dry = i < src.Length ? (float)(src[i] * gain) : 0;
+                var fade = i < src.Length ? 1f : (frames - i - 1) / (float)tail;
+                var sample = SoftClip((dry + filtered * 0.14f) * fade);
+                if (MathF.Abs(sample) < 0.00025f) sample = 0;
+                outL[i] = outR[i] = sample;
             }
         }
 

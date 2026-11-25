@@ -347,7 +347,9 @@ public sealed class ShortsPage : IPage
 
     private void PrefetchShort(VideoItem item)
     {
-        QuickStream.Prefetch(item.VideoId);
+        if (item.VideoId == NextItem?.VideoId && CookieStore.IsLoggedIn)
+            Resolver.Instance.Prefetch(item.VideoId, urgent: true);
+        else if (!QuickStream.IsBlocked) QuickStream.Prefetch(item.VideoId);
         NeedInfo(item);
         Images.Get($"https://i.ytimg.com/vi/{item.VideoId}/oar2.jpg", _videoW, _videoH);
     }

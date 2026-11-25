@@ -5,6 +5,7 @@ stdin:  one JSON per line {"id": "...", "url": "...", "format": "...", "cookies"
 stdout: one JSON per line {"id", "ok", "video", "audio", "headers", "title", "duration", "video_avail", "audio_avail", "ms", "error"}
 """
 import json
+import os
 import queue
 import sys
 import threading
@@ -40,12 +41,18 @@ def emit(obj):
 
 
 def ydl_for(cookies, proxy, fmt, mark, fast):
-    key = (cookies, proxy, fmt, mark, fast)
+    try:
+        cookie_stamp = os.stat(cookies).st_mtime_ns if cookies else None
+    except OSError:
+        cookie_stamp = None
+    key = (cookies, cookie_stamp, proxy, fmt, mark, fast)
     cache = getattr(local, "ydls", None)
     if cache is None:
         cache = local.ydls = {}
     if key in cache:
         return cache[key]
+    if len(cache) >= 8:
+        cache.clear()
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -88,7 +95,10 @@ def work():
         try:
             try:
                 info = extract(job, True)
-            except Exception:
+            except Exception as e:
+                # A full extraction cannot fix an account challenge; repeating it only delays the click.
+                if "sign in to confirm" in str(e).lower() or "not a bot" in str(e).lower():
+                    raise
                 info = extract(job, False)  # the short way was refused: do it the full way
             v, a = pick(info)
             emit({
