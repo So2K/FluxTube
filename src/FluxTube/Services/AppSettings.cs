@@ -50,6 +50,8 @@ public sealed class AppSettings
     public bool ShortsPanelHidden { get; set; } = false;
     /// <summary>Soft GPU radial ambient glow around video players matching the current scene colors.</summary>
     public bool AmbientMode { get; set; } = true;
+    /// <summary>Preferred audio dubbing language code (e.g. "ru", "en", or "" for original). Never enables subtitles.</summary>
+    public string AudioLanguage { get; set; } = "";
 
     public string PlayerFormat => FormatFor(PlayerQuality);
     public string DownloadFormat => FormatFor(DownloadQuality);

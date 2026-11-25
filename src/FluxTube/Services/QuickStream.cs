@@ -416,7 +416,23 @@ public static class QuickStream
             videos = usable.Where(f => !IsAudio(f) && Math.Min(Num(f, "height"), Num(f, "width")) <= cap && f.S("qualityLabel")?.Contains("HDR") != true)
                 .OrderByDescending(f => Num(f, "height")).ThenByDescending(f => Num(f, "fps")).ThenByDescending(CodecRank).ThenByDescending(f => Num(f, "bitrate"))
                 .Take(3).ToList();
-            audios = usable.Where(f => IsAudio(f) && (f?["audioTrack"] == null || (f.P("audioTrack", "audioIsDefault") is JsonValue dv && dv.TryGetValue<bool>(out var isDef) && isDef)))
+            var prefLang = AppSettings.Current.AudioLanguage;
+            var allAudio = usable.Where(IsAudio).ToList();
+            List<JsonNode?> preferred = [];
+            if (!string.IsNullOrEmpty(prefLang))
+            {
+                preferred = allAudio.Where(f =>
+                {
+                    var tid = f.S("audioTrack", "id") ?? "";
+                    var lang = tid.Split('.')[0];
+                    return lang.Equals(prefLang, StringComparison.OrdinalIgnoreCase)
+                        || lang.StartsWith(prefLang + "-", StringComparison.OrdinalIgnoreCase);
+                }).ToList();
+            }
+            if (preferred.Count == 0)
+                preferred = allAudio.Where(f => f?["audioTrack"] == null || (f.P("audioTrack", "audioIsDefault") is JsonValue dv && dv.TryGetValue<bool>(out var isDef) && isDef)).ToList();
+            if (preferred.Count == 0) preferred = allAudio;
+            audios = preferred
                 .OrderByDescending(f => Num(f, "itag") == 251 ? 2 : Num(f, "itag") == 140 ? 1 : 0).ThenByDescending(f => Num(f, "bitrate"))
                 .Take(2).ToList();
             if (quality == "audio") videos.Clear();

@@ -131,8 +131,14 @@ public static class BrowserLogin
                 }
                 else
                 {
-                    var shortErr = err.Length > 120 ? err[..120] + "…" : err;
-                    Shell.Toast($"{browser.Name}: не удалось забрать cookies ({(shortErr.Length > 0 ? shortErr : "возможно, браузер открыт или нет входа")})", Th.Warn, 7000);
+                    bool locked = err.Contains("Could not copy", StringComparison.OrdinalIgnoreCase)
+                                  || err.Contains("DPAPI", StringComparison.OrdinalIgnoreCase)
+                                  || err.Contains("decrypt", StringComparison.OrdinalIgnoreCase)
+                                  || err.Contains("7271", StringComparison.OrdinalIgnoreCase);
+                    Shell.Toast(locked
+                        ? $"{browser.Name} блокирует cookies пока открыт. Закройте {browser.Name} и повторите, либо войдите через окно входа / cookies.txt."
+                        : $"{browser.Name}: активный вход YouTube не найден. Войдите в {browser.Name} или используйте окно входа.",
+                        Th.Warn, 7500);
                 }
             });
         });

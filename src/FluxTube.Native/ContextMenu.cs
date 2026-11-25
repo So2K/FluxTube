@@ -214,6 +214,9 @@ public static class Menus
         _rects.Clear();
         if (_root == null) return;
 
+        DrawPanel(_root, 0);
+
+        // Collect rects AFTER DrawPanel so newly opened submenus are immediately cut out of VideoHwnd on this frame!
         bool insideAny = false;
         for (var p = _root; p != null; p = p.Child)
         {
@@ -221,8 +224,6 @@ public static class Menus
             _rects.Add(r);
             if (r.Contains(UI.MX, UI.MY)) insideAny = true;
         }
-
-        DrawPanel(_root, 0);
 
         if ((UI.Pressed || UI.RightClicked) && !insideAny) Close();
     }
@@ -321,6 +322,8 @@ public static class Menus
 
             if (mouseOver && interactive && UI.Released)
             {
+                UI.Released = false;
+                UI.Pressed = false;
                 if (it.Sub is { Count: > 0 } sub) OpenChild(p, i, sub);
                 else if (it.Act != null) { var a = it.Act; Close(); App.Post(a); }
             }

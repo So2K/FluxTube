@@ -163,13 +163,13 @@ public static class Ambient
         if (delta > 0.008f) UI.Animate();
 
         // Subtle organic breathing modulation (barely perceptible, feels alive)
-        float breath = 1f + 0.04f * MathF.Sin(UI.Now / 2400f);
-        float baseAlpha = Th.Light ? 0.14f : (isShort ? 0.34f : 0.28f);
-        float spreadX = (isShort ? 150f : 130f) * breath;
-        float spreadY = (isShort ? 130f : 120f) * breath;
+        float breath = 1f + 0.03f * MathF.Sin(UI.Now / 2600f);
+        float baseAlpha = Th.Light ? 0.12f : (isShort ? 0.28f : 0.24f);
+        float spreadX = (isShort ? 260f : 220f) * breath;
+        float spreadY = (isShort ? 230f : 200f) * breath;
 
-        float rx = videoRect.W * 0.56f + spreadX;
-        float ry = videoRect.H * 0.52f + spreadY;
+        float rx = videoRect.W * 0.62f + spreadX;
+        float ry = videoRect.H * 0.56f + spreadY;
 
         // 5 overlapping Gaussian radial light fields around the video edges
         Gfx.RadialGlow(videoRect.X + videoRect.W * 0.18f, videoRect.Y + videoRect.H * 0.18f, rx * 0.85f, ry * 0.85f, _cur.TL.R, _cur.TL.G, _cur.TL.B, baseAlpha);

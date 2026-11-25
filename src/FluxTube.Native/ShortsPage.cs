@@ -381,9 +381,8 @@ public sealed class ShortsPage : IPage
         Ambient.Draw(video, v.VideoId, isShort: true);
         Gfx.PopClip();
 
-        // Subtle elevated frame around the 9:16 player
-        Gfx.Fill(video.Inset(-2), 0xFF000000, 14);
-        Gfx.Stroke(video.Inset(-2), Th.A(0.14f), 14, 1f);
+        // Whisper-thin hairline around the 9:16 player (no heavy dark border)
+        Gfx.Stroke(video.Inset(-1), Th.A(0.08f), 12, 1f);
 
         Shell.WantVideo(video, v.VideoId);
         if (!Shell.VideoShown(v.VideoId))

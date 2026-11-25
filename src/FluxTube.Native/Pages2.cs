@@ -412,6 +412,31 @@ public sealed class SettingsPage : IPage
 
         Section("Плеер");
         ChoiceRow("pq", "Качество по умолчанию", s.PlayerQuality, AppSettings.Qualities.Where(q => q != "audio"), v => { s.PlayerQuality = v; Resolver.Instance.Invalidate(); });
+        var audioLangs = new (string Code, string Name)[]
+        {
+            ("", "Оригинал (как на YouTube)"),
+            ("ru", "Русский"),
+            ("en", "English"),
+            ("uk", "Українська"),
+            ("de", "Deutsch"),
+            ("es", "Español"),
+            ("fr", "Français"),
+            ("ja", "日本語"),
+        };
+        var curAudioName = audioLangs.FirstOrDefault(a => a.Code == s.AudioLanguage).Name ?? s.AudioLanguage;
+        var alr = Row("Язык озвучки по умолчанию", "Автоматически включает дубляж на выбранном языке, если он есть (субтитры не меняются)", 58);
+        var alw = UI.PillWidth(null, curAudioName);
+        if (UI.Pill(UI.Id("set:audiolang"), alr.Right - alw - 14, alr.Y + 12, 34, null, curAudioName, out _))
+        {
+            Menus.Popup(audioLangs.Select(a => new MenuItem(a.Name, () =>
+            {
+                s.AudioLanguage = a.Code;
+                Saved();
+                QuickStream.Invalidate();
+                Resolver.Instance.Invalidate();
+                Shell.Toast("Озвучка по умолчанию: " + a.Name, Th.Good, 2400);
+            }, check: a.Code == s.AudioLanguage, icon: Th.Volume)).ToList());
+        }
         ToggleRow("wscroll", "Прокручивать всю страницу с видео", s.ScrollWholeWatchPage, v => s.ScrollWholeWatchPage = v, "Включено: при прокрутке вниз видео скрывается, удобно читать комментарии. Выключено: комментарии листаются отдельно.");
         ToggleRow("sb", "SponsorBlock", s.SponsorBlock, v => s.SponsorBlock = v, "Пропускать рекламные вставки авторов");
         var cr = Row("Что пропускать");
