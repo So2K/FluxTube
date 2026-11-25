@@ -57,7 +57,7 @@ public static unsafe class LinkRouter
     /// </summary>
     public static bool TryHandleCliRoute(string[] args)
     {
-        if (args.Contains("--test") || args.Contains("--bench") || args.Contains("--test-loopback")) return false;
+        if (args.Contains("--test") || args.Contains("--bench") || args.Contains("--test-loopback") || args.Contains("--self-test")) return false;
 
         if (args.Length == 0)
         {

@@ -1769,7 +1769,8 @@ public static class Shell
     {
         bool enabled = AppSettings.Current.VideoBeatShake && !AppSettings.Current.AudioOnlyMode
             && P.IsReady && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test
-            && !W.IsIconic(App.Hwnd) && !Gfx.Occluded && !_fullscreen && !Pip.Active && _cur is WatchPage;
+            && !W.IsIconic(App.Hwnd) && !Gfx.Occluded && !_fullscreen && !Pip.Active
+            && CurrentTabOwnsMainPlayer && _cur is WatchPage wpVb && wpVb.Video.VideoId == T.Current?.VideoId;
         if (!enabled)
         {
             VideoBeatShift = default;
@@ -1797,11 +1798,15 @@ public static class Shell
             return;
         }
 
-        _vbPhase += dt * (10.5f + _vbKick * 18.5f + AudioAnalyzer.HighEnergy * 5.0f);
+        _vbPhase += dt * (10.5f + _vbKick * 18.5f + AudioAnalyzer.HighEnergy * 6.0f);
+        // Directional VideoBeatShake: Sub-bass slams vertically, Punch-bass kicks along live DominantAngle, Stereo L/R pulls sideways!
+        float domAng = AudioAnalyzer.DominantAngle;
+        float pan = AudioAnalyzer.StereoPan;
+        float punch = AudioAnalyzer.PunchBass;
         float waveY = -0.55f + 0.45f * MathF.Cos(_vbPhase * 1.15f);
         float waveX = MathF.Sin(_vbPhase * 0.94f);
-        float dx = Gfx.Snap(Math.Clamp(waveX * _vbKick * 4.2f, -6.5f, 6.5f));
-        float dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 7.4f, -9.5f, 5.5f));
+        float dx = Gfx.Snap(Math.Clamp(waveX * _vbKick * 4.0f + MathF.Cos(domAng) * punch * _vbKick * 3.6f + pan * _vbKick * 4.2f, -9.0f, 9.0f));
+        float dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 7.2f + MathF.Sin(domAng) * punch * _vbKick * 3.0f - AudioAnalyzer.SubBass * _vbKick * 3.2f, -11.5f, 7.0f));
         VideoBeatShift = new System.Numerics.Vector2(dx, dy);
         VideoBeatGlow = Math.Clamp(_vbKick * 0.72f, 0f, 1.0f);
         UI.Animate();
@@ -1830,9 +1835,10 @@ public static class Shell
             return;
         }
 
-        // Pure v9.2.2 per-element GPU bass/spectrum bounce for Audio-Only Music Mode (exempt Shorts!)
+        // Single-instance active-tab shake: ONLY shake/render beat physics when THIS active WatchPage tab owns the playing audio!
         MusicStageRect = default;
-        bool musicBounceOn = AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && _cur is not ShortsPage && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test;
+        bool onActivePlayingWatch = CurrentTabOwnsMainPlayer && _cur is WatchPage wpCur && wpCur.Video.VideoId == cur?.VideoId;
+        bool musicBounceOn = AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && onActivePlayingWatch && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test;
         MusicBounce.Update(musicBounceOn, (float)UI.Dt);
         _shakeEnergy = 0f; _shakeBassAvg = 0f;
 

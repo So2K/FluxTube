@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "9.2.8"
+#define AppVersion "9.2.9"
 #endif
 
 [Setup]

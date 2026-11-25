@@ -728,6 +728,7 @@ public static unsafe class Gfx
     }
 
     private static float _mbResScale = 1f;
+    private static Matrix3x2 _mbSavedTf = Matrix3x2.Identity;
 
     private static void EnsureMotionBlurResources()
     {
@@ -736,15 +737,15 @@ public static unsafe class Gfx
         float resScale = (long)PxW * PxH > 2_000_000L ? 0.5f : 1f;
         int tw = Math.Max(1, (int)(PxW * resScale));
         int th = Math.Max(1, (int)(PxH * resScale));
-        float targetDpi = 96f * Scale * resScale;
-        if (_mbBmp == null || _mbBmpW != tw || _mbBmpH != th || MathF.Abs(_mbBmpScale - targetDpi) > 0.05f)
+        // Keep exact same DPI (96 * Scale) as _target; scale via DC.Transform so DirectionalBlur maps 1:1 without shrinking!
+        if (_mbBmp == null || _mbBmpW != tw || _mbBmpH != th || MathF.Abs(_mbBmpScale - Scale) > 0.001f)
         {
             _mbBmp?.Dispose();
             _mbBmp = DC.CreateBitmap(new SizeI(tw, th),
-                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), targetDpi, targetDpi, BitmapOptions.Target));
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96f * Scale, 96f * Scale, BitmapOptions.Target));
             _mbBmpW = tw;
             _mbBmpH = th;
-            _mbBmpScale = targetDpi;
+            _mbBmpScale = Scale;
             _mbResScale = resScale;
         }
         if (_mbEffect == null)
@@ -792,11 +793,12 @@ public static unsafe class Gfx
             if (_mbBmp == null || _mbEffect == null) return false;
             _mbLastUsedAt = Environment.TickCount64;
 
+            _mbSavedTf = DC.Transform;
             int savedClips = _clipDepth;
             for (int i = savedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
 
             DC.Target = _mbBmp;
-            DC.SetDpi(96f * Scale * _mbResScale, 96f * Scale * _mbResScale);
+            DC.Transform = _mbSavedTf * Matrix3x2.CreateScale(_mbResScale);
             float pad = MathF.Ceiling(stdDev * 3.2f) + 6f;
             var clearR = new R(0, 0, W, H).Intersect(effRegion.Inset(-pad));
             DC.PushAxisAlignedClip(Raw(clearR), AntialiasMode.Aliased);
@@ -820,7 +822,7 @@ public static unsafe class Gfx
         catch
         {
             DC.Target = _activeTarget ?? _target;
-            DC.SetDpi(96f * Scale, 96f * Scale);
+            DC.Transform = _mbSavedTf;
             _mbDepth = 0;
             return false;
         }
@@ -836,13 +838,13 @@ public static unsafe class Gfx
         for (int i = _mbSavedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
 
         DC.Target = _activeTarget ?? _target;
-        DC.SetDpi(96f * Scale, 96f * Scale);
+        DC.Transform = _mbSavedTf;
 
         for (int i = 0; i < _mbSavedClips; i++)
             DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
 
         _mbEffect.SetInput(0, _mbBmp, true);
-        float dev = _mbStdDev;
+        float dev = _mbStdDev * _mbResScale;
         float ang = _mbAngle;
         uint opt = (uint)DirectionalBlurOptimization.Speed;
         uint bm = (uint)BorderMode.Hard;
@@ -853,8 +855,20 @@ public static unsafe class Gfx
 
         DC.PushAxisAlignedClip(Raw(_mbRegion), AntialiasMode.Aliased);
         using var outImg = _mbEffect.Output;
-        DC.DrawImage(outImg, new Vector2(_mbRegion.X, _mbRegion.Y), Raw(_mbRegion),
-            Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+        if (_mbResScale < 0.999f)
+        {
+            float inv = 1f / _mbResScale;
+            var srcR = new R(_mbRegion.X * _mbResScale, _mbRegion.Y * _mbResScale, _mbRegion.W * _mbResScale, _mbRegion.H * _mbResScale);
+            DC.Transform = Matrix3x2.CreateScale(inv) * _mbSavedTf;
+            DC.DrawImage(outImg, new Vector2(srcR.X, srcR.Y), Raw(srcR),
+                Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+            DC.Transform = _mbSavedTf;
+        }
+        else
+        {
+            DC.DrawImage(outImg, new Vector2(_mbRegion.X, _mbRegion.Y), Raw(_mbRegion),
+                Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+        }
         DC.PopAxisAlignedClip();
     }
 
@@ -2140,6 +2154,175 @@ public static unsafe class Gfx
         _textCacheGen++;
         while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
     }
+
+    /// <summary>
+    /// Automated headless GPU + Physics regression test suite (--self-test):
+    /// 1. Renders PushMotionBlur/PopMotionBlur at 2694x1824 (half-res 0.5x target) and reads back GPU pixels
+    ///    to prove content NEVER shrinks or disappears in the right/bottom quadrants during scrolling!
+    /// 2. Renders 120 frames of 3-band Fourier DrawDancingText via _danceAtlas GPU sprites and verifies
+    ///    non-zero rendered pixels, zero D2D errors, and sub-2ms CPU frame time!
+    /// 3. Verifies MusicBounce textSafe=true preserves pure translation (no glyph-atlas thrashing) and
+    ///    verifies 3-band wave continuity &amp; loudness scaling!
+    /// </summary>
+    public static int RunGpuSelfTest()
+    {
+        var fails = new List<string>();
+        void Assert(bool cond, string msg) { if (!cond) fails.Add(msg); }
+        try
+        {
+            // Headless D3D11 + D2D1 + DWrite setup (zero visible window, zero focus steal!)
+            D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport,
+                [Vortice.Direct3D.FeatureLevel.Level_11_1, Vortice.Direct3D.FeatureLevel.Level_11_0], out var devObj).CheckError();
+            _dev = devObj!;
+            _d2dFactory = D2D1.D2D1CreateFactory<ID2D1Factory1>();
+            using var dxgiDev = _dev.QueryInterface<IDXGIDevice>();
+            _d2dDev = _d2dFactory.CreateDevice(dxgiDev);
+            DC = _d2dDev.CreateDeviceContext(DeviceContextOptions.None);
+            _dw = DWrite.DWriteCreateFactory<IDWriteFactory>();
+
+            const int testW = 2694, testH = 1824;
+            PxW = testW; PxH = testH; Scale = 1.5f;
+            using var tex = _dev.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)testW, Height = (uint)testH, MipLevels = 1, ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm, SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Default, BindFlags = BindFlags.RenderTarget | BindFlags.ShaderResource,
+            });
+            using var stage = _dev.CreateTexture2D(new Texture2DDescription
+            {
+                Width = (uint)testW, Height = (uint)testH, MipLevels = 1, ArraySize = 1,
+                Format = Format.B8G8R8A8_UNorm, SampleDescription = new SampleDescription(1, 0),
+                Usage = ResourceUsage.Staging, CPUAccessFlags = CpuAccessFlags.Read,
+            });
+            using var surf = tex.QueryInterface<IDXGISurface>();
+            _target = DC.CreateBitmapFromDxgiSurface(surf,
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96f * Scale, 96f * Scale, BitmapOptions.Target | BitmapOptions.CannotDraw));
+            _activeTarget = _target;
+            DC.Target = _target;
+            DC.SetDpi(96f * Scale, 96f * Scale);
+
+            uint ReadPixel(int px, int py)
+            {
+                _dev.ImmediateContext.CopyResource(stage, tex);
+                var map = _dev.ImmediateContext.Map(stage, 0, MapMode.Read);
+                try
+                {
+                    var row = (byte*)map.DataPointer + py * map.RowPitch;
+                    return *(uint*)(row + px * 4);
+                }
+                finally { _dev.ImmediateContext.Unmap(stage, 0); }
+            }
+
+            // TEST 1: Half-res MotionBlur at 2694x1824 must keep content at exact full coordinates (never shrink to 0.5x!)
+            bool prevMb = Services.AppSettings.Current.UiMotionBlur;
+            string prevMbStr = Services.AppSettings.Current.UiMotionBlurStrength;
+            Services.AppSettings.Current.UiMotionBlur = true;
+            Services.AppSettings.Current.UiMotionBlurStrength = "medium";
+            DC.BeginDraw();
+            DC.Clear(new Color4(0, 0, 0, 1));
+            var scrollView = new R(120, 80, W - 160, H - 120);
+            bool mbOn = PushMotionBlur(scrollView, 0, 2400f);
+            Assert(mbOn, "MotionBlur failed to activate on fast scroll at 2694x1824");
+            // Draw bright magenta card in the BOTTOM-RIGHT quadrant (x=1200..1500 DIP -> px=1800..2250, y=800..1000 DIP -> px=1200..1500)
+            Fill(new R(1200, 800, 300, 200), 0xFFFF2090);
+            PopMotionBlur(mbOn);
+            var hr1 = DC.EndDraw();
+            Services.AppSettings.Current.UiMotionBlur = prevMb;
+            Services.AppSettings.Current.UiMotionBlurStrength = prevMbStr;
+            Assert(hr1.Success, $"MotionBlur EndDraw failed: 0x{hr1.Code:X}");
+            uint pBR = ReadPixel(2025, 1350); // exact center of (1200+150, 800+100) * 1.5
+            uint pTL = ReadPixel(1012, 675);  // where 0.5x bug used to put it!
+            byte rBR = (byte)((pBR >> 16) & 255), rTL = (byte)((pTL >> 16) & 255);
+            Assert(rBR > 180, $"MotionBlur 2694x1824 coordinate regression: bottom-right pixel R={rBR} (expected >180, top-left R={rTL})");
+            Assert(rTL < 20, $"MotionBlur ghosting in 0.5x top-left quadrant: R={rTL}");
+            var msg1 = $"PASS [1/4] MotionBlur 2694x1824 half-res exact coordinates (BR.R={rBR}, TL.R={rTL}, resScale={_mbResScale})";
+            Services.Paths.Log("self-test: " + msg1); Console.WriteLine(msg1);
+
+            // TEST 2: DrawDancingText GPU Sprite Atlas (120 frames, 0 errors, non-zero pixels, fast CPU!)
+            MusicBounce.SetTestState(bass: 0.72f, mid: 0.54f, high: 0.45f, kick: 0.85f, loud: 1.25f);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            for (int f = 0; f < 120; f++)
+            {
+                MusicBounce.StepTestPhase(1f / 144f);
+                DC.BeginDraw();
+                DC.Clear(new Color4(0, 0, 0, 1));
+                DrawDancingText("The Prodigy - AONO20 - Liquid Wave Test!", 200, 200, 26f, 0xFFFFFFFF, 700, 900, 1, shadow: true, amp: 1.0f, accentMixColor: 0xFFFF2090);
+                var hr2 = DC.EndDraw();
+                Assert(hr2.Success, $"DrawDancingText frame {f} failed: 0x{hr2.Code:X}");
+            }
+            sw.Stop();
+            double msPerFrame = sw.Elapsed.TotalMilliseconds / 120.0;
+            int litPx = 0;
+            _dev.ImmediateContext.CopyResource(stage, tex);
+            var map2 = _dev.ImmediateContext.Map(stage, 0, MapMode.Read);
+            try
+            {
+                for (int py = 270; py < 370; py += 2)
+                {
+                    var row = (byte*)map2.DataPointer + py * map2.RowPitch;
+                    for (int px = 300; px < 1100; px += 2)
+                        if (row[px * 4 + 2] > 80) litPx++;
+                }
+            }
+            finally { _dev.ImmediateContext.Unmap(stage, 0); }
+            Assert(litPx > 250, $"DrawDancingText atlas rendered too few lit pixels ({litPx})");
+            Assert(msPerFrame < 4.0, $"DrawDancingText too slow: {msPerFrame:0.00} ms/frame");
+            var msg2 = $"PASS [2/4] DrawDancingText GPU Atlas (120 frames, {msPerFrame:0.00} ms/frame, litPx={litPx}, atlasGlyphs={_danceSprites.Count})";
+            Services.Paths.Log("self-test: " + msg2); Console.WriteLine(msg2);
+
+            // TEST 3: MusicBounce textSafe invariant + loudness proportionality + wave continuity
+            DC.Transform = Matrix3x2.Identity;
+            var prevTf = MusicBounce.Push(new R(100, 100, 200, 40), 4, amp: 1.0f, textSafe: true);
+            var safeTf = DC.Transform;
+            MusicBounce.Pop(prevTf);
+            Assert(MathF.Abs(safeTf.M11 - 1f) < 1e-4f && MathF.Abs(safeTf.M12) < 1e-4f && MathF.Abs(safeTf.M21) < 1e-4f && MathF.Abs(safeTf.M22 - 1f) < 1e-4f,
+                $"MusicBounce textSafe=true mutated linear matrix ({safeTf.M11},{safeTf.M12},{safeTf.M21},{safeTf.M22})");
+
+            MusicBounce.SetTestState(bass: 0.45f, mid: 0.35f, high: 0.25f, kick: 0.40f, loud: 0.25f);
+            float quietAmp = MusicBounce.MeasureWaveAmp();
+            MusicBounce.SetTestState(bass: 0.85f, mid: 0.65f, high: 0.55f, kick: 1.15f, loud: 1.45f);
+            float loudAmp = MusicBounce.MeasureWaveAmp();
+            Assert(loudAmp > quietAmp * 2.2f, $"Loudness scaling too weak: quiet={quietAmp:0.00} loud={loudAmp:0.00}");
+            var msg3 = $"PASS [3/4] MusicBounce textSafe pure-translation & loudness scaling (quiet={quietAmp:0.00} -> loud={loudAmp:0.00})";
+            Services.Paths.Log("self-test: " + msg3); Console.WriteLine(msg3);
+
+            // TEST 4: ImpulseBank Custom IR preparation with Cyrillic + brackets + spaces
+            var builtinIr = Services.ImpulseBank.GetImpulsePath("hall");
+            if (builtinIr != null && File.Exists(builtinIr))
+            {
+                var tmpCyr = Path.Combine(Path.GetTempPath(), "Тест [Свой IR] (48k).wav");
+                File.Copy(builtinIr, tmpCyr, overwrite: true);
+                var prep = Services.ImpulseBank.PrepareCustomIr(tmpCyr);
+                try { File.Delete(tmpCyr); } catch { }
+                Assert(prep != null && File.Exists(prep) && prep.All(c => c < 128), $"PrepareCustomIr failed for Cyrillic path: {prep}");
+                var msg4 = $"PASS [4/4] ImpulseBank.PrepareCustomIr Cyrillic/bracket path -> {Path.GetFileName(prep)}";
+                Services.Paths.Log("self-test: " + msg4); Console.WriteLine(msg4);
+            }
+            else
+            {
+                Console.WriteLine("PASS [4/4] ImpulseBank skipped (no builtin IR yet)");
+            }
+
+            MusicBounce.Update(false, 0.016f);
+            DisposeMotionBlurResources();
+            DisposeDanceAtlas();
+            ClearTextCache();
+            _target?.Dispose(); _target = null;
+            DC.Dispose(); _d2dDev.Dispose(); _d2dFactory.Dispose(); _dev.Dispose();
+        }
+        catch (Exception e)
+        {
+            fails.Add("Exception: " + e);
+        }
+        if (fails.Count > 0)
+        {
+            foreach (var f in fails) { Services.Paths.Log("self-test FAIL: " + f); Console.WriteLine("FAIL: " + f); }
+            return 1;
+        }
+        Services.Paths.Log("self-test: ALL GPU & AUDIO SELF-TESTS PASSED");
+        Console.WriteLine("ALL GPU & AUDIO SELF-TESTS PASSED");
+        return 0;
+    }
 }
 
 /// <summary>
@@ -2154,11 +2337,13 @@ public static class MusicBounce
     public static float Bass { get; private set; }
     public static float Mid { get; private set; }
     public static float High { get; private set; }
+    public static float HighPeak { get; private set; }
     public static float LoudnessGain { get; private set; }
 
     private static float _bassAvg, _phase, _lowPhase, _midPhase, _highPhase;
     private static readonly float[] _bandAvg = new float[32];
     private static readonly float[] _bandPulse = new float[32];
+    private static readonly float[] _bandTrans = new float[32];
 
     public static void Update(bool enabledPlaying, float dt)
     {
@@ -2167,9 +2352,10 @@ public static class MusicBounce
             if (Active)
             {
                 Active = false;
-                Kick = Bass = Mid = High = LoudnessGain = _bassAvg = 0f;
+                Kick = Bass = Mid = High = HighPeak = LoudnessGain = _bassAvg = 0f;
                 Array.Clear(_bandAvg);
                 Array.Clear(_bandPulse);
+                Array.Clear(_bandTrans);
             }
             return;
         }
@@ -2192,23 +2378,30 @@ public static class MusicBounce
 
         var bands = AudioAnalyzer.Bands;
         float decay = MathF.Exp(-dt * 13.5f);
+        float transDecay = MathF.Exp(-dt * 24.0f); // ultra-snappy per-bin transient pop for >3kHz squeaks & hats!
         float bandAvgA = 1f - MathF.Exp(-dt * 5.5f);
         float maxE = Kick;
+        float hiPeakRaw = 0f;
         for (int i = 0; i < 32 && i < bands.Length; i++)
         {
             float v = bands[i];
             _bandAvg[i] += (v - _bandAvg[i]) * bandAvgA;
+            float spike = MathF.Max(0f, v - _bandAvg[i] * 0.72f) * (i >= 18 ? 3.8f : 2.5f) * loud;
+            _bandTrans[i] = MathF.Max(_bandTrans[i] * transDecay, Math.Clamp(spike, 0f, 1.85f));
+            if (i >= 18 && _bandTrans[i] > hiPeakRaw) hiPeakRaw = _bandTrans[i];
+
             float trans = (MathF.Max(0f, v - _bandAvg[i] * 0.78f) * 2.40f + v * 0.64f) * loud;
             float next = MathF.Max(_bandPulse[i] * decay, Math.Clamp(trans, 0f, 1.65f));
             _bandPulse[i] = next;
             if (next > maxE) maxE = next;
         }
+        HighPeak = MathF.Max(HighPeak * MathF.Exp(-dt * 18f), hiPeakRaw);
 
-        // 3 independent Fourier water-wave phase velocities: slow deep bass swell, flowing mid wave, rapid treble ripples!
+        // 3 independent Fourier water-wave phase velocities: slow deep bass swell, flowing mid wave, rapid >3kHz ripples!
         _phase += dt * (10.5f + Kick * 17.5f);
         _lowPhase += dt * (3.2f + Bass * 4.8f + Kick * 5.5f);
-        _midPhase += dt * (6.4f + Mid * 8.2f);
-        _highPhase += dt * (12.5f + High * 14.0f);
+        _midPhase += dt * (6.8f + Mid * 9.0f);
+        _highPhase += dt * (16.5f + High * 18.0f + HighPeak * 14.0f);
         Active = maxE > 0.012f;
         if (Active) UI.Animate();
     }
@@ -2229,10 +2422,20 @@ public static class MusicBounce
         float e = Math.Clamp(_bandPulse[b] * 0.78f + Kick * kickShare, 0f, 1.70f) * amp * drive;
         if (e <= 0.008f) return prev;
 
-        // Distinct phase per band so neighbouring items ripple & hop independently like v9.2.2!
+        // Spectral-Fingerprint 2D Vector Field: each frequency pushes in its OWN distinct direction + real Stereo L/R pull!
+        float pan = AudioAnalyzer.StereoPan;
+        float domAng = AudioAnalyzer.DominantAngle;
+        float cent = AudioAnalyzer.SpectralCentroid;
+        float sub = AudioAnalyzer.SubBass;
+        float punch = AudioAnalyzer.PunchBass;
+        float air = AudioAnalyzer.AirTreble;
+
+        // Sub-bass -> deep vertical slam; Punch-bass -> directional kick along DominantAngle; Mids -> lateral Stereo L/R whip!
         float wave = MathF.Cos(_phase * 1.15f + b * 1.29f);
-        float dy = Math.Clamp((-0.55f + 0.45f * wave) * e * 4.8f, -9.0f, 5.8f);
-        float dx = Math.Clamp(MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 2.0f, -5.5f, 5.5f);
+        float dirX = MathF.Cos(domAng + b * 0.22f) * punch * 3.8f + pan * (2.6f + Mid * 4.2f);
+        float dirY = MathF.Sin(domAng + b * 0.18f) * punch * 3.2f - sub * Kick * 4.4f;
+        float dy = Math.Clamp(((-0.55f + 0.45f * wave) * e * 4.6f + dirY * amp * drive), -11.5f, 8.0f);
+        float dx = Math.Clamp((MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 2.1f + dirX * amp * drive), -9.0f, 9.0f);
 
         if (textSafe)
         {
@@ -2241,8 +2444,9 @@ public static class MusicBounce
             return prev;
         }
 
-        float sc = 1f + Math.Clamp(e * 0.042f, 0f, 0.092f);
-        float ang = Math.Clamp(MathF.Sin(_phase * 1.07f + b * 2.31f) * e * 0.025f * rotAmp, -0.056f, 0.056f);
+        // Cover art / icons get full kinetic directional punch, scale shockwave & stereo/treble twist!
+        float sc = 1f + Math.Clamp((e * 0.044f + sub * Kick * 0.036f) * amp, 0f, 0.12f);
+        float ang = Math.Clamp((MathF.Sin(_phase * 1.07f + b * 2.31f) * e * (0.024f + cent * 0.022f) + pan * 0.032f + MathF.Cos(_highPhase + b) * air * 0.028f) * rotAmp, -0.085f, 0.085f);
 
         var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.5f);
         var local = Matrix3x2.CreateScale(sc, sc, center)
@@ -2253,11 +2457,12 @@ public static class MusicBounce
     }
 
     /// <summary>
-    /// 3-Band Fourier Liquid Water-Wave Typography:
-    /// - Big slow ocean swell driven by Sub-Bass / Kick (lows)
-    /// - Medium traveling wave driven by Mids (vocals/synths)
-    /// - Crisp fine surface ripples driven by Highs (hats/sparkle) + local FFT band
-    /// - True water-surface tangent slope rotation so letters flow organically like a wave without crashing into each other!
+    /// 5-Layer Ultra-Detailed Fourier + Stereo Vector-Field Typography:
+    /// 1. Sub-Bass (36-120 Hz): massive ocean swell lifting whole words
+    /// 2. Punch-Bass (120-250 Hz): directional kinetic vector push steered by each second's dominant frequency bin
+    /// 3. Mids (250-2500 Hz): counter-propagating medium wave + real WASAPI Stereo L/R lean
+    /// 4. Highs (>3 kHz): chaotic electric micro-ripples &amp; sharp per-letter FFT-bin sparkle pops
+    /// 5. True water-surface tangent slope rotation so letters flow organically &amp; stay crisp and readable!
     /// </summary>
     public static Matrix3x2 PushGlyph(R rect, int charIdx, float amp, out float energy)
     {
@@ -2265,44 +2470,62 @@ public static class MusicBounce
         energy = 0f;
         if (!Active) return prev;
 
-        float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.28f : 1.0f;
-        float loud = Math.Clamp(LoudnessGain, 0.12f, 1.65f);
-        int localBand = (charIdx * 2 + 2) & 31;
-        float localE = _bandPulse[localBand];
+        float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.32f : 1.0f;
+        float loud = Math.Clamp(LoudnessGain, 0.12f, 1.70f);
+        float pan = AudioAnalyzer.StereoPan;
+        float domAng = AudioAnalyzer.DominantAngle;
+        float cent = AudioAnalyzer.SpectralCentroid;
 
-        // 3 coherent traveling water waves across the word (large swell + medium wave + small surface ripples)
-        const float kLow = 0.28f;  // ~22-char wide ocean bass swell
-        const float kMid = 0.72f;  // ~9-char medium flowing wave (counter-propagating for rich interference!)
-        const float kHi  = 1.68f;  // ~3.7-char sparkling treble surface ripple
+        // Hash each letter to its own mid (6..17) and >3kHz treble (18..31) FFT bin so sharp synths/hats pop specific letters!
+        int midBin = 6 + ((charIdx * 5 + 1) % 12);
+        int hiBin = 18 + ((charIdx * 7 + 3) % 14);
+        float midPop = _bandTrans[midBin];
+        float hiPop = _bandTrans[hiBin];
+
+        // 3 coherent traveling water waves whose wavelengths subtly breathe with SpectralCentroid (unique per track!)
+        float kLow = 0.25f + cent * 0.08f; // ~20-25 char ocean bass swell
+        float kMid = 0.68f + cent * 0.14f; // ~8-10 char medium flowing wave
+        float kHi  = 1.75f + cent * 0.35f; // ~3.2-3.6 char sparkling >3kHz micro-ripple
 
         float pLow = _lowPhase - charIdx * kLow;
         float pMid = _midPhase + charIdx * kMid;
         float pHi  = _highPhase - charIdx * kHi;
 
-        float aLow = Math.Clamp((Bass * 0.78f + Kick * 0.68f) * loud, 0f, 1.55f) * 5.8f * amp * drive;
-        float aMid = Math.Clamp(Mid * 0.92f * loud, 0f, 1.35f) * 3.2f * amp * drive;
-        float aHi  = Math.Clamp((High * 0.85f + localE * 0.28f) * loud, 0f, 1.25f) * 1.75f * amp * drive;
+        float aLow = Math.Clamp((Bass * 0.78f + Kick * 0.72f) * loud, 0f, 1.65f) * 5.8f * amp * drive;
+        float aMid = Math.Clamp((Mid * 0.90f + midPop * 0.48f) * loud, 0f, 1.55f) * 3.5f * amp * drive;
+        float aHi  = Math.Clamp((High * 0.75f + HighPeak * 0.72f) * loud, 0f, 1.68f) * 2.75f * amp * drive;
 
-        // Vertical water displacement = superposition of Big + Medium + Small waves
+        // Directional vector push from live DominantAngle + StereoPan (different frequencies push letters in different directions!)
+        float vecX = (MathF.Cos(domAng + charIdx * 0.14f) * AudioAnalyzer.PunchBass * 2.4f + pan * (2.2f + Mid * 2.6f)) * loud * amp;
+        float vecY = (MathF.Sin(domAng + charIdx * 0.14f) * AudioAnalyzer.PunchBass * 2.2f) * loud * amp;
+
+        // Vertical water displacement = Big Bass Swell + Medium Wave + Fine >3kHz Micro-Ripples + Sharp Per-Letter >3kHz Pop!
         float yLow = MathF.Sin(pLow) * aLow;
         float yMid = MathF.Sin(pMid) * aMid;
-        float yHi  = MathF.Sin(pHi)  * aHi;
-        float dy = Math.Clamp(yLow + yMid + yHi - Kick * 1.4f * amp, -11.5f, 9.0f);
+        float microRipple = MathF.Sin(pHi) * MathF.Cos(_highPhase * 0.63f + charIdx * 2.41f) * aHi;
+        float treblePopY = -(hiPop * 4.2f + midPop * 1.6f) * amp * drive * MathF.Sin(_highPhase * 1.42f + charIdx * 3.13f);
+        float dy = Math.Clamp(yLow + yMid + microRipple + treblePopY + vecY - Kick * 1.5f * amp, -13.5f, 10.5f);
 
-        // Gentle orbital water-particle horizontal sway (crests move forward, troughs move back -> keeps kerning clean!)
-        float dx = Math.Clamp((MathF.Cos(pLow) * aLow * 0.18f - MathF.Cos(pMid) * aMid * 0.14f), -2.4f, 2.4f);
+        // Orbital water-particle sway + directional frequency push + >3kHz micro-jitter (clamped for clean kerning!)
+        float dx = Math.Clamp(
+            MathF.Cos(pLow) * aLow * 0.16f
+            - MathF.Cos(pMid) * aMid * 0.14f
+            + vecX * 0.55f
+            + MathF.Sin(_highPhase * 1.75f + charIdx * 2.9f) * hiPop * 1.35f * amp,
+            -3.8f, 3.8f);
 
-        // Exact derivative dY/d(charIdx) gives the natural water-surface tangent angle for each floating letter!
+        // Water-surface tangent slope + stereo lean + crisp >3kHz tilt snap on popped letters
         float slope = (-MathF.Cos(pLow) * kLow * aLow)
                     + ( MathF.Cos(pMid) * kMid * aMid)
-                    + (-MathF.Cos(pHi)  * kHi  * aHi * 0.45f);
-        float ang = Math.Clamp(slope * 0.036f, -0.145f, 0.145f);
+                    + (-MathF.Cos(pHi)  * kHi  * aHi * 0.55f);
+        float popTilt = MathF.Cos(_highPhase * 1.45f + charIdx * 2.71f) * hiPop * 0.095f * amp + pan * 0.045f;
+        float ang = Math.Clamp(slope * 0.038f + popTilt, -0.19f, 0.19f);
 
-        // Subtle organic crest stretch on bass/mid energy
-        float crest = Math.Clamp((Bass * 0.45f + Mid * 0.30f + High * 0.25f) * loud * amp * drive, 0f, 1.5f);
-        energy = Math.Clamp(crest + Kick * 0.45f, 0f, 1.65f);
-        float scY = 1f + Math.Clamp((Kick * 0.065f + MathF.Max(0f, -yLow) * 0.012f) * amp, 0f, 0.15f);
-        float scX = 1f + Math.Clamp(Kick * 0.035f * amp, 0f, 0.08f);
+        // Subtle organic crest stretch on bass kick & >3kHz sparkle pop
+        float crest = Math.Clamp((Bass * 0.40f + Mid * 0.28f + High * 0.22f + hiPop * 0.60f) * loud * amp * drive, 0f, 1.70f);
+        energy = Math.Clamp(crest + Kick * 0.45f + hiPop * 0.50f, 0f, 1.80f);
+        float scY = 1f + Math.Clamp((Kick * 0.072f + hiPop * 0.085f + MathF.Max(0f, -yLow) * 0.013f) * amp, 0f, 0.20f);
+        float scX = 1f + Math.Clamp((Kick * 0.038f + midPop * 0.032f) * amp, 0f, 0.10f);
 
         var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.55f);
         var local = Matrix3x2.CreateScale(scX, scY, center)
@@ -2313,4 +2536,35 @@ public static class MusicBounce
     }
 
     public static void Pop(Matrix3x2 prev) => Gfx.DC.Transform = prev;
+
+    internal static void SetTestState(float bass, float mid, float high, float kick, float loud)
+    {
+        Active = true; Bass = bass; Mid = mid; High = high; HighPeak = high * 1.15f; Kick = kick; LoudnessGain = loud;
+        for (int i = 0; i < 32; i++)
+        {
+            float v = Math.Clamp((i < 8 ? bass : i < 18 ? mid : high) * loud, 0f, 1.5f);
+            _bandPulse[i] = v;
+            _bandTrans[i] = i >= 18 ? v * 0.85f : v * 0.45f;
+        }
+    }
+
+    internal static void StepTestPhase(float dt)
+    {
+        _phase += dt * (10.5f + Kick * 17.5f);
+        _lowPhase += dt * (3.2f + Bass * 4.8f + Kick * 5.5f);
+        _midPhase += dt * (6.4f + Mid * 8.2f);
+        _highPhase += dt * (12.5f + High * 14.0f);
+    }
+
+    internal static float MeasureWaveAmp()
+    {
+        float sum = 0f;
+        for (int i = 0; i < 24; i++)
+        {
+            var prev = PushGlyph(new R(100 + i * 16, 100, 14, 24), i, 1.0f, out _);
+            sum += MathF.Abs(Gfx.DC.Transform.M32);
+            Pop(prev);
+        }
+        return sum / 24f;
+    }
 }

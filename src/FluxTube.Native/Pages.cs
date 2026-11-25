@@ -1809,9 +1809,10 @@ public sealed class WatchPage : IPage
             Gfx.PushClip(video);
             Gfx.Fill(video, 0xFF07070B, stageRad);
 
-            AudioAnalyzer.RequestFrame();
-            float bass = AudioAnalyzer.BassEnergy;
-            float kick = MusicBounce.Kick;
+            bool isThisStagePlaying = Shell.CurrentTabOwnsMainPlayer && mpv.CurrentVideoId == id && mpv.HasMedia && !mpv.Paused && !mpv.Muted && mpv.Volume > 0;
+            if (isThisStagePlaying) AudioAnalyzer.RequestFrame();
+            float bass = isThisStagePlaying ? AudioAnalyzer.BassEnergy : 0f;
+            float kick = isThisStagePlaying ? MusicBounce.Kick : 0f;
             float br = ((Th.Brand >> 16) & 255) / 255f;
             float bg = ((Th.Brand >> 8) & 255) / 255f;
             float bb = (Th.Brand & 255) / 255f;
@@ -1875,9 +1876,10 @@ public sealed class WatchPage : IPage
             float scY = dockY - scHeight - 8f;
             float spectrumH = Math.Clamp(video.H * (fullArtMode ? 0.22f : 0.30f), 84, 196);
             var vizR = new R(video.X + 20, scY - spectrumH + 14, video.W - 40, spectrumH);
-            AudioAnalyzer.DrawStageVisualizer(vizR, sOpt.VisualizerStyle == "off" ? "bars_wave" : sOpt.VisualizerStyle,
-                opacity: fullArtMode ? 0.62f : 0.90f,
-                gain: 1.05f + kick * 0.25f + (sOpt.MusicImpactEffects ? 0.18f : 0f));
+            if (isThisStagePlaying)
+                AudioAnalyzer.DrawStageVisualizer(vizR, sOpt.VisualizerStyle == "off" ? "bars_wave" : sOpt.VisualizerStyle,
+                    opacity: fullArtMode ? 0.62f : 0.90f,
+                    gain: 1.05f + kick * 0.25f + (sOpt.MusicImpactEffects ? 0.18f : 0f));
 
             // 3. Top Controls Row (dark frosted pills laid right-to-left, zero overlap!)
             float topRx = video.Right - 16;
@@ -1999,7 +2001,7 @@ public sealed class WatchPage : IPage
                         Gfx.Stroke(artR.Inset(-ring2), Gfx.Fade(Th.Brand, Math.Clamp((bass - 0.28f) * 0.50f, 0f, 0.42f)), Gfx.Corner(16) + ring2 * 0.35f, 1.4f);
                     }
                 }
-                AudioAnalyzer.DrawCoverSpectrum(artR);
+                if (isThisStagePlaying) AudioAnalyzer.DrawCoverSpectrum(artR);
 
                 Gfx.Fill(artR.Inset(-5), Gfx.Fade(0xFF000000, 0.45f), Gfx.Corner(16));
                 if (art?.SharpBmp != null) Gfx.ImageRoundedCover(art.SharpBmp, artR, Gfx.Corner(14), MusicArt.Alpha(art));

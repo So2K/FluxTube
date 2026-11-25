@@ -82,6 +82,7 @@ public static unsafe class App
     private static int Run(string[] args)
     {
         if (args.Contains("--test-loopback")) return AudioAnalyzer.SelfTestProcessLoopback();
+        if (args.Contains("--self-test")) return Gfx.RunGpuSelfTest();
         Mute = args.Contains("--mute");
         NoActivate = args.Contains("--noactivate");
         Bench = args.Contains("--bench");

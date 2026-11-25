@@ -38,8 +38,9 @@ public static unsafe class AudioAnalyzer
     private static long _lastNeededAt, _lastForcedAt;
     private static bool _loggedMode;
     private static float _bassEnergy, _midEnergy, _highEnergy;
-    private static float _capturedTrackRms, _capturedRawRms;
+    private static float _capturedTrackRms, _capturedRawRms, _capturedStereoPan;
     private static float _loudness, _slowTrackRms = 0.08f, _trackDynamics = 1f, _loudnessGain = 1f;
+    private static float _stereoPan, _spectralCentroid = 0.35f, _dominantAngle, _subBass, _punchBass, _airTreble;
     private static long _lastStepFrame = -1;
 
     private static float _beatEnvelope, _beatPhase, _capturedBeatStrength;
@@ -57,6 +58,15 @@ public static unsafe class AudioAnalyzer
     public static float BassEnergy => _bassEnergy;
     public static float MidEnergy => _midEnergy;
     public static float HighEnergy => _highEnergy;
+    public static float SubBass => _subBass;
+    public static float PunchBass => _punchBass;
+    public static float AirTreble => _airTreble;
+    /// <summary>Real-time stereo L/R balance from WASAPI channels (-1 = full Left, 0 = Center, +1 = full Right).</summary>
+    public static float StereoPan => _stereoPan;
+    /// <summary>Energy-weighted spectral centroid (0 = dark sub-heavy, 1 = bright treble-heavy).</summary>
+    public static float SpectralCentroid => _spectralCentroid;
+    /// <summary>Live directional vector angle (radians) driven by the dominant transient frequency bin each instant.</summary>
+    public static float DominantAngle => _dominantAngle;
     /// <summary>Perceptual track loudness (0..1, -44..-5 dBFS) reflecting real quiet vs loud sections.</summary>
     public static float Loudness => _loudness;
     /// <summary>Short-term loudness relative to the track's 5s baseline (0.35 quiet intro .. 1.55 big drop).</summary>
@@ -178,6 +188,35 @@ public static unsafe class AudioAnalyzer
             _bassEnergy = Math.Clamp(bass / 6f, 0f, 1f);
             _midEnergy = Math.Clamp(mid / 12f, 0f, 1f);
             _highEnergy = Math.Clamp(high / (BandCount - 18f), 0f, 1f);
+
+            // Fine sub-band breakdown + real-time spectral centroid & dominant-frequency directional vector!
+            _subBass = Math.Clamp((_smoothBands[0] + _smoothBands[1] + _smoothBands[2]) / 3f, 0f, 1f);
+            _punchBass = Math.Clamp((_smoothBands[3] + _smoothBands[4] + _smoothBands[5] + _smoothBands[6]) / 4f, 0f, 1f);
+            float airSum = 0f;
+            for (int i = 20; i < BandCount; i++) airSum += _smoothBands[i];
+            _airTreble = Math.Clamp(airSum / (BandCount - 20f), 0f, 1f);
+
+            float wSum = 0f, idxSum = 0f, bestBinVal = 0.04f;
+            int domBin = 0;
+            for (int i = 0; i < BandCount; i++)
+            {
+                float bVal = _smoothBands[i];
+                wSum += bVal;
+                idxSum += bVal * i;
+                // Weight transient contrast so a sudden 4kHz synth or 120Hz kick steers the directional angle immediately!
+                float weighted = bVal * (0.85f + 0.35f * (i / (float)(BandCount - 1)));
+                if (weighted > bestBinVal) { bestBinVal = weighted; domBin = i; }
+            }
+            float centTarget = wSum > 0.02f ? Math.Clamp(idxSum / (wSum * (BandCount - 1)), 0f, 1f) : 0.35f;
+            _spectralCentroid += (centTarget - _spectralCentroid) * (1f - MathF.Exp(-dt * 12f));
+
+            // Map dominant frequency bin (0..31) + stereo pan to a distinct kinetic direction angle!
+            float panTarget = playing ? Math.Clamp(_capturedStereoPan, -1f, 1f) : 0f;
+            _stereoPan += (panTarget - _stereoPan) * (1f - MathF.Exp(-dt * 20f));
+            float targetAng = (domBin * 0.6180339f * MathF.Tau) + _stereoPan * 1.15f;
+            // Shortest angular interpolation so direction snaps organically without sudden flips
+            float angDiff = MathF.Atan2(MathF.Sin(targetAng - _dominantAngle), MathF.Cos(targetAng - _dominantAngle));
+            _dominantAngle += angDiff * (1f - MathF.Exp(-dt * 11f));
 
             // Real track loudness (dBFS) + 5-second dynamic drop tracker + player volume curve
             float trackRms = playing ? _capturedTrackRms : 0f;
@@ -622,9 +661,9 @@ public static unsafe class AudioAnalyzer
                                     }
                                 }
                                 bool silent = (flags & 0x2) != 0 || data == null;
-                                // Compensate player volume for spectrum visibility while also tracking true raw & track RMS loudness!
+                                // Compensate player volume for spectrum visibility while also tracking true raw, track RMS & stereo L/R pan!
                                 float volGain = Math.Clamp(100f / MathF.Max(14f, (float)MpvPlayer.Instance.Volume), 0.72f, 4.2f);
-                                float sumSqComp = 0f, sumSqRaw = 0f;
+                                float sumSqComp = 0f, sumSqRaw = 0f, sumSqL = 0f, sumSqR = 0f;
                                 uint rmsCount = 0;
                                 if (silent)
                                 {
@@ -639,6 +678,12 @@ public static unsafe class AudioAnalyzer
                                     {
                                         float sum = 0f;
                                         int baseIdx = (int)(f * channels);
+                                        if (channels >= 2)
+                                        {
+                                            float sL = fp[baseIdx], sR = fp[baseIdx + 1];
+                                            sumSqL += sL * sL;
+                                            sumSqR += sR * sR;
+                                        }
                                         for (int c = 0; c < channels; c++) sum += fp[baseIdx + c];
                                         float raw = sum * invRaw;
                                         float sample = Math.Clamp(raw * volGain, -1.6f, 1.6f);
@@ -659,6 +704,12 @@ public static unsafe class AudioAnalyzer
                                     {
                                         float sum = 0f;
                                         int baseIdx = (int)(f * channels);
+                                        if (channels >= 2)
+                                        {
+                                            float sL = sp[baseIdx] / 32768f, sR = sp[baseIdx + 1] / 32768f;
+                                            sumSqL += sL * sL;
+                                            sumSqR += sR * sR;
+                                        }
                                         for (int c = 0; c < channels; c++) sum += sp[baseIdx + c];
                                         float raw = sum * rawScale;
                                         float sample = Math.Clamp(raw * volGain, -1.6f, 1.6f);
@@ -675,15 +726,19 @@ public static unsafe class AudioAnalyzer
                                 {
                                     float pktTrackRms = MathF.Sqrt(sumSqComp / rmsCount);
                                     float pktRawRms = MathF.Sqrt(sumSqRaw / rmsCount);
+                                    float rmsL = MathF.Sqrt(sumSqL / rmsCount);
+                                    float rmsR = MathF.Sqrt(sumSqR / rmsCount);
+                                    float pktPan = channels >= 2 ? Math.Clamp((rmsR - rmsL) / MathF.Max(0.004f, rmsR + rmsL) * 2.2f, -1f, 1f) : 0f;
                                     lock (_dataLock)
                                     {
                                         _capturedTrackRms = _capturedTrackRms * 0.55f + pktTrackRms * 0.45f;
                                         _capturedRawRms = _capturedRawRms * 0.55f + pktRawRms * 0.45f;
+                                        _capturedStereoPan = _capturedStereoPan * 0.50f + pktPan * 0.50f;
                                     }
                                 }
                                 else if (silent)
                                 {
-                                    lock (_dataLock) { _capturedTrackRms *= 0.7f; _capturedRawRms *= 0.7f; }
+                                    lock (_dataLock) { _capturedTrackRms *= 0.7f; _capturedRawRms *= 0.7f; _capturedStereoPan *= 0.7f; }
                                 }
                                 if (beatHit)
                                 {
