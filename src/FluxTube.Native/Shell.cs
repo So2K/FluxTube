@@ -1133,6 +1133,7 @@ public static class Shell
                 case "--theme": Themes.Apply(theme: v, save: !App.Test); break;
                 case "--test-shader": if (App.Test) AppSettings.Current.UiGlassShader = v; break;
                 case "--test-effect": if (App.Test) AppSettings.Current.SeasonalEffect = v; break;
+                case "--test-pattern": if (App.Test) AppSettings.Current.BgPattern = v; break;
                 case "--test-menu": App.After(int.Parse(v), () => AccountMenu.Toggle(Gfx.W - 46 * 3 - 8, TopH - 2)); break;
                 case "--test-dsp": App.After(int.Parse(v), AudioStudioPanel.Show); break;
                 case "--test-login": App.After(int.Parse(v), () => LoginModal.Show()); break;

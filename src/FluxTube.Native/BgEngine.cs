@@ -350,23 +350,25 @@ public static unsafe class BgEngine
         _patBmp?.Dispose(); _patBmp = null;
 
         // 2x high-DPI seamless tile (displayed at 0.5x -> razor sharp on 4K 150-200% displays!)
-        int sz = key switch
+        // Hex honeycomb uses exact sqrt(3):1 aspect ratio (194 / 112 = 1.73214 vs sqrt(3) = 1.73205, 0.005% error!)
+        (int tw, int th) = key switch
         {
-            "lines" or "dots" or "grid" => 128,
-            "waves" or "hex" => 160,
-            _ => 224, // paws, hearts, stars, circuit, sakura
+            "lines" or "dots" or "grid" => (128, 128),
+            "waves" => (160, 160),
+            "hex" => (194, 112),
+            _ => (224, 224), // paws, hearts, stars, circuit, sakura, noir_web, scanlines
         };
 
-        var px = new byte[sz * sz * 4];
+        var px = new byte[tw * th * 4];
         float r1 = ((c1 >> 16) & 255) / 255f, g1 = ((c1 >> 8) & 255) / 255f, b1 = (c1 & 255) / 255f;
         float r2 = ((c2 >> 16) & 255) / 255f, g2 = ((c2 >> 8) & 255) / 255f, b2 = (c2 & 255) / 255f;
 
-        for (int py = 0; py < sz; py++)
+        for (int py = 0; py < th; py++)
         {
-            for (int pxI = 0; pxI < sz; pxI++)
+            for (int pxI = 0; pxI < tw; pxI++)
             {
                 float x = pxI + 0.5f, y = py + 0.5f;
-                SamplePattern(key, x, y, sz, out float a1, out float a2);
+                SamplePattern(key, x, y, tw, th, out float a1, out float a2);
                 if (a1 <= 0.002f && a2 <= 0.002f) continue;
 
                 // Smooth premultiplied blend of layer 1 (primary) and layer 2 (secondary)
@@ -376,7 +378,7 @@ public static unsafe class BgEngine
                 float pg = Math.Clamp(g1 * w1 + g2 * w2, 0f, 1f);
                 float pb = Math.Clamp(b1 * w1 + b2 * w2, 0f, 1f);
 
-                int o = (py * sz + pxI) * 4;
+                int o = (py * tw + pxI) * 4;
                 px[o] = (byte)(pb * 255f + 0.5f);
                 px[o + 1] = (byte)(pg * 255f + 0.5f);
                 px[o + 2] = (byte)(pr * 255f + 0.5f);
@@ -386,7 +388,7 @@ public static unsafe class BgEngine
 
         fixed (byte* ptr = px)
         {
-            _patBmp = dc.CreateBitmap(new SizeI(sz, sz), (nint)ptr, (uint)(sz * 4),
+            _patBmp = dc.CreateBitmap(new SizeI(tw, th), (nint)ptr, (uint)(tw * 4),
                 new BitmapProperties1(new Vortice.DCommon.PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.None));
         }
         _patBrush = dc.CreateBitmapBrush(_patBmp, new BitmapBrushProperties(ExtendMode.Wrap, ExtendMode.Wrap, Vortice.Direct2D1.BitmapInterpolationMode.Linear));
@@ -500,10 +502,10 @@ public static unsafe class BgEngine
         return MathF.Max(body, -notch) * scale;
     }
 
-    private static void SamplePattern(string key, float x, float y, int sz, out float a1, out float a2)
+    private static void SamplePattern(string key, float x, float y, int tw, int th, out float a1, out float a2)
     {
         a1 = 0f; a2 = 0f;
-        float s = sz;
+        float s = tw;
         switch (key)
         {
             case "paws":
@@ -580,20 +582,26 @@ public static unsafe class BgEngine
             }
             case "hex":
             {
-                // Exact seamless honeycomb grid using two offset hex lattices
-                float rx = s * 0.5f, ry = s * 0.5f;
-                float hx1 = WrapDelta(x, rx * 0.5f, rx), hy1 = WrapDelta(y, ry * 0.5f, ry);
-                float hx2 = WrapDelta(x, rx, rx), hy2 = WrapDelta(y, ry, ry);
-                static float HexEdge(float px, float py, float rad)
-                {
-                    float ax = MathF.Abs(px), ay = MathF.Abs(py);
-                    float d = MathF.Max(ax * 0.866025f + ay * 0.5f, ay) - rad;
-                    return MathF.Abs(d);
-                }
-                float dA = HexEdge(hx1, hy1, s * 0.215f);
-                float dB = HexEdge(hx2, hy2, s * 0.215f);
-                a1 = AaFill(dA - 1.1f, 1.25f) * 0.85f;
-                a2 = AaFill(dB - 0.9f, 1.25f) * 0.55f;
+                // Exact Euclidean regular flat-top honeycomb lattice (tw:th = 194:112 ≈ sqrt(3):1, zero overlap, exact 120° junctions!)
+                float w = tw, h = th;
+                float r = h * 0.5f; // exact apothem (56 px)
+                float ax = WrapDelta(x, 0f, w), ay = WrapDelta(y, 0f, h);
+                float bx = WrapDelta(x, w * 0.5f, w), by = WrapDelta(y, h * 0.5f, h);
+                bool isA = (ax * ax + ay * ay) <= (bx * bx + by * by);
+                float px = MathF.Abs(isA ? ax : bx);
+                float py = MathF.Abs(isA ? ay : by);
+                // Exact flat-top hexagon SDF: distance from cell center to boundary along face normal
+                float dHex = MathF.Max(px * 0.8660254f + py * 0.5f, py);
+                float edgeDist = MathF.Abs(r - dHex);
+                float wall = AaFill(edgeDist - 1.15f, 1.3f);
+                // Clean shared honeycomb walls + subtle secondary-color glow at the exact 120° vertices
+                // Flat-top hex vertices in quadrant I are at (R, 0) and (R/2, r) where R = 2*r/sqrt(3)
+                float bigR = r * 1.1547005f;
+                float dv1 = MathF.Sqrt((px - bigR) * (px - bigR) + py * py);
+                float dv2 = MathF.Sqrt((px - bigR * 0.5f) * (px - bigR * 0.5f) + (py - r) * (py - r));
+                float vtx = AaFill(MathF.Min(dv1, dv2) - 2.6f, 1.4f);
+                a1 = wall * 0.86f;
+                a2 = vtx * 0.72f;
                 break;
             }
             case "hearts":
