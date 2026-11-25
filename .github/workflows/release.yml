@@ -123,6 +123,10 @@ jobs:
           if (-not $denoBin) { throw 'deno.exe missing from archive.' }
           Copy-Item $denoBin.FullName dist/deps/deno.exe -Force
 
+      - name: Verify bass onset detection
+        shell: pwsh
+        run: dotnet run --project tests/BassCheck/BassCheck.csproj -c Release --nologo
+
       - name: Publish FluxTube.Native (Native AOT win-x64)
         shell: pwsh
         run: |

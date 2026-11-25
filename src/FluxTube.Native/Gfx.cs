@@ -130,7 +130,7 @@ public static unsafe class Gfx
         public float R, G, B, A;
         public void Dispose() { Brush?.Dispose(); Stops?.Dispose(); Brush = null; Stops = null; A = -1; }
     }
-    private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new(), new(), new(), new()];
+    private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new(), new(), new(), new(), new()];
     private static readonly GradientStop[] _radialStopsBuf = new GradientStop[6];
 
     public static void Init(nint hwnd)

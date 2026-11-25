@@ -40,6 +40,18 @@ public static unsafe class AudioAnalyzer
     private static float _bassEnergy, _midEnergy, _highEnergy;
     private static long _lastStepFrame = -1;
 
+    private static float _beatEnvelope, _beatPhase, _capturedBeatStrength;
+    private static long _capturedBeatAt, _capturedBassAt;
+    private static float _capturedBassPressure, _bassPressure;
+    public static float BassPressure => _bassPressure;
+    private static long _lastBeatAt;
+    public static long BeatStamp => _lastBeatAt;
+    public static float BeatEnvelope => _beatEnvelope;
+    public static float BeatAttackStrength => _capturedBeatStrength;
+    // Amplify the visible kick, not detector sensitivity or effect frequency.
+    public static float BeatMotionStrength => _beatEnvelope > 0 ? MathF.Pow(_beatEnvelope, 0.65f) : 0;
+    public static float BeatPhase => _beatPhase;
+
     public static float BassEnergy => _bassEnergy;
     public static float MidEnergy => _midEnergy;
     public static float HighEnergy => _highEnergy;
@@ -53,11 +65,27 @@ public static unsafe class AudioAnalyzer
         return (p.HasMedia && !p.Paused && !p.Muted) || BgPlayers.ActiveCount > 0;
     }
 
-    /// <summary>Called only by visible UI panels that want live spectrum/wave data this frame. Pass force=true for EQ studio / MusicBounce.</summary>
+    /// <summary>Called only by visible UI panels that want live spectrum/wave data this frame.</summary>
+    private static readonly bool SpectrumPreview = Environment.GetCommandLineArgs().Contains("--test-spectrum");
     public static void RequestFrame(bool force = false)
     {
-        if (_disposed || App.Test) return;
-        if (!force && AppSettings.Current.VisualizerStyle == "off") return;
+        if (_disposed || (!force && AppSettings.Current.VisualizerStyle == "off")) return;
+        if (App.Test)
+        {
+            if (SpectrumPreview)
+            {
+                // Deterministic silent visual QA; never used during normal playback.
+                float time = (UI.Now - UI.StartTick) / 1000f;
+                lock (_dataLock)
+                {
+                    for (int i = 0; i < BandCount; i++)
+                        _targetBands[i] = (0.25f + 0.5f * MathF.Pow(MathF.Sin(i * 0.22f + time * 2), 2)) * (1 - i / 45f);
+                    for (int i = 0; i < WavePoints; i++) _targetWave[i] = MathF.Sin(i * 0.35f + time * 3) * 0.4f;
+                }
+                StepSmoothing(true);
+            }
+            return;
+        }
         if (W.IsIconic(App.Hwnd) || Gfx.Occluded) return;
 
         bool playing = IsPlayingAudio();
@@ -79,7 +107,7 @@ public static unsafe class AudioAnalyzer
         {
             if (_started || _disposed) return;
             _started = true;
-            _thread = new Thread(CaptureLoop) { IsBackground = true, Name = "flux-wasapi-fft", Priority = ThreadPriority.BelowNormal };
+            _thread = new Thread(CaptureLoop) { IsBackground = true, Name = "flux-wasapi-fft", Priority = ThreadPriority.AboveNormal };
             _thread.Start();
         }
     }
@@ -98,6 +126,18 @@ public static unsafe class AudioAnalyzer
 
         lock (_dataLock)
         {
+            // The capture thread already detected the low-frequency attack, before FFT or UI smoothing.
+            long ageMs = Math.Max(0, UI.Now - _capturedBeatAt);
+            if (playing && _capturedBeatAt > _lastBeatAt && ageMs < 120)
+                _lastBeatAt = _capturedBeatAt;
+            float age = Math.Max(0, UI.Now - _lastBeatAt) / 1000f;
+            _beatEnvelope = playing && age < 0.20f ? _capturedBeatStrength * MathF.Exp(-age * 21) : 0;
+            _beatPhase = MathF.PI * 0.5f + age * 22;
+            if (_beatEnvelope < 0.015f) _beatEnvelope = 0;
+            if (!playing) { _beatEnvelope = 0; _lastBeatAt = _capturedBeatAt; }
+            float pressureTarget = playing && UI.Now - _capturedBassAt < 150 ? _capturedBassPressure : 0;
+            _bassPressure += (pressureTarget - _bassPressure) * (1 - MathF.Exp(-dt * (pressureTarget > _bassPressure ? 35 : 10)));
+            if (!playing) _bassPressure = 0;
             float bass = 0, mid = 0, high = 0;
             for (int i = 0; i < BandCount; i++)
             {
@@ -501,6 +541,7 @@ public static unsafe class AudioAnalyzer
                     if (startFn(client) < 0) { Thread.Sleep(1500); continue; }
                     started = true;
 
+                    var bassDetector = new BassOnsetDetector((int)sampleRate);
                     var capVtbl = *(void***)capture;
                     var getNextPkt = (delegate* unmanaged[Stdcall]<void*, uint*, int>)capVtbl[5];
                     var getBuf = (delegate* unmanaged[Stdcall]<void*, byte**, uint*, uint*, ulong*, ulong*, int>)capVtbl[3];
@@ -521,10 +562,23 @@ public static unsafe class AudioAnalyzer
                             if (hr < 0) goto Reopen;
                             try
                             {
+                                long packetStart = Environment.TickCount64 - (long)(frames * 1000.0 / sampleRate);
+                                void DetectBass(float sample, uint frame)
+                                {
+                                    float strength = bassDetector.Process(sample);
+                                    if (strength <= 0) return;
+                                    lock (_dataLock)
+                                    {
+                                        _capturedBeatStrength = strength;
+                                        _capturedBeatAt = packetStart + (long)(frame * 1000.0 / sampleRate);
+                                    }
+                                    App.WakeUi();
+                                }
                                 bool silent = (flags & 0x2) != 0 || data == null;
                                 if (silent)
                                 {
-                                    for (uint f = 0; f < frames; f++) { ring[ringPos] = 0f; ringPos = (ringPos + 1) & (FftSize - 1); }
+                                    for (uint f = 0; f < frames; f++) { ring[ringPos] = 0f; DetectBass(0, f); ringPos = (ringPos + 1) & (FftSize - 1); }
+                                    gotSamples = true;
                                 }
                                 else if (isFloat && bits == 32)
                                 {
@@ -536,6 +590,7 @@ public static unsafe class AudioAnalyzer
                                         int baseIdx = (int)(f * channels);
                                         for (int c = 0; c < channels; c++) sum += fp[baseIdx + c];
                                         ring[ringPos] = sum * invCh;
+                                        DetectBass(ring[ringPos], f);
                                         ringPos = (ringPos + 1) & (FftSize - 1);
                                     }
                                     gotSamples = true;
@@ -550,6 +605,7 @@ public static unsafe class AudioAnalyzer
                                         int baseIdx = (int)(f * channels);
                                         for (int c = 0; c < channels; c++) sum += sp[baseIdx + c];
                                         ring[ringPos] = sum * scale;
+                                        DetectBass(ring[ringPos], f);
                                         ringPos = (ringPos + 1) & (FftSize - 1);
                                     }
                                     gotSamples = true;
@@ -566,11 +622,14 @@ public static unsafe class AudioAnalyzer
                             ComputeSpectrum(ring, ringPos, hann, re, im, sampleRate, bandScratch, waveScratch);
                             lock (_dataLock)
                             {
+                                _capturedBeatStrength = MathF.Max(_capturedBeatStrength, bassDetector.AttackStrength);
+                                _capturedBassPressure = bassDetector.Pressure;
+                                _capturedBassAt = Environment.TickCount64;
                                 Array.Copy(bandScratch, _targetBands, BandCount);
                                 Array.Copy(waveScratch, _targetWave, WavePoints);
                             }
                         }
-                        Thread.Sleep(14);
+                        Thread.Sleep(2);
                     }
 
                 Reopen:;
@@ -675,78 +734,102 @@ public static unsafe class AudioAnalyzer
 
     // ---------------- GPU Direct2D Visualizer Renderers (ultra-cheap!) ----------------
 
-    /// <summary>Draws lush glowing multi-layered audio waves and/or studio spectrum bars inside r.</summary>
-    public static void DrawStageVisualizer(R r, string style, float opacity = 1f)
+    /// <summary>Frequency halo around the cover; energy changes the rays, never the layout.</summary>
+    public static void DrawCoverSpectrum(R art, float opacity = 1f)
+    {
+        if (AppSettings.Current.VisualizerStyle == "off") return;
+        RequestFrame();
+        float cx = art.X + art.W / 2, cy = art.Y + art.H / 2;
+        float rx = art.W * 0.66f, ry = art.H * 0.75f;
+        uint ice = Gfx.Mix(Th.Brand, 0xFF73D8EB, 0.48f);
+        const int rays = 64;
+        for (int i = 0; i < rays; i++)
+        {
+            float angle = i * MathF.Tau / rays;
+            float band = MathF.Abs(MathF.Sin(angle * 0.5f)) * (BandCount - 1);
+            int lo = (int)band, hi = Math.Min(lo + 1, BandCount - 1);
+            float energy = _smoothBands[lo] + (_smoothBands[hi] - _smoothBands[lo]) * (band - lo);
+            float v = MathF.Pow(energy, 0.72f);
+            float dx = MathF.Cos(angle), dy = MathF.Sin(angle);
+            float length = 3 + v * MathF.Min(24, art.H * 0.19f);
+            float x = cx + dx * rx, y = cy + dy * ry;
+            uint color = Gfx.Mix(Th.Brand, ice, MathF.Abs(dy));
+            if (v > 0.12f)
+                Gfx.Line(x, y, x + dx * length, y + dy * length, Gfx.Fade(color, v * 0.06f * opacity), 7f);
+            Gfx.Line(x, y, x + dx * length, y + dy * length,
+                Gfx.Fade(color, (0.06f + v * 0.38f) * opacity), 2f);
+            if (v > 0.35f)
+                Gfx.Circle(x + dx * length, y + dy * length, 1.4f, Gfx.Fade(Th.Text, v * 0.8f * opacity));
+        }
+    }
+
+    /// <summary>Mirrored spectrum with floating peaks, a fading reflection and an audio-driven ribbon.</summary>
+    public static void DrawStageVisualizer(R r, string style, float opacity = 1f, float gain = 1f)
     {
         if (style == "off" || r.W < 40 || r.H < 24 || opacity <= 0.01f) return;
         RequestFrame();
-
-        uint c1 = Th.Brand;
-        // Complementary prismatic crystal highlight
-        uint c2 = Gfx.Mix(Th.Brand, Th.Light ? 0xFF4361EE : 0xFF72EFDD, 0.55f);
-        uint c3 = Gfx.Mix(Th.Brand, 0xFFFFFFFF, 0.45f);
-
-        bool drawBars = style is "bars_wave" or "bars";
-        bool drawWaves = style is "bars_wave" or "ribbon";
-
-        if (drawBars)
+        Gfx.PushClip(r);
+        uint ice = Gfx.Mix(Th.Brand, 0xFF73D8EB, 0.48f);
+        uint highlight = Gfx.Mix(Th.Brand, Th.Text, 0.65f);
+        bool bars = style is "bars_wave" or "bars";
+        bool waves = style == "ribbon";
+        float baseline = r.Y + r.H * 0.72f;
+        float maxH = r.H * 0.62f;
+        if (bars)
         {
-            float padX = MathF.Min(28, r.W * 0.05f);
-            float usableW = r.W - padX * 2;
-            float gap = MathF.Max(2.5f, usableW / BandCount * 0.24f);
-            float barW = MathF.Max(3f, (usableW - gap * (BandCount - 1)) / BandCount);
-            float baseY = r.Bottom - 6f;
-            float maxH = r.H * (drawWaves ? 0.54f : 0.76f);
-
-            for (int i = 0; i < BandCount; i++)
+            // Smooth frequency terrain: bass in the center, treble fading toward the edges.
+            const int count = 160;
+            float px = r.X, py = baseline, previousHeight = 0;
+            for (int i = 0; i <= count; i++)
             {
-                float t = i / (float)(BandCount - 1);
-                float v = _smoothBands[i];
-                float bh = MathF.Max(3f, v * maxH);
-                float bx = r.X + padX + i * (barW + gap);
-                uint col = Gfx.Mix(c1, c2, t);
-                // Soft vertical glow behind energetic bars
-                if (v > 0.14f)
-                    Gfx.Fill(new R(bx - 1.5f, baseY - bh - 3f, barW + 3f, bh + 3f), Gfx.Fade(col, 0.16f * v * opacity), barW * 0.6f);
-                Gfx.Fill(new R(bx, baseY - bh, barW, bh), Gfx.Fade(col, (0.35f + 0.58f * v) * opacity), MathF.Min(barW * 0.5f, 4f));
-                // Floating studio peak cap
-                float pk = _peakBands[i];
-                if (pk > 0.04f)
+                float u = i / (float)count;
+                float f = MathF.Abs(u * 2 - 1) * (BandCount - 1);
+                int lo = (int)f, hi = Math.Min(lo + 1, BandCount - 1);
+                float t = f - lo; t = t * t * (3 - 2 * t);
+                float Smooth(int index) => (_smoothBands[Math.Max(0, index - 1)] + 2 * _smoothBands[index] + _smoothBands[Math.Min(BandCount - 1, index + 1)]) * 0.25f;
+                float sample = Smooth(lo) + (Smooth(hi) - Smooth(lo)) * t;
+                float v = Math.Clamp(MathF.Pow(sample, 0.8f) * gain, 0, 1);
+                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.45f);
+                float height = v * maxH * edge;
+                float x = r.X + u * r.W, y = baseline - height;
+                uint color = Gfx.Mix(Th.Brand, ice, MathF.Abs(u * 2 - 1));
+                // Fine scan lines build a translucent body rather than chunky columns.
+                for (int j = 0; j < 5; j++)
                 {
-                    float py = baseY - pk * maxH - 3f;
-                    Gfx.Fill(new R(bx, py, barW, 2.2f), Gfx.Fade(c3, 0.85f * opacity), 1.1f);
+                    float h0 = height * j / 5, h1 = height * (j + 1) / 5;
+                    Gfx.Line(x, baseline - h0, x, baseline - h1,
+                        Gfx.Fade(color, (0.008f + j * 0.014f) * v * opacity), 1.2f);
                 }
+                if (i > 0)
+                {
+                    Gfx.Line(px, py, x, y, Gfx.Fade(color, 0.045f * v * opacity), 9);
+                    Gfx.Line(px, py, x, y, Gfx.Fade(color, 0.14f * v * opacity), 3);
+                    Gfx.Line(px, py, x, y, Gfx.Fade(highlight, (0.15f + v * 0.65f) * opacity), 1.5f);
+                }
+                px = x; py = y; previousHeight = height;
             }
         }
-
-        if (drawWaves)
+        if (waves)
         {
-            // Two layered silky oscilloscope waves (glowing wide ribbon + crisp specular core)
-            float midY = drawBars ? r.Y + r.H * 0.36f : r.Y + r.H * 0.50f;
-            float amp = r.H * (drawBars ? 0.24f : 0.34f);
-            float time = (UI.Now - UI.StartTick) / 1000f;
-            float idleAmp = 2.5f + _bassEnergy * 10f;
-            float stepX = r.W / (WavePoints - 1);
-
-            for (int layer = 0; layer < 2; layer++)
+            float mid = bars ? baseline : r.Y + r.H * 0.5f;
+            float amp = r.H * (bars ? 0.17f : 0.4f);
+            for (int layer = 0; layer < 3; layer++)
             {
-                float prevX = r.X, prevY = midY;
-                uint col = layer == 0 ? Gfx.Fade(c1, (0.30f + 0.26f * _bassEnergy) * opacity) : Gfx.Fade(c3, (0.65f + 0.30f * _midEnergy) * opacity);
-                float lw = layer == 0 ? 5.0f + _bassEnergy * 4.0f : 1.9f;
-                float phaseShift = layer == 0 ? 0.0f : 0.85f;
+                float px = r.X, py = mid;
                 for (int i = 0; i < WavePoints; i++)
                 {
                     float u = i / (float)(WavePoints - 1);
-                    float env = MathF.Sin(u * MathF.PI); // taper neatly to 0 at edges
-                    float wVal = _smoothWave[i] * (layer == 0 ? 1.12f : 0.86f);
-                    float silk = MathF.Sin(u * 9.5f + time * (2.6f + _bassEnergy * 2.5f) + phaseShift) * idleAmp;
-                    float x = r.X + i * stepX;
-                    float y = midY + (wVal * amp + silk) * env;
-                    if (i > 0) Gfx.Line(prevX, prevY, x, y, col, lw);
-                    prevX = x; prevY = y;
+                    float envelope = MathF.Sin(u * MathF.PI);
+                    float x = r.X + u * r.W;
+                    float y = mid + _smoothWave[i] * amp * envelope;
+                    uint color = Gfx.Mix(Th.Brand, ice, u);
+                    float alpha = layer == 0 ? 0.08f : layer == 1 ? 0.18f : 0.7f;
+                    if (i > 0) Gfx.Line(px, py, x, y, Gfx.Fade(color, alpha * opacity), layer == 0 ? 10 : layer == 1 ? 5 : 1.4f);
+                    px = x; py = y;
                 }
             }
         }
+        Gfx.PopClip();
     }
 
     /// <summary>Compact 8-bar live audio wave indicator for the NowPlaying mini-bar (0% CPU when paused).</summary>

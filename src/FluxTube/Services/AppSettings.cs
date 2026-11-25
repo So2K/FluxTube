@@ -171,6 +171,8 @@ public sealed class AppSettings
     public bool SoundCloudWave { get; set; } = true;
     /// <summary>Ultra-cheap GPU camera shake + bass thump on the UI during Audio-Only Music Mode (single Matrix3x2 transform, ~0.001ms).</summary>
     public bool MusicBassShake { get; set; } = true;
+    public bool MusicImpactEffects { get; set; } = true;
+    public bool VideoBeatShake { get; set; } = true;
     /// <summary>User-saved custom DSP Studio presets.</summary>
     public List<SavedAudioPreset> CustomAudioPresets { get; set; } = [];
     /// <summary>Optional custom sound display names per UI sound slot (normalized WAV copies stored in .fluxtube/sfx).</summary>

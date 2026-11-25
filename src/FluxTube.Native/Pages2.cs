@@ -935,9 +935,13 @@ public sealed class SettingsPage : IPage
                 AudioStudioPanel.Show();
         }
         ToggleRow("scwave", L.T("Кругляшки комментариев на плеере (и волна в музыке)", "SoundCloud comment avatars on player bar (wave in Music Mode)"), s.SoundCloudWave, v => { s.SoundCloudWave = v; Shell.PushPlayerState(); },
-            L.T("В обычных видео показывает круглые аватарки комментариев прямо над полоской плеера (без волны), а в режиме «Только звук» — полную волну SoundCloud", "In normal videos shows circular comment avatars directly above the player seekbar (no bulky waveform); full SoundCloud waveform in Audio-Only mode"));
-        ToggleRow("bassshake", L.T("Поэлементная тряска и прыжки UI от баса («Только звук»)", "Per-element bass bounce in Audio-Only mode"), s.MusicBassShake, v => s.MusicBassShake = v,
-            L.T("Каждый элемент UI (обложка, кнопки, вкладки, сайдбар, карточки) прыгает и пульсирует отдельно на своей частоте спектра", "Every UI element (cover art, buttons, tabs, sidebar icons, cards) hops and bounces independently to its own FFT frequency band"));
+            L.T("В видео — аватарки комментариев над полоской плеера; в режиме «Только звук» — волна с отметкой самого громкого момента", "Comment avatars above the video seekbar; in Audio-Only mode, a waveform with the loudest-moment marker"));
+        ToggleRow("videobeat", L.T("Тряска видео под бит", "Video shake on the beat"), s.VideoBeatShake,
+            v => { if (s.VideoBeatShake != v) Shell.ToggleVideoBeatShake(); },
+            L.T("Лёгкий толчок изображения на ударах баса. Отключается и кнопкой «Видео в бит» под плеером.",
+                "Bass hits move the video image. Also toggle with Video beat below the player."));
+        ToggleRow("bassshake", L.T("Акценты в такт басу в режиме «Только звук»", "Bass-reactive accents in Audio-Only mode"), s.MusicBassShake, v => s.MusicBassShake = v,
+            L.T("Содержимое страницы реагирует на бас; дальше от плеера движение слабее. Панели приложения неподвижны.", "Page content reacts to bass with less motion farther from the player. App navigation stays still."));
         ToggleRow("wheelvol", L.T("Колёсико мыши меняет громкость на видео", "Mouse wheel adjusts volume over video"), s.WheelVolumeOnVideo, v => s.WheelVolumeOnVideo = v,
             L.T("Выключено: прокрутка колёсика над видео просто скроллит страницу (а в Shorts листает ленту)", "Off: wheel over video scrolls the page normally (and switches Shorts in Shorts feed)"));
         ToggleRow("shiftframe", L.T("Shift + колёсико: покадровая прокрутка видео", "Shift + wheel: frame-by-frame scrubbing"), s.ShiftWheelFrameStep, v => s.ShiftWheelFrameStep = v,

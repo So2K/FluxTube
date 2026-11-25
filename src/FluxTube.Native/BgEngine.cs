@@ -306,7 +306,6 @@ public static unsafe class BgEngine
         if (s.AudioOnlyMode && s.MusicBassShake && Shell.Current is not Pages.ShortsPage && Player.MpvPlayer.Instance.HasMedia && !Player.MpvPlayer.Instance.Paused && !Player.MpvPlayer.Instance.Muted && !App.Test)
         {
             float bass = AudioAnalyzer.BassEnergy;
-            tileScale *= 1f + bass * 0.048f;
             op = Math.Clamp(op * (1f + bass * 1.25f), 0.04f, 0.80f);
         }
         // Tile is baked at 2x supersampling (DPI-crisp at 4K!), so base display scale is 0.5 * tileScale

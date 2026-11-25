@@ -940,6 +940,22 @@ public static class Shell
     private static long _navAt, _toastAt;
     private static float _markY = -1, _markShown, _prevSideW = SideW;
     private static int _markIdx = -1;
+    private static float _shakeBassAvg, _shakeEnergy, _shakePhase;
+    public static R MusicAccent(R r, float strength = 1f)
+    {
+        float e = PageBeatMotion.Active ? 0 : _shakeEnergy * strength;
+        return new R(r.X + MathF.Sin(_shakePhase) * e * 7f - e * 2f,
+            r.Y + MathF.Cos(_shakePhase * 1.3f) * e * 5f - e * 2f, r.W + e * 4f, r.H + e * 4f);
+    }
+
+    public static void SetMusicVolume(int volume)
+    {
+        int value = Math.Clamp(volume, 0, 150);
+        AppSettings.Current.Volume = value;
+        _volSaveDueAt = UI.Now + 450;
+        if (P.Muted && value > 0) P.Command("set", "mute", "no");
+        P.SetVolumeSmooth(value, 0);
+    }
 
     public static bool TopBarControlAt(float x, float y)
     {
@@ -1135,6 +1151,10 @@ public static class Shell
                 case "--test-effect": if (App.Test) AppSettings.Current.SeasonalEffect = v; break;
                 case "--test-pattern": if (App.Test) AppSettings.Current.BgPattern = v; break;
                 case "--test-menu": App.After(int.Parse(v), () => AccountMenu.Toggle(Gfx.W - 46 * 3 - 8, TopH - 2)); break;
+                case "--test-music" when App.Test:
+                    AppSettings.Current.AudioOnlyMode = v == "1";
+                    P.SetVideoEnabled(v != "1");
+                    break;
                 case "--test-dsp": App.After(int.Parse(v), AudioStudioPanel.Show); break;
                 case "--test-login": App.After(int.Parse(v), () => LoginModal.Show()); break;
                 case "--lang": AppSettings.Current.UiLanguage = v; OnLanguageChanged(); break;
@@ -1713,6 +1733,62 @@ public static class Shell
         return true;
     }
 
+    private static float _videoBeatEnvelope, _videoBeatPhase;
+    private static bool _videoBeatApplied;
+    private static long _videoBeatSentAt;
+    private static double _beatBaseX, _beatBaseY, _beatBaseZoom;
+
+    public static void ToggleVideoBeatShake()
+    {
+        AppSettings.Current.VideoBeatShake = !AppSettings.Current.VideoBeatShake;
+        AppSettings.Current.Save();
+        UpdateVideoBeat();
+        App.Invalidate();
+    }
+
+    private static void UpdateVideoBeat()
+    {
+        bool enabled = AppSettings.Current.VideoBeatShake && !AppSettings.Current.AudioOnlyMode &&
+            P.IsReady && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test &&
+            !W.IsIconic(App.Hwnd) && (_fullscreen || _cur is WatchPage || Pip.Active);
+        if (!enabled)
+        {
+            if (_videoBeatApplied && P.IsReady)
+            {
+                SendVideoPose(_beatBaseX, _beatBaseY, _beatBaseZoom);
+                _videoBeatApplied = false;
+            }
+            _videoBeatEnvelope = 0;
+            return;
+        }
+        AudioAnalyzer.RequestFrame(force: true);
+        _videoBeatEnvelope = AudioAnalyzer.BeatMotionStrength;
+        _videoBeatPhase = AudioAnalyzer.BeatPhase;
+        UI.Animate();
+        if (!_videoBeatApplied)
+        {
+            if (_videoBeatEnvelope < 0.01f && AudioAnalyzer.BassPressure < 0.01f) return;
+            _beatBaseX = P.GetDouble("video-pan-x");
+            _beatBaseY = P.GetDouble("video-pan-y");
+            _beatBaseZoom = P.GetDouble("video-zoom");
+            _videoBeatApplied = true;
+        }
+        if (UI.Now - _videoBeatSentAt < 8) return;
+        _videoBeatSentAt = UI.Now;
+        float e = _videoBeatEnvelope < 0.002f ? 0 : _videoBeatEnvelope;
+        SendVideoPose(_beatBaseX + MathF.Sin(_videoBeatPhase) * e * 0.030,
+            _beatBaseY + MathF.Cos(_videoBeatPhase * 1.3f) * e * 0.038,
+            _beatBaseZoom + AudioAnalyzer.BassPressure * 0.025 + e * 0.16);
+    }
+
+    private static void SendVideoPose(double x, double y, double zoom)
+    {
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        P.Command("set", "video-pan-x", x.ToString("0.#####", culture));
+        P.Command("set", "video-pan-y", y.ToString("0.#####", culture));
+        P.Command("set", "video-zoom", zoom.ToString("0.#####", culture));
+    }
+
     public static void Draw()
     {
         float w = Gfx.W, h = Gfx.H;
@@ -1721,6 +1797,7 @@ public static class Shell
         _toastRect = default;
         if (AnyModalOpen) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
         var cur = T.Current;
+        UpdateVideoBeat();
 
         if (_fullscreen)
         {
@@ -1735,9 +1812,16 @@ public static class Shell
             return;
         }
 
-        // Update per-element GPU bass/spectrum bounce for Audio-Only Music Mode (exempt Shorts!)
-        bool musicBounceOn = AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && _cur is not ShortsPage && P.HasMedia && !P.Paused && !P.Muted && !App.Test;
-        MusicBounce.Update(musicBounceOn, (float)UI.Dt);
+        // Detect short musical transients; the window and all hit targets stay stationary.
+        if (AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test)
+        {
+            AudioAnalyzer.RequestFrame(force: true);
+            _shakeBassAvg = AudioAnalyzer.BassEnergy;
+            _shakeEnergy = AudioAnalyzer.BeatEnvelope;
+            _shakePhase = AudioAnalyzer.BeatPhase;
+            if (_shakeEnergy > 0.01f) UI.Animate();
+        }
+        else { _shakeEnergy = 0f; _shakeBassAvg = 0f; }
 
         // Tactile frosted/matte glass backdrop behind the entire window + GPU stylization & stencil glass pass 1
         Gfx.DrawFrostedBackdrop(w, h);
@@ -1944,6 +2028,7 @@ public static class Shell
             if (bar) NowPlaying(cur!, sideW, w, h + slideDown);
             else Gfx.Fill(new R(sideW, h - barH, w - sideW, barH), Th.Panel);
         }
+
         DrawToast(w, h - barH);
         DrawDropOverlay(w, h);
         var eff = AppSettings.Current.SeasonalEffect;
@@ -2034,7 +2119,7 @@ public static class Shell
     private static (float, float, float, float, float, float, byte)[] InitSnow()
     {
         var rng = new Random(2026);
-        var arr = new (float, float, float, float, float, float, byte)[48];
+        var arr = new (float, float, float, float, float, float, byte)[256];
         for (int i = 0; i < arr.Length; i++)
         {
             byte kind = (byte)(i < 12 ? 2 : i < 24 ? 1 : 0); // 2 = crisp star/pumpkin, 1 = mid/bat, 0 = soft dot/ember
@@ -2087,15 +2172,23 @@ public static class Shell
     }
 
     /// <summary>Full-width draped garland + multi-depth snowflakes & sparkling ice crystals (works on any theme).</summary>
+    private static float _snowTravel, _snowStorm;
     private static void DrawNewYearFestive(float w, float h)
     {
         float t = (UI.Now - UI.StartTick) / 1000f;
         DrawFullWidthGarland(w, t, _garlandCols, 2.3f);
 
+        float dt = (float)Math.Clamp(UI.Dt, 0, 0.05);
+        float target = Math.Clamp(_shakeEnergy * 1.4f + _shakeBassAvg * 0.6f + MusicStageEffects.Intensity * 0.7f, 0, 1);
+        _snowStorm += (target - _snowStorm) * (1f - MathF.Exp(-dt * (target > _snowStorm ? 9f : 1.5f)));
+        _snowTravel += dt * (1f + _snowStorm * 2.8f);
         for (int i = 0; i < _snow.Length; i++)
         {
             var f = _snow[i];
-            float y = (f.Y * h + t * f.Spd) % (h + 26) - 13;
+            float visibility = i < 96 ? 1f : Math.Clamp(_snowStorm * 160f - (i - 96), 0f, 1f);
+            if (visibility <= 0) continue;
+            f.Alpha *= visibility;
+            float y = (f.Y * h + _snowTravel * f.Spd) % (h + 26) - 13;
             float drift = MathF.Sin(t * 0.75f + f.Phase) * (f.Kind == 2 ? 28f : 18f);
             float x = (f.X * w + drift + w) % w;
 
@@ -2125,7 +2218,7 @@ public static class Shell
         float t = (UI.Now - UI.StartTick) / 1000f;
         DrawFullWidthGarland(w, t, _halloCols, 3.0f);
 
-        for (int i = 0; i < _snow.Length; i++)
+        for (int i = 0; i < 48; i++)
         {
             var f = _snow[i];
             float y = (f.Y * h + t * (f.Spd * 0.82f)) % (h + 36) - 18;
