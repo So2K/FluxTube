@@ -1751,6 +1751,7 @@ public static class Shell
     public static float VideoBeatGlow { get; private set; }
     public static float VideoBeatPhase => _vbPhase;
     private static float _vbBassAvg, _vbKick, _vbPhase, _vbX, _vbY, _vbVx, _vbVy;
+    private static float _vbW0, _vbW1 = 1f, _vbW2, _vbW3, _vbW4;
     private static long _vbLastBeat;
     private static int _vbSign = 1;
 
@@ -1792,8 +1793,15 @@ public static class Shell
                       + AudioAnalyzer.BeatMotionStrength * 0.58f) * loudGain;
         _vbKick = MathF.Max(_vbKick * MathF.Exp(-dt * (13.0f + (1f - Math.Clamp(dyn - 0.6f, 0f, 1f)) * 4.5f)), Math.Clamp(kickRaw, 0f, 1.65f));
 
-        // Pro VJ 2D Spring-Damper for VideoBeatShake (C1-smooth elastic arcs, zero teleport/laggy jerks!)
+        // Branchless continuous mode-weight crossfade + 2D Spring-Damper (ZERO teleports!)
         int mode = AudioAnalyzer.PatternMode;
+        float wBlend = 1f - MathF.Exp(-dt * 4.2f);
+        _vbW0 += ((mode == 0 ? 1f : 0f) - _vbW0) * wBlend;
+        _vbW1 += ((mode == 1 ? 1f : 0f) - _vbW1) * wBlend;
+        _vbW2 += ((mode == 2 ? 1f : 0f) - _vbW2) * wBlend;
+        _vbW3 += ((mode == 3 ? 1f : 0f) - _vbW3) * wBlend;
+        _vbW4 += ((mode == 4 ? 1f : 0f) - _vbW4) * wBlend;
+
         float domAng = AudioAnalyzer.DominantAngle;
         float pan = AudioAnalyzer.StereoPan;
         float buildup = AudioAnalyzer.BuildupLevel;
@@ -1804,20 +1812,16 @@ public static class Shell
             _vbLastBeat = beatStamp;
             _vbSign = -_vbSign;
             float power = Math.Clamp((0.55f + AudioAnalyzer.BeatMotionStrength * 0.85f) * loudGain, 0.15f, 1.75f);
-            float impY = mode switch { 4 => -160f, 0 => -125f, 2 => -105f, 3 => -45f, _ => -85f } * power;
-            float impX = mode switch
-            {
-                2 => _vbSign * 85f * power,
-                4 => (MathF.Cos(domAng) * 75f + pan * 65f) * power,
-                1 => (MathF.Cos(domAng) * 42f + pan * 68f) * power,
-                _ => pan * 32f * power,
-            };
+            float impY = -(125f * _vbW0 + 85f * _vbW1 + 105f * _vbW2 + 45f * _vbW3 + 165f * _vbW4) * power;
+            float impX = (_vbSign * 85f * _vbW2
+                        + MathF.Cos(domAng) * (42f * _vbW1 + 75f * _vbW4)
+                        + pan * (32f * _vbW0 + 68f * _vbW1 + 65f * _vbW4)) * power;
             _vbVx = Math.Clamp(_vbVx + impX, -210f, 210f);
             _vbVy = Math.Clamp(_vbVy + impY, -240f, 200f);
         }
 
-        float tgtX = pan * (mode == 1 || mode == 4 ? 4.2f : 1.8f) * loudGain;
-        float tgtY = mode == 3 ? -buildup * 4.5f : -AudioAnalyzer.SubBass * 1.6f * loudGain;
+        float tgtX = pan * (4.2f * (_vbW1 + _vbW4) + 1.6f * (_vbW0 + _vbW2)) * loudGain;
+        float tgtY = -buildup * 4.5f * _vbW3 - AudioAnalyzer.SubBass * 1.6f * loudGain;
         float subDt = dt * 0.5f;
         const float k = 215f, c = 22.5f;
         for (int s = 0; s < 2; s++)

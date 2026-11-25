@@ -2283,10 +2283,12 @@ public static unsafe class Gfx
             MusicBounce.SetTestState(bass: 0.85f, mid: 0.65f, high: 0.55f, kick: 1.15f, loud: 1.45f);
             float loudAmp = MusicBounce.MeasureWaveAmp();
             Assert(loudAmp > quietAmp * 2.2f, $"Loudness scaling too weak: quiet={quietAmp:0.00} loud={loudAmp:0.00}");
-            // C1 smoothness check: spring-damper must NEVER teleport/jerk on sudden kicks or mode flips!
+            // C1 smoothness + physical chain propagation check: spring-damper never jerks & impulse travels Node 0 -> Node 4!
             float maxStep = MusicBounce.MeasureMaxSpringStep();
             Assert(maxStep < 4.5f, $"Spring-damper jerked too hard in one frame: maxStep={maxStep:0.00} DIPs");
-            var msg3 = $"PASS [3/5] MusicBounce textSafe, loudness ({quietAmp:0.00}->{loudAmp:0.00}) & C1 spring smoothness (maxStep={maxStep:0.00}px)";
+            var (tPeak0, tPeak4, peak4) = MusicBounce.MeasureChainPropagation();
+            Assert(peak4 > 0.5f && tPeak4 > tPeak0, $"Spring chain failed to propagate wave (t0={tPeak0}, t4={tPeak4}, peak4={peak4:0.00})");
+            var msg3 = $"PASS [3/5] MusicBounce textSafe, loudness ({quietAmp:0.00}->{loudAmp:0.00}), C1 maxStep={maxStep:0.00}px, chain t0={tPeak0}->t4={tPeak4} (peak4={peak4:0.00}px)";
             Services.Paths.Log("self-test: " + msg3); Console.WriteLine(msg3);
 
             // TEST 4: ImpulseBank Custom IR preparation with Cyrillic + brackets + spaces
@@ -2358,8 +2360,12 @@ public static class MusicBounce
     public static float LoudnessGain { get; private set; }
 
     private static float _bassAvg, _phase, _lowPhase, _midPhase, _highPhase;
-    // Pro VJ 2D Spring-Damper Gimbal (Resolume / TouchDesigner style): ZERO teleports, C1-smooth arcs!
+    // Pro VJ 2D Spring-Damper Gimbal + 16-Node Coupled Physical Spring Chain (Cover -> Play -> Title -> Likes -> Buttons -> Cards!)
+    private const int ChainLen = 16;
     private static float _sprX, _sprY, _velX, _velY, _sprRot, _velRot, _sprSc, _velSc;
+    private static readonly float[] _cx = new float[ChainLen], _cy = new float[ChainLen];
+    private static readonly float[] _cvx = new float[ChainLen], _cvy = new float[ChainLen];
+    private static readonly float[] _crot = new float[ChainLen], _csc = new float[ChainLen];
     private static float _wPiston, _wSway = 1f, _wCross, _wBuildup, _wDrop;
     private static long _lastImpulseBeat;
     private static int _crossSign = 1;
@@ -2377,6 +2383,8 @@ public static class MusicBounce
                 Kick = Bass = Mid = High = HighPeak = LoudnessGain = _bassAvg = 0f;
                 _sprX = _sprY = _velX = _velY = _sprRot = _velRot = _sprSc = _velSc = 0f;
                 _wPiston = _wCross = _wBuildup = _wDrop = 0f; _wSway = 1f;
+                Array.Clear(_cx); Array.Clear(_cy); Array.Clear(_cvx); Array.Clear(_cvy);
+                Array.Clear(_crot); Array.Clear(_csc);
                 Array.Clear(_bandAvg);
                 Array.Clear(_bandPulse);
                 Array.Clear(_bandTrans);
@@ -2462,11 +2470,13 @@ public static class MusicBounce
         float targetRot = AudioAnalyzer.StereoPan * 0.024f * (_wSway + _wDrop);
         float targetSc = buildup * 0.022f * _wBuildup + AudioAnalyzer.DropImpact * 0.030f;
 
-        // 2-step semi-implicit Euler spring-damper integration (rock-solid stability at both 60fps & 240fps!)
+        // 2-step semi-implicit Euler spring-damper + 16-node Coupled Spring Chain propagation (0 if-branches in wave math!)
         float subDt = dt * 0.5f;
-        const float kPos = 215f, cPos = 22.5f;   // snappy elastic bounce (~115ms attack, zero jitter!)
+        const float kPos = 215f, cPos = 22.5f;
         const float kRot = 185f, cRot = 20.0f;
         const float kSc  = 240f, cSc  = 25.0f;
+        const float kLink = 290f, kHome = 22f, cLink = 24.5f;
+        float chainLag = 1f - MathF.Exp(-subDt * 28f);
         for (int s = 0; s < 2; s++)
         {
             _velX += ((targetX - _sprX) * kPos - _velX * cPos) * subDt;
@@ -2479,6 +2489,20 @@ public static class MusicBounce
 
             _velSc += ((targetSc - _sprSc) * kSc - _velSc * cSc) * subDt;
             _sprSc = Math.Clamp(_sprSc + _velSc * subDt, -0.02f, 0.125f);
+
+            // Node 0 = Master Core; Nodes 1..15 pull elastically from Node k-1 -> visible kinetic chain wave!
+            _cx[0] = _sprX; _cy[0] = _sprY; _crot[0] = _sprRot; _csc[0] = _sprSc;
+            for (int k = 1; k < ChainLen; k++)
+            {
+                float fx = (_cx[k - 1] - _cx[k]) * kLink - _cx[k] * kHome - _cvx[k] * cLink;
+                float fy = (_cy[k - 1] - _cy[k]) * kLink - _cy[k] * kHome - _cvy[k] * cLink;
+                _cvx[k] = Math.Clamp(_cvx[k] + fx * subDt, -240f, 240f);
+                _cvy[k] = Math.Clamp(_cvy[k] + fy * subDt, -260f, 260f);
+                _cx[k] = Math.Clamp(_cx[k] + _cvx[k] * subDt, -12.0f, 12.0f);
+                _cy[k] = Math.Clamp(_cy[k] + _cvy[k] * subDt, -14.0f, 10.0f);
+                _crot[k] += (_crot[k - 1] - _crot[k]) * chainLag;
+                _csc[k]  += (_csc[k - 1]  - _csc[k])  * chainLag;
+            }
         }
 
         // 3 independent Fourier water-wave phase velocities
@@ -2486,28 +2510,29 @@ public static class MusicBounce
         _lowPhase += dt * (3.2f + Bass * 4.8f + Kick * 5.2f);
         _midPhase += dt * (6.6f + Mid * 8.4f);
         _highPhase += dt * (15.5f + High * 16.5f + HighPeak * 12.0f);
-        Active = maxE > 0.012f || MathF.Abs(_sprX) > 0.08f || MathF.Abs(_sprY) > 0.08f;
+        Active = maxE > 0.012f || MathF.Abs(_sprX) > 0.08f || MathF.Abs(_sprY) > 0.08f || MathF.Abs(_cy[4]) > 0.08f;
         if (Active) UI.Animate();
     }
 
     public static float BandEnergy(int band) => Active ? _bandPulse[band & 31] : 0f;
 
     /// <summary>
-    /// Pro VJ spring-damper per-element choreography: rides the C1-smooth master gimbal + gentle per-band harmonic wave.
-    /// Zero teleports, zero frame-to-frame jerks, pure translation when textSafe=true (0 D2D glyph-atlas cost).
+    /// Pro VJ Coupled Spring-Chain per-element choreography: Node 0 (Cover) -> Node 1 (Likes) -> Nodes 2..15 (Buttons/Cards).
+    /// Pure continuous math, zero mode branches, pure translation when textSafe=true (0 D2D glyph-atlas cost).
     /// </summary>
     public static Matrix3x2 Push(R rect, int band, float amp = 1.0f, float rotAmp = 1.0f, bool textSafe = true)
     {
         var prev = Gfx.DC.Transform;
         if (!Active) return prev;
         int b = band & 31;
+        int node = b >> 1; // 0..15 coupled physical spring chain index!
         float e = Math.Clamp(_bandPulse[b] * 0.72f + Kick * (b < 8 ? 0.48f : 0.20f), 0f, 1.55f);
 
-        // Cohesive master spring motion + subtle organic per-band phase ripple (never teleports!)
-        float rippleY = (-0.50f + 0.50f * MathF.Cos(_lowPhase * 1.15f + b * 0.55f)) * e * 2.4f;
-        float rippleX = MathF.Sin(_midPhase * 0.65f + b * 0.72f) * e * (1.2f * _wSway + 0.5f);
-        float dx = Math.Clamp((_sprX * 0.88f + rippleX) * amp, -12.0f, 12.0f);
-        float dy = Math.Clamp((_sprY * 0.92f + rippleY) * amp, -14.0f, 9.5f);
+        // Coupled chain node displacement + gentle harmonic wave (shockwave visibly travels Cover -> Likes -> Buttons -> Cards!)
+        float rippleY = (-0.50f + 0.50f * MathF.Cos(_lowPhase * 1.15f + b * 0.55f)) * e * 2.2f;
+        float rippleX = MathF.Sin(_midPhase * 0.65f + b * 0.72f) * e * (1.1f * _wSway + 0.45f);
+        float dx = Math.Clamp((_cx[node] * 0.92f + rippleX) * amp, -12.0f, 12.0f);
+        float dy = Math.Clamp((_cy[node] * 0.96f + rippleY) * amp, -14.0f, 9.5f);
 
         if (MathF.Abs(dx) < 0.04f && MathF.Abs(dy) < 0.04f && textSafe) return prev;
 
@@ -2517,8 +2542,8 @@ public static class MusicBounce
             return prev;
         }
 
-        float sc = 1f + Math.Clamp((_sprSc + e * 0.022f) * amp, -0.02f, 0.135f);
-        float ang = Math.Clamp((_sprRot + MathF.Sin(_lowPhase + b * 0.45f) * e * 0.014f) * rotAmp, -0.082f, 0.082f);
+        float sc = 1f + Math.Clamp((_csc[node] + e * 0.022f) * amp, -0.02f, 0.135f);
+        float ang = Math.Clamp((_crot[node] + MathF.Sin(_lowPhase + b * 0.45f) * e * 0.014f) * rotAmp, -0.082f, 0.082f);
 
         var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.5f);
         var local = Matrix3x2.CreateScale(sc, sc, center)
@@ -2571,18 +2596,20 @@ public static class MusicBounce
         float vecX = (MathF.Cos(domAng + charIdx * 0.14f) * AudioAnalyzer.PunchBass * 2.4f + pan * (2.2f + Mid * 2.6f)) * loud * amp;
         float vecY = (MathF.Sin(domAng + charIdx * 0.14f) * AudioAnalyzer.PunchBass * 2.2f) * loud * amp;
 
-        // Vertical water displacement = Big Bass Swell + Medium Wave + Fine >3kHz Micro-Ripples + Sharp Per-Letter >3kHz Pop!
+        // Vertical water displacement = Big Bass Swell + Medium Wave + Fine >3kHz Micro-Ripples + Coupled Chain Wave + Per-Letter Pop!
+        int chainNode = Math.Min(ChainLen - 1, 1 + (charIdx >> 2));
         float yLow = MathF.Sin(pLow) * aLow;
         float yMid = MathF.Sin(pMid) * aMid;
         float microRipple = MathF.Sin(pHi) * MathF.Cos(_highPhase * 0.63f + charIdx * 2.41f) * aHi;
         float treblePopY = -(hiPop * 4.2f + midPop * 1.6f) * amp * drive * MathF.Sin(_highPhase * 1.42f + charIdx * 3.13f);
-        float dy = Math.Clamp(yLow + yMid + microRipple + treblePopY + vecY - Kick * 1.5f * amp, -13.5f, 10.5f);
+        float dy = Math.Clamp(yLow + yMid + microRipple + treblePopY + vecY + _cy[chainNode] * 0.28f * amp - Kick * 1.4f * amp, -13.5f, 10.5f);
 
-        // Orbital water-particle sway + directional frequency push + >3kHz micro-jitter (clamped for clean kerning!)
+        // Orbital water-particle sway + directional frequency push + chain pull + >3kHz micro-jitter
         float dx = Math.Clamp(
             MathF.Cos(pLow) * aLow * 0.16f
             - MathF.Cos(pMid) * aMid * 0.14f
-            + vecX * 0.55f
+            + vecX * 0.50f
+            + _cx[chainNode] * 0.22f * amp
             + MathF.Sin(_highPhase * 1.75f + charIdx * 2.9f) * hiPop * 1.35f * amp,
             -3.8f, 3.8f);
 
@@ -2666,5 +2693,34 @@ public static class MusicBounce
         }
         _sprX = _sprY = _velX = _velY = 0f;
         return maxStep;
+    }
+
+    internal static (int TPeak0, int TPeak4, float Peak4) MeasureChainPropagation()
+    {
+        Array.Clear(_cx); Array.Clear(_cy); Array.Clear(_cvx); Array.Clear(_cvy);
+        _sprX = _sprY = _velX = 0f; _velY = -180f;
+        int t0 = 0, t4 = 0; float p0 = 0f, p4 = 0f;
+        const float subDt = (1f / 60f) * 0.5f, kPos = 215f, cPos = 22.5f, kLink = 290f, kHome = 22f, cLink = 24.5f;
+        for (int f = 1; f <= 30; f++)
+        {
+            for (int s = 0; s < 2; s++)
+            {
+                _velY += (-_sprY * kPos - _velY * cPos) * subDt;
+                _sprY = Math.Clamp(_sprY + _velY * subDt, -13.5f, 9.5f);
+                _cy[0] = _sprY;
+                for (int k = 1; k < ChainLen; k++)
+                {
+                    float fy = (_cy[k - 1] - _cy[k]) * kLink - _cy[k] * kHome - _cvy[k] * cLink;
+                    _cvy[k] = Math.Clamp(_cvy[k] + fy * subDt, -260f, 260f);
+                    _cy[k] = Math.Clamp(_cy[k] + _cvy[k] * subDt, -14.0f, 10.0f);
+                }
+            }
+            float a0 = MathF.Abs(_cy[0]), a4 = MathF.Abs(_cy[4]);
+            if (a0 > p0) { p0 = a0; t0 = f; }
+            if (a4 > p4) { p4 = a4; t4 = f; }
+        }
+        Array.Clear(_cx); Array.Clear(_cy); Array.Clear(_cvx); Array.Clear(_cvy);
+        _sprX = _sprY = _velX = _velY = 0f;
+        return (t0, t4, p4);
     }
 }
