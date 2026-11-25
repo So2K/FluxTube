@@ -1222,7 +1222,8 @@ public static class Shell
         Gfx.Fill(new R(140, 17, 27, 18), Th.Brand, 5);
         Gfx.Icon("\uF5B0", new R(140, 17, 27, 18), 9, Th.OnBrand);
         Gfx.Draw("FluxTube", 175, 15, 15.5f, Th.Text, 600);
-        if (UI.Click(logoId, logo)) App.Post(() => OpenRoot("home"));
+        if (UI.MiddleClick(logo)) App.Post(() => { NewTab("root", "home", activate: false); Toast("Открыта новая вкладка: Главная", Th.Sub, 1800); });
+        else if (UI.Click(logoId, logo)) App.Post(() => OpenRoot("home"));
 
         const float cbw = 46, cbh = TopH;
         var zoomed = W.IsZoomed(App.Hwnd);
@@ -1659,90 +1660,93 @@ public static class Shell
 
     public static void AfterFrame()
     {
-        if (Pip.Active) return;
-        var vis = _videoRect.Intersect(_videoClip);
-        var show = _videoWanted && _videoFor != null && VideoShown(_videoFor) && vis.W > 1 && vis.H > 1;
-        if (show)
+        if (!Pip.Active)
         {
-            var s = Gfx.Scale;
-            var px = new W.RECT
+            var vis = _videoRect.Intersect(_videoClip);
+            var show = _videoWanted && _videoFor != null && VideoShown(_videoFor) && vis.W > 1 && vis.H > 1;
+            if (show)
             {
-                L = (int)MathF.Round(_videoRect.X * s), T = (int)MathF.Round(_videoRect.Y * s),
-                R = (int)MathF.Round(_videoRect.Right * s), B = (int)MathF.Round(_videoRect.Bottom * s),
-            };
-            int vw = Math.Max(1, px.R - px.L), vh = Math.Max(1, px.B - px.T);
-
-            // Resize/move BEFORE applying SetWindowRgn so the new region matches the new window dimensions
-            bool moved = !_hostVisible || px.L != _hostPx.L || px.T != _hostPx.T || px.R != _hostPx.R || px.B != _hostPx.B;
-            if (moved)
-            {
-                _hostPx = px; _hostRect = vis; _hostVisible = true;
-                W.SetWindowPos(App.VideoHwnd, 0, px.L, px.T, vw, vh, W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW);
-            }
-            else _hostRect = vis;
-
-            int cl = Math.Clamp((int)MathF.Round((vis.X - _videoRect.X) * s), 0, vw);
-            int ct = Math.Clamp((int)MathF.Round((vis.Y - _videoRect.Y) * s), 0, vh);
-            int cr = Math.Clamp((int)MathF.Round((vis.Right - _videoRect.X) * s), 0, vw);
-            int cb = Math.Clamp((int)MathF.Round((vis.Bottom - _videoRect.Y) * s), 0, vh);
-            bool clipped = cl > 0 || ct > 0 || cr < vw || cb < vh;
-
-            _holes.Clear();
-            if (_tabPreviewRect.W > 0 && _tabPreviewRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                _holes.Add(_tabPreviewRect);
-            if (_toastRect.W > 0 && _toastRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                _holes.Add(_toastRect);
-            if (SharePanel.Open && SharePanel.Rect.W > 0 && SharePanel.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                _holes.Add(SharePanel.Rect);
-            if (ThemeCodeEditor.Open && ThemeCodeEditor.Rect.W > 0 && ThemeCodeEditor.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                _holes.Add(ThemeCodeEditor.Rect);
-            if (AccountMenu.Open && AccountMenu.Rect.W > 0 && AccountMenu.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                _holes.Add(AccountMenu.Rect);
-            if (Menus.Open)
-                foreach (var mr in Menus.ActiveRects)
-                    if (mr.W > 0 && mr.Intersect(_videoRect) is { W: > 0, H: > 0 }) _holes.Add(mr);
-
-            int radPx = _videoRadius > 0.5f ? Math.Max(1, (int)MathF.Round(_videoRadius * s)) : 0;
-            int hash = HashCode.Combine(cl, ct, cr, cb, vw, vh, radPx, _holes.Count);
-            foreach (var hr in _holes) hash = HashCode.Combine(hash, (int)hr.X, (int)hr.Y, (int)hr.W, (int)hr.H);
-
-            if (hash != _rgnHash || moved)
-            {
-                _rgnHash = hash;
-                if (!clipped && _holes.Count == 0 && radPx == 0) W.SetWindowRgn(App.VideoHwnd, 0, true);
-                else
+                var s = Gfx.Scale;
+                var px = new W.RECT
                 {
-                    nint rgn;
-                    if (radPx > 0)
-                    {
-                        rgn = W.CreateRoundRectRgn(0, 0, vw + 1, vh + 1, radPx * 2, radPx * 2);
-                        if (clipped)
-                        {
-                            var clipRgn = W.CreateRectRgn(cl, ct, cr, cb);
-                            W.CombineRgn(rgn, rgn, clipRgn, 1 /*RGN_AND*/);
-                            W.DeleteObject(clipRgn);
-                        }
-                    }
-                    else rgn = W.CreateRectRgn(cl, ct, cr, cb);
+                    L = (int)MathF.Round(_videoRect.X * s), T = (int)MathF.Round(_videoRect.Y * s),
+                    R = (int)MathF.Round(_videoRect.Right * s), B = (int)MathF.Round(_videoRect.Bottom * s),
+                };
+                int vw = Math.Max(1, px.R - px.L), vh = Math.Max(1, px.B - px.T);
 
-                    foreach (var hr in _holes)
+                // Resize/move BEFORE applying SetWindowRgn so the new region matches the new window dimensions
+                bool moved = !_hostVisible || px.L != _hostPx.L || px.T != _hostPx.T || px.R != _hostPx.R || px.B != _hostPx.B;
+                if (moved)
+                {
+                    _hostPx = px; _hostRect = vis; _hostVisible = true;
+                    W.SetWindowPos(App.VideoHwnd, 0, px.L, px.T, vw, vh, W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW);
+                }
+                else _hostRect = vis;
+
+                int cl = Math.Clamp((int)MathF.Round((vis.X - _videoRect.X) * s), 0, vw);
+                int ct = Math.Clamp((int)MathF.Round((vis.Y - _videoRect.Y) * s), 0, vh);
+                int cr = Math.Clamp((int)MathF.Round((vis.Right - _videoRect.X) * s), 0, vw);
+                int cb = Math.Clamp((int)MathF.Round((vis.Bottom - _videoRect.Y) * s), 0, vh);
+                bool clipped = cl > 0 || ct > 0 || cr < vw || cb < vh;
+
+                _holes.Clear();
+                if (_tabPreviewRect.W > 0 && _tabPreviewRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                    _holes.Add(_tabPreviewRect);
+                if (_toastRect.W > 0 && _toastRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                    _holes.Add(_toastRect);
+                if (SharePanel.Open && SharePanel.Rect.W > 0 && SharePanel.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                    _holes.Add(SharePanel.Rect);
+                if (ThemeCodeEditor.Open && ThemeCodeEditor.Rect.W > 0 && ThemeCodeEditor.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                    _holes.Add(ThemeCodeEditor.Rect);
+                if (AccountMenu.Open && AccountMenu.Rect.W > 0 && AccountMenu.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                    _holes.Add(AccountMenu.Rect);
+                if (Menus.Open)
+                    foreach (var mr in Menus.ActiveRects)
+                        if (mr.W > 0 && mr.Intersect(_videoRect) is { W: > 0, H: > 0 }) _holes.Add(mr);
+
+                int radPx = _videoRadius > 0.5f ? Math.Max(1, (int)MathF.Round(_videoRadius * s)) : 0;
+                int hash = HashCode.Combine(cl, ct, cr, cb, vw, vh, radPx, _holes.Count);
+                foreach (var hr in _holes) hash = HashCode.Combine(hash, (int)hr.X, (int)hr.Y, (int)hr.W, (int)hr.H);
+
+                if (hash != _rgnHash || moved)
+                {
+                    _rgnHash = hash;
+                    if (!clipped && _holes.Count == 0 && radPx == 0) W.SetWindowRgn(App.VideoHwnd, 0, true);
+                    else
                     {
-                        var cut = W.CreateRectRgn(
-                            (int)MathF.Floor((hr.X - _videoRect.X) * s), (int)MathF.Floor((hr.Y - _videoRect.Y) * s),
-                            (int)MathF.Ceiling((hr.Right - _videoRect.X) * s), (int)MathF.Ceiling((hr.Bottom - _videoRect.Y) * s));
-                        W.CombineRgn(rgn, rgn, cut, 4 /*RGN_DIFF*/);
-                        W.DeleteObject(cut);
+                        nint rgn;
+                        if (radPx > 0)
+                        {
+                            rgn = W.CreateRoundRectRgn(0, 0, vw + 1, vh + 1, radPx * 2, radPx * 2);
+                            if (clipped)
+                            {
+                                var clipRgn = W.CreateRectRgn(cl, ct, cr, cb);
+                                W.CombineRgn(rgn, rgn, clipRgn, 1 /*RGN_AND*/);
+                                W.DeleteObject(clipRgn);
+                            }
+                        }
+                        else rgn = W.CreateRectRgn(cl, ct, cr, cb);
+
+                        foreach (var hr in _holes)
+                        {
+                            var cut = W.CreateRectRgn(
+                                (int)MathF.Floor((hr.X - _videoRect.X) * s), (int)MathF.Floor((hr.Y - _videoRect.Y) * s),
+                                (int)MathF.Ceiling((hr.Right - _videoRect.X) * s), (int)MathF.Ceiling((hr.Bottom - _videoRect.Y) * s));
+                            W.CombineRgn(rgn, rgn, cut, 4 /*RGN_DIFF*/);
+                            W.DeleteObject(cut);
+                        }
+                        W.SetWindowRgn(App.VideoHwnd, rgn, true);
                     }
-                    W.SetWindowRgn(App.VideoHwnd, rgn, true);
                 }
             }
-        }
-        else if (_hostVisible)
-        {
-            _hostVisible = false;
-            W.ShowWindow(App.VideoHwnd, W.SW_HIDE);
+            else if (_hostVisible)
+            {
+                _hostVisible = false;
+                W.ShowWindow(App.VideoHwnd, W.SW_HIDE);
+            }
         }
         PreviewPlayer.AfterFrame(_miniVideoRect, _toastRect);
+        Edit.AfterFrame();
     }
 
     // ---------------- hold Space for 2x speed (YouTube-style) ----------------

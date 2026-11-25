@@ -11,9 +11,38 @@ public sealed class AppSettings
     public string DownloadQuality { get; set; } = "1080";
     public string DownloadDir { get; set; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "FluxTube");
     public string Proxy { get; set; } = "";
-    public string Hl { get; set; } = "ru";
+    private string _hl = "ru";
+    public string Hl
+    {
+        get => _hl;
+        set
+        {
+            var clean = SanitizeCode(value, 10);
+            _hl = clean.Length >= 2 ? clean.ToLowerInvariant() : "ru";
+        }
+    }
+    private string _gl = "";
     /// <summary>Empty = keep the region YouTube detects (matches the IP, so it looks natural behind a VPN).</summary>
-    public string Gl { get; set; } = "";
+    public string Gl
+    {
+        get => _gl;
+        set => _gl = SanitizeCode(value, 4).ToUpperInvariant();
+    }
+
+    private static string SanitizeCode(string? s, int maxLen)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        var sb = new System.Text.StringBuilder(Math.Min(maxLen, s.Length));
+        foreach (var ch in s)
+        {
+            if (ch is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '-')
+            {
+                sb.Append(ch);
+                if (sb.Length >= maxLen) break;
+            }
+        }
+        return sb.ToString();
+    }
     public bool Impersonate { get; set; } = true;
     public bool MarkWatched { get; set; } = true;
     public bool HideShorts { get; set; } = true;

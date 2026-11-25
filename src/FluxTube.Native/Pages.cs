@@ -1404,7 +1404,7 @@ public sealed class WatchPage : IPage
         if (CookieStore.IsLoggedIn)
         {
             var composerR = new R(x0, y, w, 40);
-            if (composerR.Y >= view.Y && composerR.Bottom <= view.Bottom)
+            if (composerR.Bottom >= view.Y && composerR.Y <= view.Bottom)
             {
                 if (_commentEdit == null)
                 {

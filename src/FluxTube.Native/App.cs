@@ -288,7 +288,7 @@ public static unsafe class App
                 {
                     var rc = (W.RECT*)l;
                     W.SetWindowPos(h, 0, rc->L, rc->T, rc->R - rc->L, rc->B - rc->T, W.SWP_NOZORDER | W.SWP_NOACTIVATE);
-                    if (Gfx.DC != null) { Gfx.Resize(); Invalidate(); }
+                    if (Gfx.DC != null) { Gfx.Resize(); Edit.RepaintAll(); Invalidate(); }
                     return 0;
                 }
                 case W.WM_GETMINMAXINFO:
@@ -478,6 +478,11 @@ public static unsafe class App
                     break;
                 case W.WM_MOVE:
                     Suggest.Hide();
+                    Edit.RepaintAll();
+                    break;
+                case W.WM_EXITSIZEMOVE:
+                    Edit.RepaintAll();
+                    Invalidate();
                     break;
                 case W.WM_CLOSE:
                     Shell.Shutdown();

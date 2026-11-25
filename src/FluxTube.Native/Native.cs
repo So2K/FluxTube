@@ -5,7 +5,8 @@ namespace FluxTube;
 
 /// <summary>
 /// A real Win32 EDIT inside a box the renderer draws. Text entry (IME, selection, clipboard, undo)
-/// is the one thing not worth re-implementing; everything around it is ours.
+/// is handled natively; movement is deferred to AfterFrame() with SWP_NOCOPYBITS and seamlessly falls back
+/// to crisp Direct2D text rendering while scrolling, clipped, or under overlays — zero floating or screen-capture artifacts.
 /// </summary>
 public sealed unsafe class Edit
 {
@@ -21,19 +22,26 @@ public sealed unsafe class Edit
     public Func<int, bool>? Arrow;
     /// <summary>Colour of the box the renderer draws behind the control (read on every repaint: themes change it).</summary>
     public Func<uint> Bg = () => Th.Field;
+    private readonly string _placeholder;
+    private string _cachedText = "";
     private nint _font;
     private float _fontScale;
-    private W.RECT _last;
+    private W.RECT _last, _wantRect;
+    private long _placedFrame;
+    private bool _wantShow;
     private bool _visible;
     private bool _silent;
+    private bool _pendingFocus, _pendingSelectAll;
 
     public Edit(string placeholder, bool multiline = false)
     {
+        _placeholder = placeholder;
         Multiline = multiline;
         uint style = W.WS_CHILD | W.WS_CLIPSIBLINGS | (multiline
             ? (W.ES_MULTILINE | W.ES_WANTRETURN | W.ES_AUTOVSCROLL | W.ES_AUTOHSCROLL | W.WS_VSCROLL)
             : W.ES_AUTOHSCROLL);
-        H = W.CreateWindowExW(0, "EDIT", "", style, 0, 0, 10, 10, App.Hwnd, 0, 0, 0);
+        // Start at a sane non-tiny size (320x24) so setting Text before first Place() never scrolls characters off-left!
+        H = W.CreateWindowExW(0, "EDIT", "", style, 0, 0, 320, multiline ? 200 : 24, App.Hwnd, 0, 0, 0);
         _all[H] = this;
         delegate* unmanaged[Stdcall]<nint, uint, nuint, nint, nint> proc = &Proc;
         var prev = W.SetWindowLongPtrW(H, W.GWLP_WNDPROC, (nint)proc);
@@ -48,7 +56,24 @@ public sealed unsafe class Edit
     public string Text
     {
         get => W.GetText(H);
-        set { _silent = true; W.SetWindowTextW(H, value); W.SendMessageW(H, 0x00B1 /*EM_SETSEL*/, (nuint)value.Length, value.Length); _silent = false; }
+        set
+        {
+            _cachedText = value ?? "";
+            _silent = true;
+            W.SetWindowTextW(H, _cachedText);
+            if (Focused)
+            {
+                W.SendMessageW(H, 0x00B1 /*EM_SETSEL*/, (nuint)_cachedText.Length, _cachedText.Length);
+                W.SendMessageW(H, 0x00B7 /*EM_SCROLLCARET*/, 0, 0);
+            }
+            else
+            {
+                W.SendMessageW(H, 0x00B1 /*EM_SETSEL*/, 0, 0);
+                W.SendMessageW(H, 0x00B7 /*EM_SCROLLCARET*/, 0, 0);
+            }
+            _silent = false;
+            if (_visible) W.InvalidateRect(H, null, 1);
+        }
     }
 
     /// <summary>Shows the start of the text (a long link otherwise sits scrolled to its end).</summary>
@@ -61,19 +86,54 @@ public sealed unsafe class Edit
     public bool Focused => W.GetFocus() == H;
     public void Focus(bool selectAll = true)
     {
+        if (!_visible)
+        {
+            _pendingFocus = true;
+            _pendingSelectAll = selectAll;
+            App.Invalidate();
+            return;
+        }
         W.SetFocus(H);
         if (selectAll) W.SendMessageW(H, 0x00B1, 0, -1);
         else { var len = W.GetWindowTextLengthW(H); W.SendMessageW(H, 0x00B1, (nuint)len, len); }
+        W.SendMessageW(H, 0x00B7 /*EM_SCROLLCARET*/, 0, 0);
     }
 
-    /// <summary>Puts the control inside box (DIPs), vertically centred (single-line) or filling box (multiline), and shows it.</summary>
+    /// <summary>
+    /// Schedules the native EDIT inside box (DIPs) for AfterFrame() placement.
+    /// While actively scrolling, partially clipped, or covered by an overlay, seamlessly renders the text/placeholder
+    /// directly in Direct2D and hides the native HWND so it NEVER floats outside its box or captures stale pixels.
+    /// </summary>
     public void Place(R box, float padLeft = 14, float padRight = 14, bool allowInModal = false)
     {
-        // a native control paints above everything the renderer draws: step aside for open overlays
-        if (!allowInModal && ThemeCodeEditor.Open) { Hide(); return; }
-        if (AccountMenu.Open && AccountMenu.Rect is { W: > 0 } m && box.Right > m.X && box.X < m.Right && box.Bottom > m.Y && box.Y < m.Bottom) { Hide(); return; }
-        if (Menus.Open && Menus.Bounds is { W: > 0 } mb && box.Right > mb.X && box.X < mb.Right && box.Bottom > mb.Y && box.Y < mb.Bottom) { Hide(); return; }
-        if (Shell.TabPreviewRect is { W: > 0 } tp && box.Right > tp.X && box.X < tp.Right && box.Bottom > tp.Y && box.Y < tp.Bottom) { Hide(); return; }
+        _placedFrame = Gfx.Frame;
+
+        // Check overlays, active scroll animation, or partial viewport clipping
+        bool blocked = (!allowInModal && ThemeCodeEditor.Open)
+            || (AccountMenu.Open && AccountMenu.Rect is { W: > 0 } m && box.Right > m.X && box.X < m.Right && box.Bottom > m.Y && box.Y < m.Bottom)
+            || (Menus.Open && Menus.Bounds is { W: > 0 } mb && box.Right > mb.X && box.X < mb.Right && box.Bottom > mb.Y && box.Y < mb.Bottom)
+            || (SharePanel.Open && SharePanel.Rect is { W: > 0 } sp && box.Right > sp.X && box.X < sp.Right && box.Bottom > sp.Y && box.Y < sp.Bottom)
+            || (Shell.TabPreviewRect is { W: > 0 } tp && box.Right > tp.X && box.X < tp.Right && box.Bottom > tp.Y && box.Y < tp.Bottom);
+
+        int scrollId = UI.CurrentScrollId;
+        bool scrolling = scrollId != 0 && UI.ScrollMoving(scrollId);
+        var clip = Gfx.Clip;
+        bool clipped = box.Y < clip.Y - 0.5f || box.Bottom > clip.Bottom + 0.5f || box.X < clip.X - 0.5f || box.Right > clip.Right + 0.5f;
+
+        if (blocked || scrolling || clipped || box.W < padLeft + padRight + 8 || box.H < 14)
+        {
+            _wantShow = false;
+            DrawFallback(box, padLeft, padRight);
+            return;
+        }
+
+        // Clicking anywhere on the rounded outer box (including left/right padding) focuses the control cleanly
+        if (UI.Pressed && UI.Hover(box) && !Focused)
+        {
+            UI.Pressed = false;
+            App.Post(() => Focus(selectAll: false));
+        }
+
         var s = Gfx.Scale;
         if (_fontScale != s)
         {
@@ -97,30 +157,92 @@ public sealed unsafe class Edit
             rc = new W.RECT { L = l, T = (int)MathF.Round((box.Y + box.H / 2) * s) - h / 2, R = r };
             rc.B = rc.T + h;
         }
-        if (!_visible || rc.L != _last.L || rc.T != _last.T || rc.R != _last.R || rc.B != _last.B)
-        {
-            _last = rc; _visible = true;
-            W.SetWindowPos(H, 0, rc.L, rc.T, rc.R - rc.L, rc.B - rc.T, W.SWP_NOZORDER | W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW);
-        }
+        _wantRect = rc;
+        _wantShow = true;
+    }
+
+    private void DrawFallback(R box, float padLeft, float padRight)
+    {
+        if (Multiline) return;
+        float tw = MathF.Max(8, box.W - padLeft - padRight);
+        string shown = _cachedText.Length > 0 ? _cachedText : _placeholder;
+        if (shown.Length == 0) return;
+        uint col = _cachedText.Length > 0 ? Th.Text : Th.Dim;
+        var run = Gfx.Text(shown, 14f, 400, tw, 1);
+        Gfx.PushClip(box);
+        Gfx.Draw(run, box.X + padLeft, Gfx.Snap(box.Y + (box.H - run.H) / 2), col);
+        Gfx.PopClip();
     }
 
     public void Hide()
     {
+        _wantShow = false;
+        _pendingFocus = false;
         if (!_visible) return;
         _visible = false;
         if (Focused) W.SetFocus(App.Hwnd);
         W.ShowWindow(H, W.SW_HIDE);
     }
 
-    /// <summary>After a theme change: the controls paint their own background and text.</summary>
+    /// <summary>
+    /// Runs once per frame AFTER Gfx.End() / DXGI Present: commits native Win32 EDIT positions with SWP_NOCOPYBITS
+    /// and automatically hides any Edit that was not placed this frame (prevents leaked controls across pages/tabs).
+    /// </summary>
+    public static void AfterFrame()
+    {
+        var curFrame = Gfx.Frame;
+        foreach (var e in _all.Values)
+        {
+            if (e._placedFrame != curFrame || !e._wantShow)
+            {
+                if (e._visible)
+                {
+                    e._visible = false;
+                    if (e.Focused) W.SetFocus(App.Hwnd);
+                    W.ShowWindow(e.H, W.SW_HIDE);
+                }
+                continue;
+            }
+            var rc = e._wantRect;
+            int w = Math.Max(1, rc.R - rc.L), h = Math.Max(1, rc.B - rc.T);
+            int oldW = e._last.R - e._last.L;
+            bool changed = !e._visible || rc.L != e._last.L || rc.T != e._last.T || rc.R != e._last.R || rc.B != e._last.B;
+            if (changed)
+            {
+                bool wasVisible = e._visible;
+                e._last = rc;
+                e._visible = true;
+                W.SetWindowPos(e.H, 0, rc.L, rc.T, w, h, W.SWP_NOZORDER | W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW | W.SWP_NOCOPYBITS);
+                // When an unfocused single-line Edit first appears or changes width, ensure text starts cleanly at X=0 (never clipped off-left!)
+                if (!e.Multiline && !e.Focused && !e._pendingFocus && (!wasVisible || oldW != w))
+                    e.ShowStart();
+                W.InvalidateRect(e.H, null, 1);
+            }
+            if (e._pendingFocus)
+            {
+                e._pendingFocus = false;
+                W.SetFocus(e.H);
+                if (e._pendingSelectAll) W.SendMessageW(e.H, 0x00B1, 0, -1);
+                else { var len = W.GetWindowTextLengthW(e.H); W.SendMessageW(e.H, 0x00B1, (nuint)len, len); }
+                W.SendMessageW(e.H, 0x00B7 /*EM_SCROLLCARET*/, 0, 0);
+            }
+        }
+    }
+
+    /// <summary>After a theme/DPI/monitor change: the controls repaint their own background and text cleanly.</summary>
     public static void RepaintAll()
     {
-        foreach (var h in _all.Keys) W.InvalidateRect(h, null, 1);
+        foreach (var e in _all.Values)
+            if (e._visible) W.InvalidateRect(e.H, null, 1);
     }
 
     public static void OnCommand(nint h)
     {
-        if (_all.TryGetValue(h, out var e) && !e._silent) e.Changed?.Invoke();
+        if (_all.TryGetValue(h, out var e))
+        {
+            e._cachedText = W.GetText(h);
+            if (!e._silent) e.Changed?.Invoke();
+        }
     }
 
     public static nint CtlColor(nint hdc, nint h)
@@ -180,8 +302,14 @@ public sealed unsafe class Edit
                     return 0;
                 }
             }
-            else if (m == W.WM_KILLFOCUS) { Suggest.Hide(); App.Invalidate(); }
-            else if (m == W.WM_SETFOCUS) App.Invalidate();
+            else if (m == W.WM_MOUSEWHEEL && !e.Multiline)
+            {
+                // Forward mouse wheel over single-line text boxes to the main window so page scrolling never stalls!
+                W.SendMessageW(App.Hwnd, m, w, l);
+                return 0;
+            }
+            else if (m == W.WM_KILLFOCUS) { Suggest.Hide(); if (!e.Multiline) e.ShowStart(); W.InvalidateRect(h, null, 1); App.Invalidate(); }
+            else if (m == W.WM_SETFOCUS) { W.InvalidateRect(h, null, 1); App.Invalidate(); }
         }
         return W.CallWindowProcW(_oldProc, h, m, w, l);
     }

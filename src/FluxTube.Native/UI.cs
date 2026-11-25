@@ -258,7 +258,9 @@ public static class UI
     public static float ScrollMax(int id) => _scrolls.TryGetValue(id, out var s) ? s.Max : 0;
     public static void ScrollBy(int id, float d) { if (_scrolls.TryGetValue(id, out var s)) { s.Target = Math.Clamp(s.Target + d, 0, s.Max); Animate(); } }
     public static void ScrollReset(int id) { if (_scrolls.TryGetValue(id, out var s)) s.Pos = s.Target = 0; }
-    public static bool ScrollMoving(int id) => _scrolls.TryGetValue(id, out var s) && MathF.Abs(s.Target - s.Pos) > 1;
+    public static bool ScrollMoving(int id) => _scrolls.TryGetValue(id, out var s) && (MathF.Abs(s.Target - s.Pos) > 0.5f || _dragScroll == id || _autoScrollId == id);
+    /// <summary>The scroll container currently open on the clip stack (0 when outside any BeginScroll/EndScroll).</summary>
+    public static int CurrentScrollId => _scrollDepth > 0 ? _scrollCandStack[_scrollDepth - 1].Id : 0;
 
     /// <summary>Starts a clipped scroll region and returns the current offset. Pair with EndScroll.</summary>
     public static float BeginScroll(int id, R view, float contentH)

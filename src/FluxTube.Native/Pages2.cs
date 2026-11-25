@@ -362,9 +362,10 @@ public sealed class SettingsPage : IPage
 
     private void EditInRow(Edit? e, R row, float width)
     {
+        if (e == null || !Visible(row.Y, row.H)) return;
         var box = new R(row.Right - width - 14, row.Y + 8, width, row.H - 16);
-        if (e == null || box.Y < _view.Y || box.Bottom > _view.Bottom) { e?.Hide(); return; }
         Gfx.Fill(box, Th.Field, 8);
+        if (e.Focused) Gfx.Stroke(box, Gfx.Fade(Th.Brand, 0.8f), 8, 1.2f);
         e.Place(box, 12, 12);
     }
 
