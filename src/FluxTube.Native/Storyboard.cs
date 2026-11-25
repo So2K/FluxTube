@@ -34,6 +34,68 @@ public static class Storyboard
     private static long _lastUse;
     private static double _lastSeconds;
 
+    // Single reusable GPU sheet bitmap for YouTube-style hover preview on Home/Feed cards
+    private static Vortice.Direct2D1.ID2D1Bitmap1? _cardBmp;
+    private static string _cardKey = "";
+
+    /// <summary>
+    /// Draws an animated storyboard preview inside a hovered video card thumbnail (like YouTube Home hover preview).
+    /// Returns true once frames are actively drawing.
+    /// </summary>
+    public static unsafe bool TryDrawCardPreview(string videoId, R dest, float radius, uint behind, double hoverSec)
+    {
+        if (string.IsNullOrEmpty(videoId) || hoverSec < 0.35) return false;
+        _lastUse = Environment.TickCount64;
+        var book = BookFor(videoId);
+        if (book == null || book.Total <= 0) return false;
+
+        int per = Math.Max(1, book.Cols * book.Rows);
+        int maxFrames = Math.Min(book.Total, per * 2); // cycle through up to 2 sheets for rich variety
+        int step = (int)((hoverSec - 0.35) * 2.4);
+        int idx = maxFrames > 0 ? step % maxFrames : 0;
+        int sheet = idx / per, cell = idx % per;
+
+        if (!book.Sheets.TryGetValue(sheet, out var px))
+        {
+            book.Sheets[sheet] = null;
+            _ = Task.Run(() => LoadSheet(videoId, book, sheet));
+            // Fall back to sheet 0 if already loaded so playback never stalls
+            if (sheet > 0 && book.Sheets.TryGetValue(0, out var px0) && px0 != null)
+            {
+                sheet = 0; cell = idx % per; px = px0;
+            }
+            else return false;
+        }
+        if (px == null || !book.Size.TryGetValue(sheet, out var size)) return false;
+        var (sw, sh) = size;
+        int sx = cell % book.Cols * book.TileW, sy = cell / book.Cols * book.TileH;
+        if (sx + book.TileW > sw || sy + book.TileH > sh) return false;
+
+        var key = videoId + "#" + sheet;
+        if (_cardKey != key || _cardBmp == null)
+        {
+            _cardBmp?.Dispose();
+            fixed (byte* p = px) _cardBmp = Gfx.CreateBitmap(p, sw, sh, bc1: false);
+            _cardKey = key;
+        }
+
+        float fade = Math.Clamp((float)((hoverSec - 0.35) / 0.22), 0f, 1f);
+        Gfx.ImageRegion(_cardBmp, dest, new R(sx, sy, book.TileW, book.TileH), fade);
+        Gfx.RoundOff(dest, radius, behind);
+
+        // Sleek bottom preview progress bar + live timestamp pill
+        double progress = maxFrames > 1 ? (double)idx / (maxFrames - 1) : 0;
+        UI.Progress(new R(dest.X + radius * 0.7f, dest.Bottom - 4, dest.W - radius * 1.4f, 3), progress, Th.A(0.32f));
+        var ts = Fmt.Time(idx * book.Interval);
+        var tr = Gfx.Text(ts, 11.5f, 600);
+        var badgeR = new R(dest.Right - tr.W - 15, dest.Bottom - tr.H - 10, tr.W + 9, tr.H + 3);
+        Gfx.Fill(badgeR, Gfx.Fade(0xFF0A0A0E, 0.86f * fade), 4);
+        Gfx.Draw(tr, badgeR.X + 4.5f, badgeR.Y + 1, Gfx.Fade(0xFFFFFFFF, fade));
+
+        UI.Animate();
+        return true;
+    }
+
     private static HttpClient MakeClient()
     {
         var h = new SocketsHttpHandler { AutomaticDecompression = System.Net.DecompressionMethods.All, MaxConnectionsPerServer = 4 };

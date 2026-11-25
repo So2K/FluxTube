@@ -11,7 +11,7 @@ namespace FluxTube;
 /// </summary>
 public static class Updater
 {
-    public const string CurrentVersion = "9.0.12";
+    public const string CurrentVersion = "9.0.13";
     public const string Repo = "So2K/FluxTube";
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(15) };

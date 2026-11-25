@@ -24,6 +24,7 @@ public static class BgPlayers
         public volatile bool Paused;
         public volatile bool Muted;
         public volatile bool Loading = true;
+        public volatile int Volume = 100;
         public long PausedSince;
         public double TimePos;
         public double Duration;
@@ -56,8 +57,9 @@ public static class BgPlayers
             Opt("network-timeout", "15");
             Opt("ad-lavc-threads", "1");
             var liveVol = MpvPlayer.Instance.IsReady ? MpvPlayer.Instance.GetDouble("volume") : 0;
-            var vol = liveVol > 1 ? liveVol : Math.Clamp(AppSettings.Current.Volume, 1, 150);
-            Opt("volume", vol.ToString("0", System.Globalization.CultureInfo.InvariantCulture));
+            var vol = (int)Math.Round(liveVol > 1 ? liveVol : Math.Clamp(AppSettings.Current.Volume, 1, 150));
+            Volume = vol;
+            Opt("volume", vol.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (App.Mute) Opt("mute", "yes");
             var proxy = AppSettings.Current.Proxy;
             if (!string.IsNullOrWhiteSpace(proxy)) Opt("http-proxy", proxy);
@@ -142,6 +144,14 @@ public static class BgPlayers
         public void TogglePause() => Cmd("cycle", "pause");
         public void SetPause(bool p) => Set("pause", p ? "yes" : "no");
         public void ToggleMute() => Cmd("cycle", "mute");
+        public void SetVolume(int v)
+        {
+            v = Math.Clamp(v, 0, 150);
+            Volume = v;
+            if (v > 0 && Muted) { Muted = false; Set("mute", "no"); }
+            Set("volume", v.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            App.WakeUi();
+        }
 
         public void Dispose()
         {
@@ -169,6 +179,13 @@ public static class BgPlayers
     public static bool IsPaused(string videoId) => _all.TryGetValue(videoId, out var i) && i.Paused;
     public static bool IsMuted(string videoId) => _all.TryGetValue(videoId, out var i) && i.Muted;
     public static bool IsLoading(string videoId) => _all.TryGetValue(videoId, out var i) && i.Loading;
+    public static int GetVolume(string videoId) => _all.TryGetValue(videoId, out var i) ? i.Volume : Math.Clamp(AppSettings.Current.Volume, 0, 150);
+    public static double GetTimePos(string videoId) => _all.TryGetValue(videoId, out var i) ? i.LivePos() : 0;
+    public static double GetDuration(string videoId) => _all.TryGetValue(videoId, out var i) ? i.Duration : 0;
+    public static void AdjustVolume(string videoId, int delta)
+    {
+        if (_all.TryGetValue(videoId, out var i)) i.SetVolume(i.Volume + delta);
+    }
     public static int ActiveCount => _all.Values.Count(i => !i.Paused);
 
     /// <summary>Starts playing videoId in a background audio player (or resumes it if already loaded).</summary>

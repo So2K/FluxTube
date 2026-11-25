@@ -16,6 +16,7 @@ public static class Themes
     public static readonly Theme[] All =
     [
         new("FluxTube", "Свои", false, 0xFF0E0E11, 0xFF151519, 0xFF1C1C22, 0xFFF2F2F4, 0xFFA6A6B2, 0xFF6C6C78, 0xFFFF3355),
+        new("Новогодняя", "Свои", false, 0xFF0A1220, 0xFF101C30, 0xFF172740, 0xFFF3F7FF, 0xFF9FB5D1, 0xFF647B99, 0xFFE63946),
         new("Чёрно-оранжевая", "Свои", false, 0xFF000000, 0xFF121212, 0xFF1E1E1E, 0xFFFFFFFF, 0xFFC6C6C6, 0xFF8A8A8A, 0xFFFF9000, 0xFF000000),
         new("AMOLED", "Свои", false, 0xFF000000, 0xFF0A0A0A, 0xFF151515, 0xFFEDEDED, 0xFF9A9A9A, 0xFF5E5E5E, 0xFFFF3355),
 
@@ -48,6 +49,7 @@ public static class Themes
     ];
 
     public static Theme Current { get; private set; } = All[0];
+    public static bool IsNewYear => Current.Name == "Новогодняя";
 
     public static Theme ByName(string? name) => All.FirstOrDefault(t => t.Name == name) ?? All[0];
 

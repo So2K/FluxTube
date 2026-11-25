@@ -247,6 +247,9 @@ public static unsafe class Gfx
     public static void Image(ID2D1Bitmap bmp, R dest, float opacity = 1)
         => DC.DrawBitmap(bmp, Raw(dest), opacity, BitmapInterpolationMode.Linear, null);
 
+    public static void ImageRegion(ID2D1Bitmap bmp, R dest, R src, float opacity = 1)
+        => DC.DrawBitmap(bmp, Raw(dest), opacity, BitmapInterpolationMode.Linear, Raw(src));
+
     /// <summary>GPU bitmap straight from memory: raw premultiplied BGRA, or BC1 blocks (an eighth of the video memory).</summary>
     public static ID2D1Bitmap1 CreateBitmap(byte* data, int w, int h, bool bc1)
         => DC.CreateBitmap(new SizeI(w, h), (nint)data, (uint)(bc1 ? w / 4 * 8 : w * 4),

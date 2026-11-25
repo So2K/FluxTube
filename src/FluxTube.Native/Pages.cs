@@ -121,6 +121,9 @@ public static class Cards
         return items;
     }
 
+    private static string? _previewId;
+    private static long _previewSince;
+
     /// <summary>
     /// One card of a video grid: thumbnail, avatar, title, channel line. The channel name and avatar lead to the channel,
     /// a playlist card to its list, the rest of the card to the video.
@@ -148,7 +151,25 @@ public static class Cards
             Gfx.Fill(new R(x + 16, y - 6, cardW - 32, 8), Th.Track, 6);
             Gfx.Fill(new R(x + 8, y - 3, cardW - 16, 8), Gfx.Mix(Th.Track, Th.Card, 0.5f), 7);
         }
-        Thumb(new R(x, y, cardW, thumbH), v, true, 12, behind: UI.GlowOn(Th.Bg, glow));
+        var thumbR = new R(x, y, cardW, thumbH);
+        var behind = UI.GlowOn(Th.Bg, glow);
+        bool previewing = false;
+        if (over && v.PlaylistId == null && !v.IsLive && v.VideoId.Length == 11)
+        {
+            if (_previewId != v.VideoId) { _previewId = v.VideoId; _previewSince = UI.Now; }
+            double hSec = (UI.Now - _previewSince) / 1000.0;
+            if (hSec < 0.40) UI.Animate();
+            if (hSec >= 0.35)
+            {
+                Thumb(thumbR, v, true, 12, badge: false, behind: behind);
+                previewing = Storyboard.TryDrawCardPreview(v.VideoId, thumbR, 12, behind, hSec);
+            }
+        }
+        else if (_previewId == v.VideoId && !over)
+        {
+            _previewId = null;
+        }
+        if (!previewing) Thumb(thumbR, v, true, 12, behind: behind);
 
         float tx = x, tw = cardW;
         if (v.AvatarUrl != null) { Avatar(x, y + thumbH + 11, 34, v.AvatarUrl, v.Channel); tx += 44; tw -= 44; }
@@ -906,6 +927,10 @@ public sealed class WatchPage : IPage
                 {
                     _info = info;
                     _related = info.Related.Items;
+                    _relIds.Clear();
+                    foreach (var rv in _related) _relIds.Add(rv.VideoId);
+                    _relCont = info.Related.Continuation;
+                    _relLoadingMore = false;
                     _list = info.Playlist;
                     _listJump = _list != null;
                     _relTextW = 0; // shape the new list off-thread on the next frame
@@ -1394,6 +1419,47 @@ public sealed class WatchPage : IPage
         return box.H + 14;
     }
 
+    private string? _relCont;
+    private bool _relLoadingMore;
+    private readonly HashSet<string> _relIds = [];
+
+    private void LoadMoreRelated()
+    {
+        if (_relCont == null || _relLoadingMore) return;
+        _relLoadingMore = true;
+        var tok = _relCont;
+        var vid = Video.VideoId;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var page = Cards.WithProgress(await InnerTube.Instance.ContinueAsync("next", tok));
+                App.Post(() =>
+                {
+                    if (Video.VideoId != vid) return;
+                    var blocked = AppSettings.Current.BlockedChannels;
+                    int added = 0;
+                    foreach (var rv in page.Items)
+                    {
+                        if (!_relIds.Add(rv.VideoId)) continue;
+                        if (blocked.Length > 0 && rv.ChannelId != null && Array.IndexOf(blocked, rv.ChannelId) >= 0) continue;
+                        _related.Add(rv);
+                        added++;
+                    }
+                    _relCont = added > 0 ? page.Continuation : null;
+                    _relLoadingMore = false;
+                    _relTextW = 0;
+                    App.Invalidate();
+                });
+            }
+            catch (Exception e)
+            {
+                Paths.Log("related more: " + e.Message);
+                App.Post(() => { _relLoadingMore = false; _relCont = null; App.Invalidate(); });
+            }
+        });
+    }
+
     private void DrawRelated(R r)
     {
         Gfx.Draw("Похожие", r.X, r.Y + 6, 16, Th.Text, 600);
@@ -1416,7 +1482,10 @@ public sealed class WatchPage : IPage
             return;
         }
         const float rowH = 104, tw = 168, th = 94;
-        var scroll = UI.BeginScroll(_relScroll, view, _related.Count * rowH + 20);
+        float totalH = _related.Count * rowH + (_relCont != null ? 56 : 20);
+        var scroll = UI.BeginScroll(_relScroll, view, totalH);
+        if (_relCont != null && !_relLoadingMore && scroll + view.H >= _related.Count * rowH - 360)
+            LoadMoreRelated();
         int first = Math.Max(0, (int)(scroll / rowH)), last = Math.Min(_related.Count - 1, (int)((scroll + view.H) / rowH));
         for (int i = first; i <= last; i++)
         {
@@ -1437,6 +1506,8 @@ public sealed class WatchPage : IPage
             else if (UI.RightClick(row)) Menus.Popup(Cards.MenuFor(v));
             if (_seen.Add(v.VideoId)) LogSeen(v);
         }
+        if (_relLoadingMore)
+            UI.Spinner(view.X + view.W / 2 - 10, view.Y + _related.Count * rowH + 22 - scroll, 9, Th.Sub);
         UI.EndScroll();
     }
 

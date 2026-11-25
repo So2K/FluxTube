@@ -74,6 +74,9 @@ public static class Shell
     private static readonly List<Tab> _tabs = [];
     private static readonly List<Tab> _closedTabs = [];
     private static int _tab = -1;
+    private static int _hoverTab = -1;
+    private static R _hoverTabRect, _tabPreviewRect;
+    private static long _hoverTabSince, _tabVolBoostUntil;
 
     public static IReadOnlyList<Tab> Tabs => _tabs;
 
@@ -346,6 +349,8 @@ public static class Shell
         float avail = MathF.Max(100, strip.W - 12 - addW - 6);
         float tw = Math.Clamp(avail / Math.Max(1, _tabs.Count), 108, 250);
         float x = strip.X + 6;
+        int hoveredNow = -1;
+        R hoveredRect = default;
         for (int i = 0; i < _tabs.Count && x < strip.Right - addW - 10; i++)
         {
             var t = _tabs[i];
@@ -353,6 +358,7 @@ public static class Shell
             var active = i == _tab;
             var id = UI.Id("tab", i);
             var over = UI.Hover(r);
+            if (over) { hoveredNow = i; hoveredRect = r; }
             var sel = UI.Smooth(id ^ 0x4242, active ? 1 : 0, 20);
             if (sel > 0.01f) Gfx.Fill(r, Th.A(0.11f * sel), 8);
             if (!active) UI.Glow(id, r, 8, over);
@@ -362,6 +368,25 @@ public static class Shell
             var isBg = isVideo && BgPlayers.Has(t.Arg);
             var playingNow = (isMainPlaying && !P.Paused) || (isBg && BgPlayers.IsPlaying(t.Arg));
             var bgLoading = isBg && BgPlayers.IsLoading(t.Arg);
+
+            // Mouse wheel over any video tab adjusts THAT tab's volume (main or background)!
+            if (over && isVideo && UI.Wheel != 0)
+            {
+                int delta = UI.Wheel > 0 ? 5 : -5;
+                UI.Wheel = 0;
+                _tabVolBoostUntil = UI.Now + 1400;
+                if (isMainPlaying)
+                {
+                    var nv = Math.Clamp(AppSettings.Current.Volume + delta, 0, 150);
+                    AppSettings.Current.Volume = nv;
+                    AppSettings.Current.Save();
+                    P.Command("set", "volume", nv.ToString());
+                }
+                else if (isBg)
+                {
+                    BgPlayers.AdjustVolume(t.Arg, delta);
+                }
+            }
 
             // Subtle accent indicator bar at bottom of active or playing tab
             if (playingNow && !active)
@@ -424,6 +449,106 @@ public static class Shell
         var addR = new R(Gfx.Snap(x + 2), strip.Y + 4, addW, TabH - 9);
         if (UI.IconButton(UI.Id("tab:add"), addR, Th.Add, 12, Th.Sub))
             App.Post(() => { NewTab(); _search.Focus(); });
+
+        if (hoveredNow != _hoverTab)
+        {
+            _hoverTab = hoveredNow;
+            _hoverTabSince = hoveredNow >= 0 ? UI.Now : 0;
+        }
+        if (hoveredNow >= 0) _hoverTabRect = hoveredRect;
+    }
+
+    /// <summary>Floating preview card under the hovered tab (shows thumbnail, playback state, and per-tab wheel volume).</summary>
+    private static void DrawTabPreview()
+    {
+        _tabPreviewRect = default;
+        if (_hoverTab < 0 || _hoverTab >= _tabs.Count || Menus.Open || AccountMenu.Open) return;
+        bool instant = UI.Now < _tabVolBoostUntil;
+        long elapsed = UI.Now - _hoverTabSince;
+        if (!instant && elapsed < 220) { UI.Animate(); return; }
+
+        var t = _tabs[_hoverTab];
+        float a = instant ? 1f : Math.Clamp((elapsed - 220) / 110f, 0, 1);
+        if (a < 1f) UI.Animate();
+        float ease = 1f - (1f - a) * (1f - a);
+
+        if (t.Kind == "video")
+        {
+            const float cw = 264, pad = 10, tw = cw - pad * 2, th = 138;
+            var isMain = T.Current?.VideoId == t.Arg && P.HasMedia;
+            var isBg = BgPlayers.Has(t.Arg);
+            bool hasAudio = isMain || isBg;
+            var title = TabLabel(t);
+            var titleRun = Gfx.Text(title, 13, 600, tw, 2);
+            float ch = pad + th + 8 + titleRun.H + (t.Sub.Length > 0 ? 18 : 0) + (hasAudio ? 34 : 0) + pad;
+
+            float cx = Math.Clamp(_hoverTabRect.X + (_hoverTabRect.W - cw) / 2, 8, MathF.Max(8, Gfx.W - cw - 8));
+            float cy = TopH + TabH + 4 + (1f - ease) * 6;
+            var card = new R(Gfx.Snap(cx), Gfx.Snap(cy), cw, ch);
+            _tabPreviewRect = card;
+
+            Gfx.Fill(card.Inset(-3), Gfx.Fade(0xFF000000, 0.30f * ease), 14);
+            Gfx.Fill(card, Gfx.Fade(Th.Menu, 0.98f * ease), 12);
+            Gfx.Stroke(card, Gfx.Fade(Th.Line, ease), 12, 1f);
+
+            var thumbR = new R(card.X + pad, card.Y + pad, tw, th);
+            var thumbUrl = t.Arg.Length == 11 ? $"https://i.ytimg.com/vi/{t.Arg}/hqdefault.jpg" : null;
+            Cards.ThumbUrl(thumbR, thumbUrl, 8, Th.Menu);
+
+            // Live playback status badge on top-left of thumbnail
+            string? status = isMain ? (P.Paused ? "Пауза" : "Играет") : isBg ? (BgPlayers.IsPaused(t.Arg) ? "Пауза (фон)" : "В фоне") : null;
+            if (status != null)
+            {
+                var sr = Gfx.Text(status, 11, 600);
+                var sb = new R(thumbR.X + 7, thumbR.Y + 7, sr.W + 14, sr.H + 5);
+                bool activePlay = (isMain && !P.Paused) || (isBg && BgPlayers.IsPlaying(t.Arg));
+                Gfx.Fill(sb, Gfx.Fade(activePlay ? Th.Brand : 0xFF141418, 0.88f * ease), 5);
+                Gfx.Draw(sr, sb.X + 7, sb.Y + 2.5f, Gfx.Fade(0xFFFFFFFF, ease));
+            }
+
+            // Live progress bar at bottom of thumbnail
+            double pos = isMain ? P.TimePos : isBg ? BgPlayers.GetTimePos(t.Arg) : (GetSavedTabPos(t.Arg) ?? 0);
+            double dur = isMain ? P.Duration : isBg ? BgPlayers.GetDuration(t.Arg) : 0;
+            if (dur > 1 && pos > 0)
+                UI.Progress(new R(thumbR.X + 6, thumbR.Bottom - 5, thumbR.W - 12, 3), pos / dur, Th.A(0.28f));
+
+            float ty = thumbR.Bottom + 8;
+            Gfx.Draw(titleRun, card.X + pad, ty, Gfx.Fade(Th.Text, ease));
+            ty += titleRun.H + 2;
+            if (t.Sub.Length > 0)
+            {
+                Gfx.Draw(t.Sub, card.X + pad, ty, 11.5f, Gfx.Fade(Th.Sub, ease), 400, tw);
+                ty += 17;
+            }
+            if (hasAudio)
+            {
+                ty += 4;
+                int vol = isMain ? Math.Clamp((int)Math.Round(P.IsReady ? P.GetDouble("volume") : AppSettings.Current.Volume), 0, 150)
+                                 : BgPlayers.GetVolume(t.Arg);
+                bool muted = isBg && BgPlayers.IsMuted(t.Arg);
+                var rowR = new R(card.X + pad, ty, tw, 24);
+                Gfx.Fill(rowR, Gfx.Fade(Th.A(0.08f), ease), 6);
+                Gfx.Icon(muted || vol == 0 ? Th.Mute : Th.Volume, new R(rowR.X + 6, rowR.Y + 4, 16, 16), 11, Gfx.Fade(muted ? Th.Warn : Th.Brand, ease));
+                var vTxt = Gfx.Text(muted ? "Выкл" : $"{vol}%", 11.5f, 600);
+                Gfx.Draw(vTxt, rowR.Right - vTxt.W - 8, rowR.Y + (rowR.H - vTxt.H) / 2, Gfx.Fade(Th.Text, ease));
+                float barX = rowR.X + 26, barW = MathF.Max(20, rowR.Right - vTxt.W - 16 - barX);
+                UI.Progress(new R(barX, rowR.Y + 10, barW, 4), muted ? 0 : Math.Clamp(vol / 100.0, 0, 1), Th.A(0.22f));
+            }
+        }
+        else
+        {
+            var title = TabLabel(t);
+            var tr = Gfx.Text(title, 12.5f, 600, 240);
+            float cw = MathF.Max(120, tr.W + 34), ch = tr.H + 16;
+            float cx = Math.Clamp(_hoverTabRect.X + (_hoverTabRect.W - cw) / 2, 8, MathF.Max(8, Gfx.W - cw - 8));
+            float cy = TopH + TabH + 4 + (1f - ease) * 5;
+            var card = new R(Gfx.Snap(cx), Gfx.Snap(cy), cw, ch);
+            _tabPreviewRect = card;
+            Gfx.Fill(card, Gfx.Fade(Th.Menu, 0.96f * ease), 8);
+            Gfx.Stroke(card, Gfx.Fade(Th.Line, ease), 8, 1f);
+            Gfx.Icon(TabGlyph(t), new R(card.X + 8, card.Y + (ch - 14) / 2, 14, 14), 11, Gfx.Fade(Th.Brand, ease));
+            Gfx.Draw(tr, card.X + 26, card.Y + 8, Gfx.Fade(Th.Text, ease));
+        }
     }
 
     private static IPage RootPage(string tag)
@@ -1086,10 +1211,50 @@ public static class Shell
             else Gfx.Fill(new R(sideW, h - barH, w - sideW, barH), Th.Panel);
         }
         DrawToast(w, h - barH);
+        if (Themes.IsNewYear) DrawNewYearFestive(w, h);
         UI.DrawAutoScrollIndicator();
         UI.Modal = null;
+        DrawTabPreview();
         AccountMenu.Draw();
         Menus.Draw();
+    }
+
+    private static readonly (float X, float Y, float R, float Spd, float Phase, float Alpha)[] _snow = InitSnow();
+    private static readonly uint[] _garlandCols = [0xFFFFD166, 0xFFE63946, 0xFF2EC4B6, 0xFF64B5F6, 0xFFFF9F1C];
+
+    private static (float, float, float, float, float, float)[] InitSnow()
+    {
+        var rng = new Random(2026);
+        var arr = new (float, float, float, float, float, float)[36];
+        for (int i = 0; i < arr.Length; i++)
+            arr[i] = ((float)rng.NextDouble(), (float)rng.NextDouble(), 1.2f + (float)rng.NextDouble() * 2.2f,
+                16f + (float)rng.NextDouble() * 26f, (float)(rng.NextDouble() * Math.PI * 2), 0.16f + (float)rng.NextDouble() * 0.34f);
+        return arr;
+    }
+
+    /// <summary>Subtle falling snow + twinkling fairy lights along the top edge when the manual "Новогодняя" theme is active.</summary>
+    private static void DrawNewYearFestive(float w, float h)
+    {
+        float t = UI.Now / 1000f;
+        // Soft twinkling garland bulbs along the very top edge
+        float step = 36f;
+        int idx = 0;
+        for (float gx = 18; gx < w - 150; gx += step, idx++)
+        {
+            float tw = 0.45f + 0.55f * (0.5f + 0.5f * MathF.Sin(t * 2.4f + idx * 1.3f));
+            var col = _garlandCols[idx % _garlandCols.Length];
+            Gfx.Circle(gx, 2.5f, 5.5f, Gfx.Fade(col, 0.14f * tw));
+            Gfx.Circle(gx, 2.5f, 2.0f, Gfx.Fade(col, 0.78f * tw));
+        }
+        // Gentle snowflakes drifting down
+        for (int i = 0; i < _snow.Length; i++)
+        {
+            var f = _snow[i];
+            float y = (f.Y * h + t * f.Spd) % (h + 20) - 10;
+            float x = (f.X * w + MathF.Sin(t * 0.85f + f.Phase) * 22f + w) % w;
+            Gfx.Circle(x, y, f.R, Gfx.Fade(0xFFEAF4FF, f.Alpha));
+        }
+        UI.Animate();
     }
 
     private static void SideItem(float sx, ref float y, string glyph, string label, string tag, string current, bool dot = false)
@@ -1220,6 +1385,8 @@ public static class Shell
             bool clipped = cl > 0 || ct > 0 || cr < vw || cb < vh;
 
             var holes = new List<R>(4);
+            if (_tabPreviewRect.W > 0 && _tabPreviewRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                holes.Add(_tabPreviewRect);
             if (AccountMenu.Open && AccountMenu.Rect.W > 0 && AccountMenu.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
                 holes.Add(AccountMenu.Rect);
             if (Menus.Open)
