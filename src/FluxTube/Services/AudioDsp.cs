@@ -3,20 +3,31 @@ using System.Globalization;
 namespace FluxTube.Services;
 
 /// <summary>
-/// Reaper-inspired studio DSP audio chain for libmpv (libavfilter / lavfi):
-/// 10-band graphic EQ, cascaded mutually-prime multi-tap studio reverb (Room / Plate / Hall / Cathedral),
-/// clean sub-bass punch, harmonic exciter + glue compression, 3D stereo widener, 8D spatial orbit,
-/// tape-locked Nightcore / Slowed+Reverb speed+pitch, formant-preserving rubberband pitch shift,
-/// and transparent master bus limiter so heavy boosts stay loud, punchy, and distortion-free.
+/// Studio-calibrated DSP audio rack for libmpv (libavfilter / lavfi):
+/// 10-band graphic EQ, clean low-shelf sub-bass punch, musical brilliance/air exciter + smooth bus glue compression
+/// (no harsh digital aliasing), 3D Mid/Side stereo widener, 8D binaural orbit, lush mutually-prime multi-tap reverb
+/// (Room / Plate / Hall / Cathedral), tape-locked Nightcore / Slowed+Reverb speed+pitch, formant-preserving rubberband
+/// pitch shift, and transparent lookahead master bus limiter.
 /// </summary>
 public static class AudioDsp
 {
     public static readonly int[] Freqs = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
     public static readonly string[] FreqLabels = ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
 
+    public static readonly (string Key, string Ru, string En)[] Categories =
+    [
+        ("all", "Все", "All"),
+        ("studio", "Студия", "Studio"),
+        ("bass", "Бас & Клуб", "Bass & Club"),
+        ("vibes", "Атмосфера", "Vibes"),
+        ("voice", "Голос & Кино", "Voice & Cinema"),
+    ];
+
     public sealed record Preset(
         string Id,
-        string Name,
+        string NameRu,
+        string NameEn,
+        string Category,
         string Tag,
         float[] Eq,
         float Reverb,
@@ -32,45 +43,101 @@ public static class AudioDsp
 
     public static readonly Preset[] Presets =
     [
-        new("Flat", "Чистый", "Bypass",
+        // Studio
+        new("Flat", "Чистый", "Flat", "studio", "Bypass",
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             0, "hall", 0, 0, 0, 1.00f, false, 0, false, true),
 
-        new("Juicy", "Сочный Мастер", "Studio",
-            [2.5f, 3.5f, 1.5f, -1.5f, -0.5f, 0.8f, 2.0f, 2.8f, 3.2f, 3.8f],
-            14, "plate", 32, 46, 30, 1.00f, false, 0, false, true),
+        new("Juicy", "Сочный Мастер", "Juicy Master", "studio", "Studio",
+            [2.0f, 3.0f, 1.2f, -1.5f, -0.5f, 0.8f, 1.8f, 2.5f, 3.0f, 3.5f],
+            10, "plate", 24, 38, 24, 1.00f, false, 0, false, true),
 
-        new("Nightcore", "Nightcore", "1.22×",
-            [3.0f, 2.5f, 1.0f, -1.0f, 0.0f, 1.0f, 2.5f, 3.5f, 4.0f, 4.5f],
-            16, "room", 26, 38, 28, 1.22f, true, 0, false, true),
+        new("WarmAnalog", "Тёплый Аналог", "Warm Analog", "studio", "Tube",
+            [2.5f, 3.5f, 2.5f, 1.2f, 0.5f, 0.0f, -0.5f, -1.0f, -1.8f, -2.5f],
+            14, "room", 22, 22, 16, 1.00f, false, 0, false, true),
 
-        new("NightcoreUltra", "Nightcore Ultra", "1.30×",
-            [4.5f, 3.5f, 1.5f, -1.5f, -0.5f, 1.5f, 3.0f, 4.5f, 5.0f, 5.5f],
-            22, "plate", 40, 54, 42, 1.30f, true, 0, false, true),
+        new("StudioRef", "Студийный Баланс", "Studio Ref", "studio", "Crisp",
+            [0.8f, 1.0f, 0.0f, -0.8f, 0.0f, 0.5f, 1.2f, 1.8f, 2.0f, 1.5f],
+            0, "room", 8, 20, 12, 1.00f, false, 0, false, true),
 
-        new("SlowedReverb", "Slowed + Reverb", "0.83×",
-            [4.5f, 3.8f, 2.2f, 0.0f, -1.0f, -0.5f, 1.0f, 2.2f, 3.0f, 2.5f],
-            72, "cathedral", 42, 24, 52, 0.83f, true, 0, false, true),
+        new("CrystalAir", "Кристальный Верх", "Crystal Air", "studio", "Hi-Fi",
+            [0.5f, 1.0f, 0.0f, -1.0f, -0.5f, 0.8f, 2.2f, 3.5f, 4.5f, 5.5f],
+            12, "plate", 10, 52, 32, 1.00f, false, 0, false, true),
 
-        new("BassBoost", "Bass Boost", "Sub",
-            [6.5f, 5.8f, 3.2f, 0.0f, -1.0f, 0.0f, 1.5f, 2.0f, 2.5f, 2.0f],
-            10, "room", 78, 32, 24, 1.00f, false, 0, false, true),
+        // Bass & Club
+        new("BassBoost", "Bass Boost", "Bass Boost", "bass", "Sub",
+            [5.5f, 5.0f, 2.5f, -0.5f, -1.0f, 0.0f, 1.2f, 1.8f, 2.0f, 1.5f],
+            8, "room", 58, 28, 20, 1.00f, false, 0, false, true),
 
-        new("Phonk", "Phonk / Hard", "Punch",
-            [5.5f, 4.8f, 2.0f, -2.0f, -1.0f, 1.5f, 3.5f, 4.5f, 4.0f, 3.2f],
-            18, "plate", 64, 68, 40, 1.00f, false, 0, false, true),
+        new("SubMonster", "Саб-Монстр", "Sub Monster", "bass", "808",
+            [8.0f, 6.8f, 3.0f, -1.5f, -1.5f, 0.0f, 1.5f, 2.2f, 2.5f, 1.5f],
+            6, "room", 82, 34, 24, 1.00f, false, 0, false, true),
 
-        new("Space8D", "8D Космос", "3D",
-            [3.0f, 2.5f, 1.0f, -1.0f, 0.0f, 0.5f, 2.0f, 3.0f, 3.5f, 4.0f],
-            60, "cathedral", 32, 32, 56, 1.00f, false, 0, true, true),
+        new("Phonk", "Phonk / Drift", "Phonk / Drift", "bass", "Punch",
+            [5.0f, 4.2f, 1.5f, -2.0f, -0.5f, 1.8f, 3.5f, 4.2f, 3.5f, 2.8f],
+            16, "plate", 56, 58, 36, 1.00f, false, 0, false, true),
 
-        new("Lofi", "Lofi / Винил", "Warm",
-            [2.5f, 3.5f, 2.5f, 1.5f, 0.5f, -0.5f, -2.0f, -4.5f, -6.5f, -8.0f],
-            36, "room", 22, 12, 20, 0.94f, true, 0, false, true),
+        new("Trap808", "Трэп / 808", "Trap / 808", "bass", "Hip-Hop",
+            [6.5f, 5.2f, 1.8f, -1.8f, -0.8f, 0.5f, 1.5f, 2.8f, 4.0f, 3.5f],
+            10, "room", 62, 36, 26, 1.00f, false, 0, false, true),
 
-        new("Vocal", "Вокал / Подкаст", "Clear",
-            [-6.0f, -3.0f, -1.0f, 0.5f, 1.5f, 2.8f, 4.2f, 3.5f, 2.0f, 1.0f],
-            8, "room", 0, 38, 10, 1.00f, false, 0, false, true),
+        new("ClubEdm", "Клуб / EDM", "Club / EDM", "bass", "Wide",
+            [4.5f, 4.0f, 1.5f, -1.5f, -0.8f, 0.8f, 2.2f, 3.2f, 3.8f, 3.5f],
+            18, "hall", 45, 48, 44, 1.00f, false, 0, false, true),
+
+        new("DnBJungle", "DnB / Jungle", "DnB / Jungle", "bass", "Break",
+            [5.2f, 4.5f, 1.5f, -1.5f, 0.0f, 1.2f, 2.8f, 3.5f, 4.2f, 3.5f],
+            12, "plate", 48, 44, 34, 1.00f, false, 0, false, true),
+
+        new("RockMetal", "Рок / Метал", "Rock / Metal", "bass", "Drive",
+            [3.5f, 3.0f, 1.0f, -2.0f, -1.2f, 1.5f, 3.2f, 3.8f, 2.8f, 2.0f],
+            10, "room", 26, 42, 24, 1.00f, false, 0, false, true),
+
+        // Vibes
+        new("Nightcore", "Nightcore", "Nightcore", "vibes", "1.22×",
+            [2.5f, 2.2f, 0.8f, -1.0f, 0.0f, 1.0f, 2.2f, 3.0f, 3.6f, 4.0f],
+            14, "room", 22, 34, 26, 1.22f, true, 0, false, true),
+
+        new("NightcoreUltra", "Nightcore Ultra", "Nightcore Ultra", "vibes", "1.30×",
+            [3.8f, 3.0f, 1.2f, -1.5f, -0.5f, 1.5f, 2.8f, 3.8f, 4.4f, 4.8f],
+            20, "plate", 34, 46, 38, 1.30f, true, 0, false, true),
+
+        new("SlowedReverb", "Slowed + Reverb", "Slowed + Reverb", "vibes", "0.84×",
+            [4.0f, 3.5f, 2.0f, 0.0f, -1.0f, -0.5f, 0.8f, 1.8f, 2.5f, 2.0f],
+            68, "cathedral", 36, 20, 48, 0.84f, true, 0, false, true),
+
+        new("DoomerNight", "Doomer / Ночь", "Doomer / Night", "vibes", "0.90×",
+            [3.2f, 3.8f, 2.4f, 0.5f, -1.2f, -1.5f, -0.8f, 0.5f, -1.5f, -3.5f],
+            54, "hall", 28, 14, 42, 0.90f, true, 0, false, true),
+
+        new("Space8D", "8D Космос", "8D Space", "vibes", "3D",
+            [2.5f, 2.2f, 0.8f, -1.0f, 0.0f, 0.5f, 1.8f, 2.6f, 3.2f, 3.5f],
+            56, "cathedral", 26, 28, 52, 1.00f, false, 0, true, true),
+
+        new("Lofi", "Lofi / Винил", "Lofi / Vinyl", "vibes", "Warm",
+            [2.2f, 3.2f, 2.4f, 1.4f, 0.5f, -0.5f, -2.2f, -4.5f, -6.5f, -8.5f],
+            32, "room", 18, 10, 18, 0.94f, true, 0, false, true),
+
+        new("Vaporwave", "Vaporwave", "Vaporwave", "vibes", "0.78×",
+            [3.5f, 3.0f, 1.5f, 0.5f, -0.8f, -0.5f, 1.0f, 2.0f, 1.2f, -1.0f],
+            64, "cathedral", 30, 18, 62, 0.78f, true, 0, false, true),
+
+        new("ConcertHall", "Концертный зал", "Concert Hall", "vibes", "Live",
+            [2.0f, 2.5f, 1.0f, -0.5f, 0.0f, 0.8f, 1.8f, 2.5f, 2.2f, 1.5f],
+            44, "hall", 20, 26, 46, 1.00f, false, 0, false, true),
+
+        // Voice & Cinema
+        new("Vocal", "Вокал / Подкаст", "Vocal / Podcast", "voice", "Clear",
+            [-6.5f, -3.5f, -1.2f, 0.5f, 1.8f, 3.0f, 4.2f, 3.2f, 1.8f, 0.8f],
+            6, "room", 0, 32, 8, 1.00f, false, 0, false, true),
+
+        new("CinemaImax", "Кино / IMAX", "Cinema / IMAX", "voice", "Wide",
+            [5.0f, 4.0f, 1.5f, -1.0f, 0.5f, 2.0f, 3.0f, 2.2f, 2.5f, 2.0f],
+            22, "hall", 42, 34, 54, 1.00f, false, 0, false, true),
+
+        new("LateNight", "Ночной режим", "Late Night", "voice", "Soft",
+            [-3.0f, -1.5f, 0.5f, 1.2f, 2.0f, 2.5f, 2.5f, 1.5f, 0.5f, -1.0f],
+            0, "room", 0, 48, 10, 1.00f, false, 0, false, true),
     ];
 
     public static readonly (string Key, string Label)[] Rooms =
@@ -99,15 +166,7 @@ public static class AudioDsp
         return null;
     }
 
-    public static string PresetLabel(Preset p) => p.Id switch
-    {
-        "Flat" => L.T("Чистый", "Flat"),
-        "Juicy" => L.T("Сочный Мастер", "Juicy Master"),
-        "Space8D" => L.T("8D Космос", "8D Space"),
-        "Lofi" => L.T("Lofi / Винил", "Lofi / Vinyl"),
-        "Vocal" => L.T("Вокал / Подкаст", "Vocal / Podcast"),
-        _ => p.Name,
-    };
+    public static string PresetLabel(Preset p) => L.T(p.NameRu, p.NameEn);
 
     public static string RoomLabel(string key) => key switch
     {
@@ -123,7 +182,10 @@ public static class AudioDsp
         if (!s.AudioFxEnabled)
             return s.PlayerAudio8D ? "8D" : L.T("Выкл", "Off");
         var p = FindPreset(s.AudioPreset);
-        return p != null ? PresetLabel(p) : L.T("Свой", "Custom");
+        if (p != null) return PresetLabel(p);
+        if (s.AudioPreset.StartsWith("user:", StringComparison.Ordinal))
+            return s.AudioPreset[5..];
+        return L.T("Свой", "Custom");
     }
 
     public static void ApplyPreset(AppSettings s, string presetId)
@@ -145,6 +207,45 @@ public static class AudioDsp
         s.FxLimiter = p.Limiter;
     }
 
+    public static void ApplySavedPreset(AppSettings s, SavedAudioPreset cp)
+    {
+        EnsureEqArray(s);
+        s.AudioPreset = "user:" + cp.Name;
+        s.AudioFxEnabled = true;
+        Array.Clear(s.EqBands);
+        if (cp.Eq != null) Array.Copy(cp.Eq, s.EqBands, Math.Min(cp.Eq.Length, Freqs.Length));
+        s.FxReverb = cp.Reverb;
+        s.FxReverbRoom = cp.Room;
+        s.FxBass = cp.Bass;
+        s.FxExciter = cp.Exciter;
+        s.FxStereo = cp.Stereo;
+        s.FxSpeed = cp.Speed;
+        s.FxTapePitch = cp.TapePitch;
+        s.FxPitchSemitones = cp.PitchSemi;
+        s.PlayerAudio8D = cp.Space8D;
+        s.FxLimiter = cp.Limiter;
+    }
+
+    public static SavedAudioPreset CaptureCurrent(AppSettings s, string name)
+    {
+        EnsureEqArray(s);
+        return new SavedAudioPreset
+        {
+            Name = name,
+            Eq = [.. s.EqBands],
+            Reverb = s.FxReverb,
+            Room = s.FxReverbRoom,
+            Bass = s.FxBass,
+            Exciter = s.FxExciter,
+            Stereo = s.FxStereo,
+            Speed = s.FxSpeed,
+            TapePitch = s.FxTapePitch,
+            PitchSemi = s.FxPitchSemitones,
+            Space8D = s.PlayerAudio8D,
+            Limiter = s.FxLimiter,
+        };
+    }
+
     public static void MarkCustom(AppSettings s)
     {
         s.AudioFxEnabled = true;
@@ -154,21 +255,20 @@ public static class AudioDsp
     private static string F(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// Builds the exact mpv `af` option string (`lavfi=[...]`) or empty string when bypassed.
-    /// Uses mutually-prime delay taps for lush metallic-free reverb and transparent headroom/limiter staging.
+    /// Builds a clean, studio-grade mpv `af` filter graph (`lavfi=[...]`) free of harsh digital clipping.
+    /// Uses musical shelving brilliance + smooth bus glue compression instead of aliasing crystalizer.
     /// </summary>
     public static string BuildFilterGraph(AppSettings s)
     {
         EnsureEqArray(s);
         if (!s.AudioFxEnabled)
         {
-            // Keep legacy 8D toggle working seamlessly even when full DSP Studio is bypassed
             return s.PlayerAudio8D
                 ? "lavfi=[apulsator=hz=0.14:width=1:amount=0.85,aecho=0.82:0.84:37|71|113:0.32|0.22|0.14]"
                 : "";
         }
 
-        var parts = new List<string>(20);
+        var parts = new List<string>(22);
         float bass = Math.Clamp(s.FxBass, 0f, 100f) / 100f;
         float exc = Math.Clamp(s.FxExciter, 0f, 100f) / 100f;
         float rev = Math.Clamp(s.FxReverb, 0f, 100f) / 100f;
@@ -177,9 +277,9 @@ public static class AudioDsp
         for (int i = 0; i < Freqs.Length; i++)
             if (s.EqBands[i] > maxBoost) maxBoost = s.EqBands[i];
 
-        // 1. Clean gain-staging headroom before heavy boosts (prevents internal float clipping)
-        float preCutDb = Math.Clamp(maxBoost * 0.42f + bass * 4.5f + exc * 1.4f, 0f, 8.5f);
-        if (preCutDb > 0.3f)
+        // 1. Clean gain-staging headroom before boosts (eliminates internal clipping & mud)
+        float preCutDb = Math.Clamp(maxBoost * 0.45f + bass * 4.8f + exc * 1.8f, 0f, 10.0f);
+        if (preCutDb > 0.25f)
             parts.Add($"volume=-{F(preCutDb)}dB");
 
         // 2. Formant-preserving independent pitch shift when tape pitch isn't active
@@ -189,34 +289,34 @@ public static class AudioDsp
             parts.Add($"rubberband=pitch={ratio.ToString("0.0000", CultureInfo.InvariantCulture)}:formant=preserved");
         }
 
-        // 3. 10-band studio graphic EQ
+        // 3. 10-band musical constant-Q graphic EQ
         for (int i = 0; i < Freqs.Length; i++)
         {
             float g = Math.Clamp(s.EqBands[i], -12f, 12f);
             if (MathF.Abs(g) < 0.15f) continue;
-            parts.Add($"equalizer=f={Freqs[i]}:t=q:w=1.4:g={F(g)}");
+            parts.Add($"equalizer=f={Freqs[i]}:t=q:w=1.41:g={F(g)}");
         }
 
-        // 4. Clean low-shelf sub-bass punch
+        // 4. Clean low-shelf sub-bass punch (65Hz warm shelf — punchy without muddying vocals)
         if (bass > 0.01f)
-            parts.Add($"bass=g={F(bass * 8.5f)}:f=72:w=0.65");
+            parts.Add($"bass=g={F(bass * 7.5f)}:f=65:t=s:w=0.55");
 
-        // 5. Juicy harmonic exciter + warm Reaper-style bus glue compression
+        // 5. Musical studio brilliance air shelf + smooth soft-knee glue compressor (zero harsh aliasing!)
         if (exc > 0.01f)
         {
-            parts.Add($"crystalizer=i={F(0.9f + exc * 2.6f)}:c=1");
-            parts.Add($"acompressor=threshold=-16dB:ratio={F(1.8f + exc * 1.4f)}:attack=10:release=115:makeup={F(1.2f + exc * 2.8f)}dB");
+            parts.Add($"treble=g={F(exc * 4.2f)}:f=6800:t=s:w=0.6");
+            parts.Add($"acompressor=threshold=-18dB:ratio={F(1.6f + exc * 1.6f)}:attack=12:release=140:knee=4:makeup={F(0.8f + exc * 2.2f)}dB");
         }
 
         // 6. Mid/Side 3D stereo stage widening
         if (stereo > 0.01f)
-            parts.Add($"extrastereo=m={F(1.0f + stereo * 1.15f)}:c=1");
+            parts.Add($"extrastereo=m={F(1.0f + stereo * 1.10f)}:c=1");
 
         // 7. 8D binaural spatial orbit
         if (s.PlayerAudio8D)
             parts.Add("apulsator=hz=0.14:width=1:amount=0.85");
 
-        // 8. Lush cascaded mutually-prime multi-tap studio reverb (zero metallic ringing)
+        // 8. Lush cascaded mutually-prime multi-tap studio reverb
         float effRev = s.PlayerAudio8D ? MathF.Max(rev, 0.24f) : rev;
         if (effRev > 0.01f)
         {
@@ -240,12 +340,12 @@ public static class AudioDsp
             }
         }
 
-        // 9. Transparent master bus soft limiter (keeps bass & master loud, fat, and 100% clip-free)
+        // 9. Transparent lookahead master bus limiter (loud, fat, 100% clip-free)
         if (s.FxLimiter && parts.Count > 0)
         {
-            float makeup = Math.Clamp(preCutDb * 0.65f, 0f, 5.2f);
-            if (makeup > 0.3f) parts.Add($"volume=+{F(makeup)}dB");
-            parts.Add("alimiter=level_in=1:level_out=0.96:limit=0.94:attack=4:release=45");
+            float makeup = Math.Clamp(preCutDb * 0.62f, 0f, 5.0f);
+            if (makeup > 0.25f) parts.Add($"volume=+{F(makeup)}dB");
+            parts.Add("alimiter=level_in=1:level_out=0.95:limit=0.93:attack=5:release=50");
         }
 
         return parts.Count > 0 ? "lavfi=[" + string.Join(',', parts) + "]" : "";

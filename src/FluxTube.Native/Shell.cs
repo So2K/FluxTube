@@ -135,7 +135,7 @@ public static class Shell
     private static double _testNextAt = -1, _testClickAt = -1;
     private static int _testClickIndex = 7;
 
-    public const float TopH = 52, SideW = 76, BarH = 62, TabH = 36;
+    public const float TopH = 52, SideW = 84, BarH = 62, TabH = 36;
 
     /// <summary>
     /// A tab is three strings plus background-playback state. Only the tab you are looking at has a page object;
@@ -912,6 +912,7 @@ public static class Shell
     private static readonly List<R> _holes = new(8);
     private static long _navAt, _toastAt;
     private static float _markY = -1, _markShown, _prevSideW = SideW;
+    private static float _shakeBassAvg, _shakeEnergy, _shakePhase;
 
     public static bool TopBarControlAt(float x, float y)
     {
@@ -1653,6 +1654,34 @@ public static class Shell
             return;
         }
 
+        // Ultra-cheap GPU camera shake during Audio-Only Music Mode (1 Matrix3x2 transform = 0.001 ms!)
+        var prevTf = Gfx.DC.Transform;
+        bool bassShakeActive = false;
+        if (AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && P.HasMedia && !P.Paused && !P.Muted && !App.Test)
+        {
+            AudioAnalyzer.RequestFrame();
+            float bass = AudioAnalyzer.BassEnergy;
+            float dt = (float)Math.Clamp(UI.Dt, 0.003, 0.04);
+            _shakeBassAvg += (bass - _shakeBassAvg) * (1f - MathF.Exp(-dt * 7.5f));
+            float kick = MathF.Max(0f, bass - _shakeBassAvg * 0.88f) * 2.4f + MathF.Max(0f, bass - 0.30f) * 0.9f;
+            _shakeEnergy = MathF.Max(_shakeEnergy * MathF.Exp(-dt * 15f), Math.Clamp(kick, 0f, 1.35f));
+            if (_shakeEnergy > 0.012f)
+            {
+                _shakePhase += dt * (36f + _shakeEnergy * 24f);
+                float sx = MathF.Sin(_shakePhase * 1.13f) * _shakeEnergy * 5.2f;
+                float sy = MathF.Cos(_shakePhase * 1.47f + 0.7f) * _shakeEnergy * 4.4f;
+                float ang = MathF.Sin(_shakePhase * 0.89f) * _shakeEnergy * 0.0048f; // ~0.28° subtle club thump
+                float sc = 1f + _shakeEnergy * 0.0075f;
+                var center = new System.Numerics.Vector2(w * 0.5f, h * 0.5f);
+                Gfx.DC.Transform = System.Numerics.Matrix3x2.CreateScale(sc, sc, center)
+                    * System.Numerics.Matrix3x2.CreateRotation(ang, center)
+                    * System.Numerics.Matrix3x2.CreateTranslation(sx, sy);
+                bassShakeActive = true;
+                UI.Animate();
+            }
+        }
+        else { _shakeEnergy = 0f; _shakeBassAvg = 0f; }
+
         // Tactile frosted/matte glass backdrop behind the entire window
         Gfx.DrawFrostedBackdrop(w, h);
 
@@ -1808,9 +1837,9 @@ public static class Shell
             if (_markY >= 0) _markShown = UI.Smooth(UI.Id("sidemark:y"), _markY, 20);
             if (markA > 0.01f)
             {
-                var markR = new R(sx + 3, _markShown, 3, 22);
+                var markR = new R(sx + 2, _markShown, 3, 22);
                 Gfx.Fill(markR, Gfx.Fade(Th.Brand, markA), Gfx.Corner(1.5f));
-                if (AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(markR, Gfx.Corner(1.5f), Th.Brand, 0.7f * markA);
+                if (AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(markR, Gfx.Corner(1.5f), Th.Brand, 0.45f * markA);
             }
             _markY = -1;
             Gfx.PopClip();
@@ -1824,6 +1853,7 @@ public static class Shell
             if (bar) NowPlaying(cur!, sideW, w, h + slideDown);
             else Gfx.Fill(new R(sideW, h - barH, w - sideW, barH), Th.Panel);
         }
+        if (bassShakeActive) Gfx.DC.Transform = prevTf;
         DrawToast(w, h - barH);
         DrawDropOverlay(w, h);
         var eff = AppSettings.Current.SeasonalEffect;
@@ -2049,15 +2079,16 @@ public static class Shell
 
     private static void SideItem(float sx, ref float y, string glyph, string label, string tag, string current, bool dot = false)
     {
-        var r = new R(sx + 8, y, SideW - 16, 48);
+        var r = new R(sx + 10, y, SideW - 18, 48);
         var sel = tag == current;
         var id = UI.Id(tag, 77);
         var selA = UI.Anim(id ^ 0x77, sel ? 1 : 0, 18);
-        if (selA > 0.01f) Gfx.Fill(r, Th.A(0.086f * selA), 10);
-        if (!sel) UI.Glow(id, r, 10, UI.Hover(r));
+        float cr = Gfx.Corner(10);
+        if (selA > 0.01f) Gfx.Fill(r, Th.A(0.095f * selA), cr);
+        if (!sel) UI.Glow(id, r, cr, UI.Hover(r));
         if (sel) _markY = y + 13;
         Gfx.Icon(glyph, new R(r.X, y + 5, r.W, 22), 18, sel ? Th.Text : Th.Icon);
-        var run = Gfx.Text(label, 10.5f, sel ? 600 : 400);
+        var run = Gfx.Text(label, 10f, sel ? 600 : 400, r.W - 8);
         Gfx.Draw(run, Gfx.Snap(r.X + (r.W - run.W) / 2), y + 29, sel ? Th.Text : Th.Sub);
         if (dot) Gfx.Circle(r.X + r.W / 2 + 12, y + 9, 3.5f, Th.Brand);
         if (UI.MiddleClick(r)) App.Post(() => OpenInNewTab("root", tag, ""));

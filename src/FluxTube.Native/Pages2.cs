@@ -921,6 +921,10 @@ public sealed class SettingsPage : IPage
             if (UI.Pill(UI.Id("set:dsp"), dspRow.Right - dw - 14, dspRow.Y + 12, 34, Th.Headphones, dLbl, out _, accent: s.AudioFxEnabled))
                 AudioStudioPanel.Show();
         }
+        ToggleRow("scwave", L.T("Волна SoundCloud с комментариями под видео", "SoundCloud waveform bar with timed comments"), s.SoundCloudWave, v => s.SoundCloudWave = v,
+            L.T("Рисует настоящую звуковую волну трека с аватарками комментариев по таймкодам (переключается и под видео)", "Shows a real audio waveform seekbar with YouTube comment avatars at timestamps (also toggleable under videos)"));
+        ToggleRow("bassshake", L.T("Тряска UI от баса в режиме «Только звук»", "Bass-reactive UI shake in Audio-Only mode"), s.MusicBassShake, v => s.MusicBassShake = v,
+            L.T("Ультра-дёшевый GPU-эффект: весь интерфейс мягко качает и пульсирует в такт басу (одна матрица 0.001 мс)", "Ultra-cheap GPU camera kick: the UI gently thumps and shakes with bass beats (single matrix, 0.001 ms)"));
         ToggleRow("wheelvol", L.T("Колёсико мыши меняет громкость на видео", "Mouse wheel adjusts volume over video"), s.WheelVolumeOnVideo, v => s.WheelVolumeOnVideo = v,
             L.T("Выключено: прокрутка колёсика над видео просто скроллит страницу (а в Shorts листает ленту)", "Off: wheel over video scrolls the page normally (and switches Shorts in Shorts feed)"));
         ToggleRow("shiftframe", L.T("Shift + колёсико: покадровая прокрутка видео", "Shift + wheel: frame-by-frame scrubbing"), s.ShiftWheelFrameStep, v => s.ShiftWheelFrameStep = v,

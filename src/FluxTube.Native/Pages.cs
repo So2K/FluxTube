@@ -15,10 +15,7 @@ public static class Cards
         var a = img != null ? Images.Alpha(img) : 0;
         if (a < 1) Gfx.Fill(r, Th.Thumb, radius);
         if (img != null)
-        {
-            Gfx.Image(img.Bmp!, r, a);
-            Gfx.RoundOff(r, radius, behind ?? Th.Bg);
-        }
+            Gfx.ImageRounded(img.Bmp!, r, radius, a);
     }
 
     public static void Thumb(R r, VideoItem v, bool hq, float radius, bool badge = true, uint? behind = null)
@@ -685,10 +682,20 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 bool active = i == _chipIdx;
                 int id = UI.Id("hchip:" + i, _scroll);
                 bool over = !overChev && UI.Hover(r);
-                if (active) Gfx.Fill(r, Th.Text, 8);
-                else Gfx.Fill(r, Th.A(over ? 0.16f : 0.085f), 8);
+                float chipRad = Gfx.Corner(8);
+                bool brandChip = AppSettings.Current.UiCardStyle is "dashed" or "neon";
+                if (active)
+                {
+                    Gfx.Fill(r, brandChip ? Th.Brand : Th.Text, chipRad);
+                    if (AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(r, chipRad, Th.Brand, 0.55f);
+                }
+                else
+                {
+                    Gfx.Fill(r, Th.A(over ? 0.16f : 0.085f), chipRad);
+                    if (AppSettings.Current.UiCardStyle == "dashed") Gfx.StrokeDashed(r, Gfx.Fade(Th.Brand, 0.28f), chipRad, 1f);
+                }
                 var tr = Gfx.Text(labels[i], 13, active ? 600 : 500);
-                Gfx.Draw(tr, Gfx.Snap(r.X + (r.W - tr.W) / 2), Gfx.Snap(r.Y + (r.H - tr.H) / 2), active ? Th.Bg : Th.Text);
+                Gfx.Draw(tr, Gfx.Snap(r.X + (r.W - tr.W) / 2), Gfx.Snap(r.Y + (r.H - tr.H) / 2), active ? (brandChip ? Th.OnBrand : Th.Bg) : Th.Text);
                 if (!overChev && UI.Click(id, r)) SelectChip(i);
             }
             cx += pw + gap;
@@ -1070,6 +1077,23 @@ public sealed class WatchPage : IPage
     private string? _note;
     private readonly int _infoScroll, _relScroll;
     private float _relTextW;
+    private List<SoundCloudBar.TimedMarker> _scMarkers = [];
+    private int _scMarkerComments = -1;
+    private int _scMarkerDurSec = -1;
+
+    private IReadOnlyList<SoundCloudBar.TimedMarker> GetSoundCloudMarkers(double dur)
+    {
+        int dSec = (int)Math.Round(dur);
+        if (_scMarkerComments != _comments.Count || Math.Abs(_scMarkerDurSec - dSec) > 2)
+        {
+            _scMarkerComments = _comments.Count;
+            _scMarkerDurSec = dSec;
+            var rawComments = new List<Comment>(_comments.Count);
+            foreach (var row in _comments) rawComments.Add(row.C);
+            _scMarkers = SoundCloudBar.ExtractMarkers(rawComments, _info?.Chapters ?? [], dur);
+        }
+        return _scMarkers;
+    }
 
     public string Tag => "";
     public int MainScroll => _infoScroll; // Page Up/Down read the description and comments
@@ -1662,7 +1686,7 @@ public sealed class WatchPage : IPage
                 var img = Images.Get(Video.Thumb720, 640, 360);
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
-                if (img != null) { Gfx.Image(img.Bmp!, pr, 0.25f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
+                if (img != null) Gfx.ImageRounded(img.Bmp!, pr, Gfx.Corner(12), 0.25f * Images.Alpha(img));
                 var msg = Gfx.Text(L.T("Видео в отдельном окне", "Playing in Picture-in-Picture"), 18, 600);
                 Gfx.Draw(msg, video.X + (video.W - msg.W) / 2, video.Y + video.H / 2 - 40, 0xFFFFFFFF);
                 var retLbl = L.T("Вернуть сюда", "Return here");
@@ -1675,7 +1699,7 @@ public sealed class WatchPage : IPage
                 var img = Images.Get(Video.Thumb720, 640, 360);
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
-                if (img != null) { Gfx.Image(img.Bmp!, pr, 0.38f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
+                if (img != null) Gfx.ImageRounded(img.Bmp!, pr, Gfx.Corner(12), 0.38f * Images.Alpha(img));
                 var msg = Gfx.Text(L.T("В окне поверх всех играет другое видео", "Another video is playing in Picture-in-Picture"), 17, 600);
                 Gfx.Draw(msg, video.X + (video.W - msg.W) / 2, video.Y + video.H / 2 - 48, 0xFFFFFFFF);
                 var b1Lbl = L.T("Смотреть здесь", "Watch here");
@@ -1699,7 +1723,7 @@ public sealed class WatchPage : IPage
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
                 var img = Images.Get(Video.Thumb720, 640, 360);
-                if (img != null) { Gfx.Image(img.Bmp!, pr, 0.55f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
+                if (img != null) Gfx.ImageRounded(img.Bmp!, pr, Gfx.Corner(12), 0.55f * Images.Alpha(img));
                 UI.Spinner(video.X + video.W / 2, video.Y + video.H / 2, 16, 0xFFFFFFFF);
             }
         }
@@ -1734,7 +1758,7 @@ public sealed class WatchPage : IPage
             Gfx.FillFrosted(cb, Th.Card, 13, opacity: 0.78f, border: true);
             Gfx.Draw(cr, cb.X + 11, cb.Y + (cb.H - cr.H) / 2, Th.Text);
 
-            // Top-right quick buttons: EQ Studio + Return Video
+            // Top-right quick buttons: Bass Shake + EQ Studio + Return Video
             float topRx = video.Right - 16;
             var showVidLbl = L.T("Показать видео", "Show video");
             var showVidW = UI.PillWidth(Th.Play, showVidLbl);
@@ -1746,27 +1770,54 @@ public sealed class WatchPage : IPage
             topRx -= eqW;
             if (UI.Pill(UI.Id("ms:eq", _infoScroll), topRx, video.Y + 12, 30, Th.Headphones, "EQ / FX", out _, accent: sOpt.AudioFxEnabled))
                 App.Post(AudioStudioPanel.Toggle);
+            topRx -= 8;
+            var shLbl = L.T("Тряска", "Shake");
+            var shW = UI.PillWidth(null, shLbl);
+            topRx -= shW;
+            if (UI.Pill(UI.Id("ms:shake", _infoScroll), topRx, video.Y + 12, 30, null, shLbl, out _, accent: sOpt.MusicBassShake))
+            {
+                sOpt.MusicBassShake = !sOpt.MusicBassShake;
+                sOpt.Save();
+                App.Invalidate();
+            }
 
-            // Centered cover art card with subtle bass-beat pulse
-            float baseArtW = MathF.Min(290, video.W * 0.34f);
-            float pulse = 1f + bass * 0.032f;
+            // Centered cover art card with dramatic bass-beat pulse + expanding shockwave ring
+            float baseArtW = MathF.Min(280, video.W * 0.33f);
+            float pulse = 1f + bass * (sOpt.MusicBassShake ? 0.068f : 0.032f);
             float artW = baseArtW * pulse, artH = artW * 9f / 16f;
-            var artR = new R(Gfx.Snap(video.X + (video.W - artW) / 2), Gfx.Snap(video.Y + video.H * 0.18f + (baseArtW * 9f / 16f - artH) * 0.5f), artW, artH);
-            Gfx.Fill(artR.Inset(-3), Gfx.Fade(0xFF000000, 0.34f), 14);
+            var artR = new R(Gfx.Snap(video.X + (video.W - artW) / 2), Gfx.Snap(video.Y + video.H * 0.14f + (baseArtW * 9f / 16f - artH) * 0.5f), artW, artH);
+            if (sOpt.MusicBassShake && bass > 0.18f)
+            {
+                float ringExp = (bass - 0.18f) * 26f;
+                Gfx.Stroke(artR.Inset(-ringExp), Gfx.Fade(Th.Brand, Math.Clamp((bass - 0.15f) * 0.65f, 0f, 0.55f)), Gfx.Corner(14) + ringExp * 0.4f, 2f);
+            }
+            Gfx.Fill(artR.Inset(-3), Gfx.Fade(0xFF000000, 0.34f), Gfx.Corner(14));
             var img = Images.Get(Video.Thumb720, 640, 360);
-            if (img != null) { Gfx.Image(img.Bmp!, artR, Images.Alpha(img)); Gfx.RoundOff(artR, 12, Th.Panel); }
-            else Gfx.Fill(artR, Th.Card, 12);
-            Gfx.Stroke(artR, Gfx.Fade(Th.Brand, 0.25f + bass * 0.45f), 12, 1.4f);
+            if (img != null) Gfx.ImageRounded(img.Bmp!, artR, Gfx.Corner(12), Images.Alpha(img));
+            else Gfx.Fill(artR, Th.Card, Gfx.Corner(12));
+            Gfx.Stroke(artR, Gfx.Fade(Th.Brand, 0.30f + bass * 0.55f), Gfx.Corner(12), 1.6f);
+
+            // SoundCloud waveform seekbar with timed comments right inside the Music Stage!
+            if (sOpt.SoundCloudWave)
+            {
+                if (!_commentsStarted && _info?.CommentsToken != null) LoadComments();
+                var scR = new R(video.X + 16, video.Bottom - 134, video.W - 32, 74);
+                bool isThisPlaying = mpv.CurrentVideoId == id;
+                SoundCloudBar.Draw(scR, id, isThisPlaying ? mpv.TimePos : 0, isThisPlaying ? mpv.Duration : 0,
+                    isThisPlaying ? mpv.CurrentAudioUrl : null,
+                    GetSoundCloudMarkers(isThisPlaying ? mpv.Duration : 0),
+                    _info?.Chapters ?? [], compact: true);
+            }
 
             // Clean bottom transport strip right inside the Music Stage
-            var barR = new R(video.X + 16, video.Bottom - 54, video.W - 32, 42);
-            Gfx.FillFrosted(barR, Th.Menu, 12, opacity: 0.86f, border: true);
+            var barR = new R(video.X + 16, video.Bottom - 52, video.W - 32, 40);
+            Gfx.FillFrosted(barR, Th.Menu, Gfx.Corner(12), opacity: 0.86f, border: true);
             float cx = barR.X + 8;
-            if (UI.IconButton(UI.Id("ms:play", _infoScroll), new R(cx, barR.Y + 3, 36, 36), mpv.Paused ? Th.Play : Th.Pause, 15, Th.Brand)) mpv.TogglePause();
+            if (UI.IconButton(UI.Id("ms:play", _infoScroll), new R(cx, barR.Y + 2, 36, 36), mpv.Paused ? Th.Play : Th.Pause, 15, Th.Brand)) mpv.TogglePause();
             cx += 38;
-            if (UI.IconButton(UI.Id("ms:rew", _infoScroll), new R(cx, barR.Y + 3, 32, 36), Th.Rewind, 13)) mpv.Command("seek", "-10");
+            if (UI.IconButton(UI.Id("ms:rew", _infoScroll), new R(cx, barR.Y + 2, 32, 36), Th.Rewind, 13)) mpv.Command("seek", "-10");
             cx += 34;
-            if (UI.IconButton(UI.Id("ms:fwd", _infoScroll), new R(cx, barR.Y + 3, 32, 36), Th.Forward, 13)) mpv.Command("seek", "10");
+            if (UI.IconButton(UI.Id("ms:fwd", _infoScroll), new R(cx, barR.Y + 2, 32, 36), Th.Forward, 13)) mpv.Command("seek", "10");
             cx += 40;
 
             var dur = mpv.Duration;
@@ -1777,14 +1828,14 @@ public sealed class WatchPage : IPage
             float sw = barR.Right - tr.W - 28 - cx;
             if (sw > 60)
             {
-                var sHit = new R(cx, barR.Y + 6, sw, 30);
+                var sHit = new R(cx, barR.Y + 5, sw, 30);
                 bool sHot = dur > 0 && UI.Hover(sHit);
                 if (dur > 0 && UI.Pressed && sHot)
                     mpv.SeekAbsolute(dur * Math.Clamp((UI.MX - cx) / sw, 0, 1));
                 if (sHot) UI.Hand();
                 double frac = dur > 0 ? Math.Clamp(mpv.TimePos / dur, 0, 1) : 0;
-                UI.Progress(new R(cx, barR.Y + 19, sw, sHot ? 6f : 4f), frac, Th.A(0.22f), Th.Brand);
-                Gfx.Circle(cx + (float)(sw * frac), barR.Y + 21, sHot ? 6f : 4.5f, 0xFFFFFFFF);
+                UI.Progress(new R(cx, barR.Y + 18, sw, sHot ? 6f : 4f), frac, Th.A(0.22f), Th.Brand);
+                Gfx.Circle(cx + (float)(sw * frac), barR.Y + 20, sHot ? 6f : 4.5f, 0xFFFFFFFF);
             }
 
             Gfx.PopClip();
@@ -1804,13 +1855,34 @@ public sealed class WatchPage : IPage
         float relatedRowH = relatedThumbH + 96f;
         int relatedRows = (_related.Count + relatedCols - 1) / relatedCols;
         float relatedH = 44 + relatedRows * relatedRowH + (_relCont != null ? 54 : 16);
-        float infoContentH = 14 + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + relatedH + 30 + _commentsH + (listInline ? _listInlineH : 0);
+        bool showScUnderVideo = AppSettings.Current.SoundCloudWave && !(AppSettings.Current.AudioOnlyMode && !Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id);
+        float scBarExtraH = showScUnderVideo ? SoundCloudBar.DefaultHeight + 12 : 0f;
+        float infoContentH = 14 + scBarExtraH + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + relatedH + 30 + _commentsH + (listInline ? _listInlineH : 0);
 
         var view = new R(x0, r.Y, mainW + 12, r.H);
         var scroll = UI.BeginScroll(_infoScroll, view, topPad + videoH + infoContentH);
         var video = new R(videoX, Gfx.Snap(view.Y + topPad - scroll), videoW, videoH);
         DrawVideoBox(video, view);
-        float y = video.Bottom + 16;
+        float y = video.Bottom + 12;
+
+        // SoundCloud-style Waveform + Timed Comment Avatars bar directly beneath the player!
+        if (showScUnderVideo)
+        {
+            if (!_commentsStarted && _info?.CommentsToken != null) LoadComments();
+            var mpvSc = MpvPlayer.Instance;
+            bool isThis = mpvSc.CurrentVideoId == id;
+            var scRect = new R(videoX, y, videoW, SoundCloudBar.DefaultHeight);
+            if (scRect.Bottom >= view.Y - 20 && scRect.Y <= view.Bottom + 20)
+            {
+                SoundCloudBar.Draw(scRect, id, isThis ? mpvSc.TimePos : 0, isThis ? mpvSc.Duration : 0,
+                    isThis ? mpvSc.CurrentAudioUrl : null,
+                    GetSoundCloudMarkers(isThis ? mpvSc.Duration : 0),
+                    _info?.Chapters ?? []);
+            }
+            y += SoundCloudBar.DefaultHeight + 14;
+        }
+        else y += 4;
+
         if (Title.Length > 0) Sel.Text(UI.Id(_infoScroll, 8001), Title, x0, y, 20, Th.Text, 600, mainW, 3);
         Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, L.T("Копировать название", "Copy title"));
         y += titleRun.H + 14;
@@ -1829,6 +1901,14 @@ public sealed class WatchPage : IPage
         bx -= 42;
         if (UI.IconButton(UI.Id("more", _infoScroll), new R(bx, by, 36, 36), Th.More)) MoreMenu();
         var s = AppSettings.Current;
+        var scLbl = L.T("Волна", "Wave");
+        bx -= UI.PillWidth(null, scLbl) + 8;
+        if (UI.Pill(UI.Id("scwave", _infoScroll), bx, by, ph, null, scLbl, out _, accent: s.SoundCloudWave))
+        {
+            s.SoundCloudWave = !s.SoundCloudWave;
+            s.Save();
+            App.Invalidate();
+        }
         var eqLbl = s.AudioFxEnabled ? AudioDsp.DisplayPresetName(s) : "EQ";
         bx -= UI.PillWidth(null, eqLbl) + 8;
         if (UI.Pill(UI.Id("eq", _infoScroll), bx, by, ph, null, eqLbl, out _, accent: s.AudioFxEnabled)) App.Post(AudioStudioPanel.Toggle);

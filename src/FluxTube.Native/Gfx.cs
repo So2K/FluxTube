@@ -95,6 +95,7 @@ public static unsafe class Gfx
     private static string _backdropMode = "";
     private static long _backdropBakedAt;
     private static ID2D1StrokeStyle? _dashStyle;
+    private static ID2D1BitmapBrush? _imgBrush;
     // Hardware-accelerated Direct2D DirectionalBlur resources (lazily allocated only when UI Motion Blur triggers)
     private static ID2D1Bitmap1? _mbBmp;
     private static ID2D1Effect? _mbEffect;
@@ -162,6 +163,13 @@ public static unsafe class Gfx
         _d2dDev = _d2dFactory.CreateDevice(dxgiDev);
         DC = _d2dDev.CreateDeviceContext(DeviceContextOptions.None);
         DC.TextAntialiasMode = Vortice.Direct2D1.TextAntialiasMode.Grayscale;
+        // Ultra-crisp sub-pixel vector glyph rendering (enhanced contrast, smooth at any zoom & bass-shake transform)
+        try
+        {
+            using var trp = _dw.CreateCustomRenderingParams(1.8f, 0.45f, 0.0f, PixelGeometry.Flat, Vortice.DirectWrite.RenderingMode.NaturalSymmetric);
+            DC.TextRenderingParams = trp;
+        }
+        catch { }
         _scratchBrush = DC.CreateSolidColorBrush(new Color4(1, 1, 1, 1));
         CreateGrainTexture();
         CreateSheenTexture();
@@ -549,6 +557,8 @@ public static unsafe class Gfx
         _backdropBg = 0;
         _dashStyle?.Dispose();
         _dashStyle = null;
+        _imgBrush?.Dispose();
+        _imgBrush = null;
         BgEngine.DisposeGpuResources();
         DisposeMotionBlurResources();
         foreach (var s in _radials) s.Dispose();
@@ -943,7 +953,28 @@ public static unsafe class Gfx
         // Custom wallpaper image (works WITH glass or INSTEAD of glass!)
         BgEngine.DrawWallpaper(DC, w, h);
 
-        // Seamless GPU SDF pattern overlay (works on solid color, glass, AND wallpapers!)
+        // Bass-reactive club/studio aurora glow across the entire backdrop in Audio-Only Music Mode (~0.02 ms GPU!)
+        var s = Services.AppSettings.Current;
+        if (s.AudioOnlyMode && s.MusicBassShake && Player.MpvPlayer.Instance.HasMedia && !Player.MpvPlayer.Instance.Paused && !App.Test)
+        {
+            AudioAnalyzer.RequestFrame();
+            float bass = AudioAnalyzer.BassEnergy;
+            float mid = AudioAnalyzer.MidEnergy;
+            float hi = AudioAnalyzer.HighEnergy;
+            if (bass > 0.02f || mid > 0.02f)
+            {
+                float r1 = ((Th.Brand >> 16) & 255) / 255f, g1 = ((Th.Brand >> 8) & 255) / 255f, b1 = (Th.Brand & 255) / 255f;
+                uint c2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
+                float r2 = ((c2 >> 16) & 255) / 255f, g2 = ((c2 >> 8) & 255) / 255f, b2 = (c2 & 255) / 255f;
+                float scaleMul = Th.Light ? 0.55f : 1.0f;
+                RadialGlow(w * 0.22f, h * 0.26f, w * (0.34f + bass * 0.26f), h * (0.36f + bass * 0.28f), r1, g1, b1, Math.Clamp(bass * 0.30f * scaleMul, 0f, 0.36f), slot: 5);
+                RadialGlow(w * 0.78f, h * 0.72f, w * (0.32f + mid * 0.24f), h * (0.34f + hi * 0.26f), r2, g2, b2, Math.Clamp((mid * 0.20f + hi * 0.14f) * scaleMul, 0f, 0.30f), slot: 6);
+                RadialGlow(w * 0.50f, h * 0.48f, w * (0.28f + bass * 0.30f), h * (0.26f + bass * 0.28f), (r1 + r2) * 0.5f, (g1 + g2) * 0.5f, (b1 + b2) * 0.5f, Math.Clamp(bass * bass * 0.22f * scaleMul, 0f, 0.26f), slot: 7);
+                UI.Animate();
+            }
+        }
+
+        // Seamless GPU SDF pattern overlay (pulses with bass in Music Mode!)
         BgEngine.DrawPattern(DC, w, h);
 
         // 1:1 physical-pixel bead-blasted velvety satin frost / noir film grain
@@ -1023,6 +1054,20 @@ public static unsafe class Gfx
     public static void Image(ID2D1Bitmap bmp, R dest, float opacity = 1)
         => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
 
+    /// <summary>Hardware anti-aliased rounded image using a single reusable GPU bitmap brush — zero corner halo artifacts on any backdrop, pattern, or dashed border!</summary>
+    public static void ImageRounded(ID2D1Bitmap bmp, R dest, float radius, float opacity = 1f)
+    {
+        if (radius <= 0.5f) { Image(bmp, dest, opacity); return; }
+        var sz = bmp.Size;
+        if (sz.Width <= 0 || sz.Height <= 0 || dest.W <= 0 || dest.H <= 0) return;
+        var b = _imgBrush ??= DC.CreateBitmapBrush(bmp, new BitmapBrushProperties(ExtendMode.Clamp, ExtendMode.Clamp, Vortice.Direct2D1.BitmapInterpolationMode.Linear));
+        b.Bitmap = bmp;
+        b.Transform = Matrix3x2.CreateScale(dest.W / sz.Width, dest.H / sz.Height) * Matrix3x2.CreateTranslation(dest.X, dest.Y);
+        b.Opacity = opacity;
+        DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(dest), RadiusX = radius, RadiusY = radius }, b);
+        b.Bitmap = null;
+    }
+
     public static void ImageRegion(ID2D1Bitmap bmp, R dest, R src, float opacity = 1)
         => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, (Vortice.RawRectF?)Raw(src), null);
 
@@ -1073,7 +1118,7 @@ public static unsafe class Gfx
 
     // ---------------- text ----------------
 
-    private readonly record struct FKey(int Size10, int Weight, bool Icon, bool Lucide = false);
+    private readonly record struct FKey(string FontName, int Size10, int Weight, bool Icon, bool Lucide = false);
     private readonly record struct TKey(string Text, int Size10, int Weight, int MaxW, int Lines, bool Icon, bool Lucide = false);
 
     private static readonly Dictionary<FKey, (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH)> _formats = new();
@@ -1087,7 +1132,7 @@ public static unsafe class Gfx
     private static (IDWriteTextFormat F, IDWriteInlineObject Ellipsis, float LineH) FormatLocked(FKey k)
     {
         if (_formats.TryGetValue(k, out var f)) return f;
-        var fmt = _dw.CreateTextFormat(k.Lucide ? "lucide" : k.Icon ? IconFont : ActiveFontName(), k.Lucide ? _lucideFonts : null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, Services.L.En ? "en-us" : "ru-ru");
+        var fmt = _dw.CreateTextFormat(k.Lucide ? "lucide" : k.Icon ? IconFont : k.FontName, k.Lucide ? _lucideFonts : null, (FontWeight)k.Weight, Vortice.DirectWrite.FontStyle.Normal, FontStretch.Normal, k.Size10 / 10f, Services.L.En ? "en-us" : "ru-ru");
         using var probe = _dw.CreateTextLayout("Ag", fmt, 1000, 1000);
         return _formats[k] = (fmt, _dw.CreateEllipsisTrimmingSign(fmt), probe.Metrics.Height);
     }
@@ -1102,7 +1147,7 @@ public static unsafe class Gfx
 
     private static TextRun Shape(TKey key)
     {
-        var (fmt, ellipsis, lineH) = FormatFor(new FKey(key.Size10, key.Weight, key.Icon, key.Lucide));
+        var (fmt, ellipsis, lineH) = FormatFor(new FKey(ActiveFontName(), key.Size10, key.Weight, key.Icon, key.Lucide));
         var width = key.MaxW == 0 ? 100000f : key.MaxW;
         var layout = _dw.CreateTextLayout(key.Text, fmt, width, key.Lines > 0 ? lineH * key.Lines + 1 : 100000f);
         layout.WordWrapping = key.Lines == 1 ? WordWrapping.NoWrap : WordWrapping.Wrap;
@@ -1152,7 +1197,7 @@ public static unsafe class Gfx
         if (_shapeMs > ShapeBudgetMs && !icon && text.Length > 3)
         {
             // over this frame's budget: reserve the space now, shape on the next frame
-            var lineH = FormatFor(new FKey(key.Size10, weight, false)).LineH;
+            var lineH = FormatFor(new FKey(ActiveFontName(), key.Size10, weight, false)).LineH;
             var estW = text.Length * size * 0.52f;
             var n = lines == 1 || key.MaxW == 0 ? 1 : Math.Max(1, (int)MathF.Ceiling(estW / key.MaxW));
             if (lines > 1) n = Math.Min(n, lines);
@@ -1194,7 +1239,7 @@ public static unsafe class Gfx
         Draw(run, Snap(box.X + (box.W - run.W) / 2), Snap(box.Y + (box.H - run.H) / 2), color);
     }
 
-    public static float LineHeight(float size, int weight = 400) => FormatFor(new FKey((int)(size * 10), weight, false)).LineH;
+    public static float LineHeight(float size, int weight = 400) => FormatFor(new FKey(ActiveFontName(), (int)(size * 10), weight, false)).LineH;
 
     private static void TrimTextCache()
     {
@@ -1217,5 +1262,6 @@ public static unsafe class Gfx
         foreach (var r in _prev.Values) r.Layout?.Dispose();
         foreach (var r in _cur.Values) r.Layout?.Dispose();
         _prev.Clear(); _cur.Clear();
+        while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
     }
 }

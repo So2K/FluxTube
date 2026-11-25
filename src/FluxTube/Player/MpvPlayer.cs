@@ -34,6 +34,7 @@ public sealed class MpvPlayer : IDisposable
     public bool VideoEnabled { get; private set; } = true;
     public string? CurrentVideoId { get; private set; }
     public string? CurrentUrl { get; private set; }
+    public string? CurrentAudioUrl { get; private set; }
     public bool HasMedia => CurrentUrl != null;
 
     public event Action<double>? TimeChanged;
@@ -263,6 +264,7 @@ public sealed class MpvPlayer : IDisposable
         if (!IsReady) return;
         Interlocked.Increment(ref _loadGen);
         CurrentUrl = url;
+        CurrentAudioUrl = url;
         CurrentVideoId = videoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         if (startPaused) { Paused = true; Set("pause", "yes"); }
@@ -279,6 +281,7 @@ public sealed class MpvPlayer : IDisposable
         if (!IsReady) return;
         Interlocked.Increment(ref _loadGen);
         CurrentUrl = s.Video;
+        CurrentAudioUrl = s.Audio ?? s.Video;
         CurrentVideoId = s.VideoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         if (keepPause) { Paused = true; Set("pause", "yes"); }

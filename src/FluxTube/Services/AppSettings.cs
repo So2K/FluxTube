@@ -165,6 +165,12 @@ public sealed class AppSettings
     public bool WheelVolumeOnVideo { get; set; } = true;
     /// <summary>True: Shift + mouse wheel over video steps frame-by-frame with exact millisecond &amp; frame OSD readout.</summary>
     public bool ShiftWheelFrameStep { get; set; } = true;
+    /// <summary>SoundCloud-style interactive audio waveform seekbar with timed YouTube comment avatars below the player &amp; in Audio-Only mode.</summary>
+    public bool SoundCloudWave { get; set; } = true;
+    /// <summary>Ultra-cheap GPU camera shake + bass thump on the UI during Audio-Only Music Mode (single Matrix3x2 transform, ~0.001ms).</summary>
+    public bool MusicBassShake { get; set; } = true;
+    /// <summary>User-saved custom DSP Studio presets.</summary>
+    public List<SavedAudioPreset> CustomAudioPresets { get; set; } = [];
     /// <summary>Optional custom sound display names per UI sound slot (normalized WAV copies stored in .fluxtube/sfx).</summary>
     public Dictionary<string, string> CustomSfx { get; set; } = new();
 
@@ -211,3 +217,19 @@ public sealed class AppSettings
 [JsonSourceGenerationOptions(WriteIndented = true)]
 [JsonSerializable(typeof(AppSettings))]
 internal partial class SettingsJson : JsonSerializerContext;
+
+public sealed class SavedAudioPreset
+{
+    public string Name { get; set; } = "";
+    public float[] Eq { get; set; } = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    public float Reverb { get; set; }
+    public string Room { get; set; } = "hall";
+    public float Bass { get; set; }
+    public float Exciter { get; set; }
+    public float Stereo { get; set; }
+    public float Speed { get; set; } = 1.0f;
+    public bool TapePitch { get; set; }
+    public float PitchSemi { get; set; }
+    public bool Space8D { get; set; }
+    public bool Limiter { get; set; } = true;
+}

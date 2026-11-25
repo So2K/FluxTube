@@ -301,10 +301,18 @@ public static unsafe class BgEngine
         if (_patBrush == null) return;
 
         float tileScale = Math.Clamp(s.BgPatternScale, 0.55f, 2.2f);
+        float op = Math.Clamp(s.BgPatternOpacity, 0.03f, 0.65f);
+        // In Audio-Only Music Mode with Bass Shake on, the pattern pulses & breathes with every bass beat!
+        if (s.AudioOnlyMode && s.MusicBassShake && Player.MpvPlayer.Instance.HasMedia && !Player.MpvPlayer.Instance.Paused && !App.Test)
+        {
+            float bass = AudioAnalyzer.BassEnergy;
+            tileScale *= 1f + bass * 0.048f;
+            op = Math.Clamp(op * (1f + bass * 1.25f), 0.04f, 0.80f);
+        }
         // Tile is baked at 2x supersampling (DPI-crisp at 4K!), so base display scale is 0.5 * tileScale
         float drawScale = 0.5f * tileScale;
-        _patBrush.Transform = Matrix3x2.CreateScale(drawScale, drawScale);
-        _patBrush.Opacity = Math.Clamp(s.BgPatternOpacity, 0.03f, 0.65f);
+        _patBrush.Transform = Matrix3x2.CreateScale(drawScale, drawScale, new Vector2(w * 0.5f, h * 0.5f));
+        _patBrush.Opacity = op;
         dc.FillRectangle(new Vortice.RawRectF(0, 0, w, h), _patBrush);
     }
 
