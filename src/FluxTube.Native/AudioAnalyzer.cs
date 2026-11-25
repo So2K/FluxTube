@@ -41,6 +41,11 @@ public static unsafe class AudioAnalyzer
     private static float _capturedTrackRms, _capturedRawRms, _capturedStereoPan;
     private static float _loudness, _slowTrackRms = 0.08f, _trackDynamics = 1f, _loudnessGain = 1f;
     private static float _stereoPan, _spectralCentroid = 0.35f, _dominantAngle, _subBass, _punchBass, _airTreble;
+    // Online repetition / BPM groove lock + buildup & drop structure analyzer (0 extra CPU!)
+    private static readonly long[] _kickTimes = new long[12];
+    private static int _kickWrite, _kickCount, _beatCount, _patternMode, _prevSection;
+    private static long _lastKickRecordedAt;
+    private static float _patternLock, _buildupLevel, _dropImpact, _prevCentroid = 0.35f, _centroidSlope;
     private static long _lastStepFrame = -1;
 
     private static float _beatEnvelope, _beatPhase, _capturedBeatStrength;
@@ -67,6 +72,15 @@ public static unsafe class AudioAnalyzer
     public static float SpectralCentroid => _spectralCentroid;
     /// <summary>Live directional vector angle (radians) driven by the dominant transient frequency bin each instant.</summary>
     public static float DominantAngle => _dominantAngle;
+    /// <summary>0..1 periodicity lock: high when kicks repeat on a steady groove -> engages tight vertical piston pump!</summary>
+    public static float PatternLock => _patternLock;
+    /// <summary>0..1 buildup/riser tension before an incoming drop (lookahead waveform + live rising highs).</summary>
+    public static float BuildupLevel => _buildupLevel;
+    /// <summary>0..1 explosive drop detonation impulse when a drop hits after a buildup or enters a climax zone.</summary>
+    public static float DropImpact => _dropImpact;
+    /// <summary>Active choreography pattern: 0=Vertical Piston Pump, 1=Stereo Liquid Sway, 2=Diagonal Cross, 3=Buildup Tension, 4=Drop Detonation.</summary>
+    public static int PatternMode => _patternMode;
+    public static int BeatCount => _beatCount;
     /// <summary>Perceptual track loudness (0..1, -44..-5 dBFS) reflecting real quiet vs loud sections.</summary>
     public static float Loudness => _loudness;
     /// <summary>Short-term loudness relative to the track's 5s baseline (0.35 quiet intro .. 1.55 big drop).</summary>
@@ -241,6 +255,89 @@ public static unsafe class AudioAnalyzer
                 ? Math.Clamp((0.20f + 1.10f * MathF.Pow(_loudness, 1.25f)) * (0.58f + 0.52f * _trackDynamics) * volCurve, 0f, 1.68f)
                 : 0f;
             _loudnessGain += (combined - _loudnessGain) * (1f - MathF.Exp(-dt * 14f));
+
+            // --- Online Musical Structure, Repetition & Drop Choreographer ---
+            if (playing)
+            {
+                // 1. Track repeating kick intervals -> detect steady repeating groove (PatternLock 0..1)
+                if (_capturedBeatAt > _lastKickRecordedAt && _capturedBeatAt - _lastKickRecordedAt >= 190)
+                {
+                    _lastKickRecordedAt = _capturedBeatAt;
+                    _kickTimes[_kickWrite] = _capturedBeatAt;
+                    _kickWrite = (_kickWrite + 1) % _kickTimes.Length;
+                    if (_kickCount < _kickTimes.Length) _kickCount++;
+                    _beatCount++;
+
+                    if (_kickCount >= 5)
+                    {
+                        Span<long> ibis = stackalloc long[11];
+                        int m = 0;
+                        for (int k = 1; k < _kickCount; k++)
+                        {
+                            int i1 = (_kickWrite - k + _kickTimes.Length) % _kickTimes.Length;
+                            int i0 = (_kickWrite - k - 1 + _kickTimes.Length) % _kickTimes.Length;
+                            long d = _kickTimes[i1] - _kickTimes[i0];
+                            if (d >= 190 && d <= 1250) ibis[m++] = d;
+                        }
+                        if (m >= 3)
+                        {
+                            // Median IBI via simple insertion sort
+                            for (int a = 1; a < m; a++)
+                            {
+                                long v = ibis[a]; int b = a - 1;
+                                while (b >= 0 && ibis[b] > v) { ibis[b + 1] = ibis[b]; b--; }
+                                ibis[b + 1] = v;
+                            }
+                            long med = ibis[m / 2];
+                            int hits = 0;
+                            for (int a = 0; a < m; a++)
+                            {
+                                float ratio = ibis[a] / (float)med;
+                                if (MathF.Abs(ratio - 1f) < 0.16f || MathF.Abs(ratio - 2f) < 0.22f || MathF.Abs(ratio - 0.5f) < 0.12f)
+                                    hits++;
+                            }
+                            float lockTarget = hits / (float)m;
+                            _patternLock += (lockTarget - _patternLock) * 0.42f;
+                        }
+                    }
+                }
+                else if (UI.Now - _lastKickRecordedAt > 1800)
+                {
+                    _patternLock *= MathF.Exp(-dt * 2.5f);
+                }
+
+                // 2. Fuse Lookahead Waveform Drop/Buildup Map + Live Rising Centroid/Highs
+                var (sec, mapBuildup, mapDrop) = SoundCloudBar.GetTrackCue(mpv.CurrentVideoId, mpv.TimePos, mpv.Duration);
+                float centDelta = (_spectralCentroid - _prevCentroid) / MathF.Max(0.008f, dt);
+                _prevCentroid = _spectralCentroid;
+                _centroidSlope += (Math.Clamp(centDelta, -2f, 2f) - _centroidSlope) * (1f - MathF.Exp(-dt * 3.5f));
+                float liveBuildup = (_highEnergy > 0.34f && _bassEnergy < 0.42f && _centroidSlope > 0.08f) ? Math.Clamp((_highEnergy - 0.30f) * 1.8f, 0f, 0.85f) : 0f;
+                float buildTarget = MathF.Max(mapBuildup, liveBuildup);
+                _buildupLevel += (buildTarget - _buildupLevel) * (1f - MathF.Exp(-dt * 6f));
+
+                bool enteredDrop = (sec == 3 && _prevSection != 3) || (_buildupLevel > 0.45f && _subBass > 0.55f && _beatEnvelope > 0.55f);
+                _prevSection = sec;
+                if (enteredDrop) _dropImpact = 1.0f;
+                else if (mapDrop > 0.35f && _subBass > 0.45f) _dropImpact = MathF.Max(_dropImpact, mapDrop * 0.72f);
+                _dropImpact *= MathF.Exp(-dt * 1.45f);
+                if (_dropImpact < 0.01f) _dropImpact = 0f;
+
+                // 3. Select active choreography PatternMode dynamically!
+                if (_dropImpact > 0.32f || (sec == 3 && _subBass > 0.48f))
+                    _patternMode = 4; // DROP DETONATION!
+                else if (_buildupLevel > 0.38f)
+                    _patternMode = 3; // BUILDUP TENSION (Разгон!)
+                else if (_patternLock >= 0.58f)
+                    // Repeating rhythmic pattern -> tight VERTICAL PISTON PUMP (0) alternating with Diagonal Cross (2) on every 8-beat phrase!
+                    _patternMode = ((_beatCount / 8) & 1) == 0 ? 0 : 2;
+                else
+                    // Melodic / freeform / stereo-rich section -> Liquid Stereo Sway (1)
+                    _patternMode = 1;
+            }
+            else
+            {
+                _patternLock = 0f; _buildupLevel = 0f; _dropImpact = 0f; _patternMode = 1; _prevSection = 0;
+            }
 
             for (int i = 0; i < WavePoints; i++)
             {
@@ -881,7 +978,7 @@ public static unsafe class AudioAnalyzer
         float cx = art.X + art.W / 2, cy = art.Y + art.H / 2;
         float rx = art.W * 0.66f, ry = art.H * 0.75f;
         uint ice = Gfx.Mix(Th.Brand, 0xFF73D8EB, 0.48f);
-        const int rays = 48;
+        const int rays = 36;
         for (int i = 0; i < rays; i++)
         {
             float angle = i * MathF.Tau / rays;
@@ -916,9 +1013,9 @@ public static unsafe class AudioAnalyzer
         float maxH = r.H * 0.62f;
         if (bars)
         {
-            // Smooth frequency terrain: bass in the center, treble fading toward the edges (~270 draw calls vs 1,285!)
-            const int count = 90;
-            float colW = MathF.Max(1.8f, r.W / count * 0.66f);
+            // Smooth frequency terrain: bass in the center, treble fading toward the edges (~150 draw calls -> ultra-low GPU!)
+            const int count = 64;
+            float colW = MathF.Max(2.0f, r.W / count * 0.66f);
             float px = r.X, py = baseline;
             for (int i = 0; i <= count; i++)
             {
@@ -937,7 +1034,8 @@ public static unsafe class AudioAnalyzer
                     Gfx.Fill(new R(x - colW * 0.5f, y, colW, height), Gfx.Fade(color, (0.04f + 0.14f * v) * opacity));
                 if (i > 0)
                 {
-                    Gfx.Line(px, py, x, y, Gfx.Fade(color, 0.10f * v * opacity), 6.5f);
+                    if (v > 0.08f)
+                        Gfx.Line(px, py, x, y, Gfx.Fade(color, 0.10f * v * opacity), 5.5f);
                     Gfx.Line(px, py, x, y, Gfx.Fade(highlight, (0.16f + v * 0.68f) * opacity), 1.6f);
                 }
                 px = x; py = y;

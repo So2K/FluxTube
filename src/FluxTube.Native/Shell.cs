@@ -1799,16 +1799,45 @@ public static class Shell
         }
 
         _vbPhase += dt * (10.5f + _vbKick * 18.5f + AudioAnalyzer.HighEnergy * 6.0f);
-        // Directional VideoBeatShake: Sub-bass slams vertically, Punch-bass kicks along live DominantAngle, Stereo L/R pulls sideways!
+        // Musical Structure-Driven VideoBeatShake: Piston Pump (0), Stereo Sway (1), Diagonal Cross (2), Buildup Tension (3), DROP Detonation (4)!
         float domAng = AudioAnalyzer.DominantAngle;
         float pan = AudioAnalyzer.StereoPan;
         float punch = AudioAnalyzer.PunchBass;
+        int mode = AudioAnalyzer.PatternMode;
+        float buildup = AudioAnalyzer.BuildupLevel;
+        float drop = AudioAnalyzer.DropImpact;
+        int beatAlt = (AudioAnalyzer.BeatCount & 1) == 0 ? 1 : -1;
         float waveY = -0.55f + 0.45f * MathF.Cos(_vbPhase * 1.15f);
         float waveX = MathF.Sin(_vbPhase * 0.94f);
-        float dx = Gfx.Snap(Math.Clamp(waveX * _vbKick * 4.0f + MathF.Cos(domAng) * punch * _vbKick * 3.6f + pan * _vbKick * 4.2f, -9.0f, 9.0f));
-        float dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 7.2f + MathF.Sin(domAng) * punch * _vbKick * 3.0f - AudioAnalyzer.SubBass * _vbKick * 3.2f, -11.5f, 7.0f));
+        float dx, dy;
+        if (mode == 4) // DROP DETONATION
+        {
+            float blast = 1.25f + drop * 0.42f;
+            dx = Gfx.Snap(Math.Clamp((waveX * _vbKick * 4.8f + MathF.Cos(domAng) * punch * _vbKick * 4.5f + pan * _vbKick * 5.2f) * blast, -12.0f, 12.0f));
+            dy = Gfx.Snap(Math.Clamp((waveY * _vbKick * 8.4f + MathF.Sin(domAng) * punch * _vbKick * 3.6f - AudioAnalyzer.SubBass * _vbKick * 4.5f) * blast, -14.0f, 9.0f));
+        }
+        else if (mode == 3) // BUILDUP TENSION (Разгон!)
+        {
+            dx = Gfx.Snap(Math.Clamp(MathF.Sin(_vbPhase * 2.8f) * (1.8f + buildup * 2.8f), -5.0f, 5.0f));
+            dy = Gfx.Snap(Math.Clamp(-buildup * 3.5f + MathF.Cos(_vbPhase * 2.4f) * (1.4f + buildup * 2.2f), -7.5f, 4.0f));
+        }
+        else if (mode == 0) // LOCKED VERTICAL PISTON PUMP (Вверх-Вниз!)
+        {
+            dx = Gfx.Snap(Math.Clamp(pan * _vbKick * 3.2f, -4.5f, 4.5f));
+            dy = Gfx.Snap(Math.Clamp((waveY * _vbKick * 8.6f - AudioAnalyzer.SubBass * _vbKick * 4.2f), -13.0f, 8.0f));
+        }
+        else if (mode == 2) // DIAGONAL KINETIC CROSS
+        {
+            dx = Gfx.Snap(Math.Clamp(beatAlt * _vbKick * 6.8f + pan * _vbKick * 3.6f, -10.5f, 10.5f));
+            dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 7.8f, -11.5f, 7.0f));
+        }
+        else // STEREO LIQUID SWAY
+        {
+            dx = Gfx.Snap(Math.Clamp(waveX * _vbKick * 4.0f + MathF.Cos(domAng) * punch * _vbKick * 3.6f + pan * _vbKick * 4.6f, -9.5f, 9.5f));
+            dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 7.2f + MathF.Sin(domAng) * punch * _vbKick * 3.0f - AudioAnalyzer.SubBass * _vbKick * 3.2f, -11.5f, 7.0f));
+        }
         VideoBeatShift = new System.Numerics.Vector2(dx, dy);
-        VideoBeatGlow = Math.Clamp(_vbKick * 0.72f, 0f, 1.0f);
+        VideoBeatGlow = Math.Clamp(_vbKick * (mode == 4 ? 0.92f : 0.72f) + drop * 0.35f, 0f, 1.0f);
         UI.Animate();
     }
 

@@ -28,10 +28,88 @@ public static partial class SoundCloudBar
     {
         public string VideoId = "";
         public float[] Peaks = new float[BarCount];
+        public byte[] Sections = new byte[BarCount]; // 0=chill, 1=groove, 2=buildup(разгон), 3=drop(дроп)
         public double PeakTimeSec = -1;
         public bool RealReady;
         public bool Loading;
         public long LoadedAt;
+    }
+
+    /// <summary>
+    /// Classifies every bar of the full-track waveform into Chill(0), Groove(1), Buildup/Riser(2), or Drop/Climax(3)
+    /// so the beat choreographer anticipates drops 2-6 seconds ahead with zero extra ffmpeg work!
+    /// </summary>
+    internal static byte[] ComputeSections(float[] peaks)
+    {
+        int n = peaks.Length;
+        var sec = new byte[n];
+        if (n < 8) return sec;
+
+        var sorted = new float[n];
+        double sum = 0;
+        for (int i = 0; i < n; i++) { sorted[i] = peaks[i]; sum += peaks[i]; }
+        Array.Sort(sorted);
+        float mean = (float)(sum / n);
+        float p75 = sorted[(int)(n * 0.75f)];
+        float hiThresh = MathF.Max(mean * 1.24f, p75 * 0.96f);
+        float loThresh = MathF.Min(hiThresh * 0.62f, MathF.Max(mean * 0.76f, sorted[n / 5] * 1.04f));
+
+        for (int i = 0; i < n; i++)
+        {
+            float cur = peaks[i];
+            float prev = 0f; int pc = 0;
+            for (int k = Math.Max(0, i - 4); k < i; k++) { prev += peaks[k]; pc++; }
+            prev = pc > 0 ? prev / pc : cur;
+
+            float nextPeak = cur;
+            float nextAvg = 0f; int nc = 0;
+            for (int k = i + 1; k <= Math.Min(n - 1, i + 8); k++)
+            {
+                nextAvg += peaks[k]; nc++;
+                if (peaks[k] > nextPeak) nextPeak = peaks[k];
+            }
+            nextAvg = nc > 0 ? nextAvg / nc : cur;
+
+            if (cur >= hiThresh && (cur > prev * 1.15f || cur >= 0.80f))
+                sec[i] = 3; // DROP / CLIMAX
+            else if (nextPeak >= hiThresh && (nextAvg > cur * 1.10f || cur > prev * 1.04f) && cur >= loThresh)
+                sec[i] = 2; // BUILDUP / РАЗГОН (drop right ahead!)
+            else if (cur < loThresh)
+                sec[i] = 0; // CHILL / BREAKDOWN
+            else
+                sec[i] = 1; // GROOVE
+        }
+        return sec;
+    }
+
+    /// <summary>O(1) zero-alloc musical cue at current playback position: section (0..3), buildup ramp (0..1), drop intensity (0..1).</summary>
+    public static (int Section, float Buildup, float Drop) GetTrackCue(string? videoId, double pos, double duration)
+    {
+        if (string.IsNullOrEmpty(videoId) || duration <= 5 || pos < 0) return (1, 0f, 0f);
+        WaveEntry? entry;
+        lock (_lock) _cache.TryGetValue(videoId, out entry);
+        if (entry == null || !entry.RealReady) return (1, 0f, 0f);
+
+        float frac = (float)Math.Clamp(pos / duration, 0, 0.999);
+        int idx = Math.Clamp((int)(frac * BarCount), 0, BarCount - 1);
+        int s = entry.Sections[idx];
+
+        // Lookahead 1..4 bars for incoming drop to compute smooth buildup ramp (0..1)
+        float buildup = 0f;
+        if (s == 2)
+        {
+            buildup = 0.55f;
+            for (int look = 1; look <= 4 && idx + look < BarCount; look++)
+            {
+                if (entry.Sections[idx + look] == 3)
+                {
+                    buildup = Math.Clamp(1.05f - look * 0.16f, 0.45f, 1f);
+                    break;
+                }
+            }
+        }
+        float drop = s == 3 ? Math.Clamp((entry.Peaks[idx] - 0.55f) * 2.2f, 0.45f, 1f) : 0f;
+        return (s, buildup, drop);
     }
 
     private static readonly object _lock = new();
@@ -155,9 +233,11 @@ public static partial class SoundCloudBar
             var peaks = new float[BarCount];
             for (int i = 0; i < BarCount; i++) peaks[i] = Math.Clamp(raw[i] / 255f, 0.08f, 1f);
             double peakSec = raw.Length == BarCount + 4 ? BitConverter.ToSingle(raw, BarCount) : -1;
+            var sections = ComputeSections(peaks);
             lock (_lock)
             {
                 entry.Peaks = peaks;
+                entry.Sections = sections;
                 if (peakSec >= 0 && !double.IsNaN(peakSec)) entry.PeakTimeSec = peakSec;
                 entry.RealReady = true;
                 entry.LoadedAt = Environment.TickCount64;
@@ -316,9 +396,11 @@ public static partial class SoundCloudBar
                 norm[b] = Math.Clamp(MathF.Pow(rawPeaks[b] / globalMax, 0.72f), 0.10f, 1.0f);
 
             SaveDisk(entry.VideoId, norm, peakTimeSec);
+            var sections = ComputeSections(norm);
             lock (_lock)
             {
                 entry.Peaks = norm;
+                entry.Sections = sections;
                 entry.PeakTimeSec = peakTimeSec;
                 entry.RealReady = true;
                 entry.LoadedAt = Environment.TickCount64;
@@ -689,16 +771,17 @@ public static partial class SoundCloudBar
         double effPos = _scrubbing ? _scrubTarget : pos;
         float playFrac = duration > 0 ? (float)Math.Clamp(effPos / duration, 0, 1) : 0f;
 
-        // Distribute crisp SoundCloud vertical bars across the full seek range
-        float targetStep = musicStage ? 3.5f : 5.0f;
-        int cols = Math.Clamp((int)(barAreaW / targetStep), 24, musicStage ? 360 : 320);
+        // Distribute crisp SoundCloud vertical bars across the full seek range (capped at 190 -> 2x lower GPU fillrate!)
+        float targetStep = musicStage ? 5.2f : 6.0f;
+        int cols = Math.Clamp((int)(barAreaW / targetStep), 24, musicStage ? 190 : 170);
         float stride = barAreaW / cols;
-        float barW = MathF.Max(1.4f, stride * (musicStage ? 0.62f : 0.58f));
+        float barW = MathF.Max(1.6f, stride * (musicStage ? 0.64f : 0.60f));
         float totalBarsW = barAreaW;
         float startX = barAreaX;
 
-        float beatPulse = playing ? (1f + AudioAnalyzer.BassEnergy * 0.16f + MusicBounce.Kick * 0.12f) : 1f;
-        if (playing) AudioAnalyzer.RequestFrame();
+        bool activePlaying = playing && Shell.CurrentTabOwnsMainPlayer;
+        float beatPulse = activePlaying ? (1f + AudioAnalyzer.BassEnergy * 0.16f + MusicBounce.Kick * 0.12f) : 1f;
+        if (activePlaying) AudioAnalyzer.RequestFrame();
 
         uint playedTop = musicStage ? Gfx.Mix(0xFFFFFFFF, Th.Brand, 0.35f) : Th.Brand;
         uint playedBot = musicStage ? Gfx.Fade(Th.Brand, 0.50f) : Gfx.Fade(Th.Brand, 0.44f);

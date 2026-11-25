@@ -2303,6 +2303,20 @@ public static unsafe class Gfx
                 Console.WriteLine("PASS [4/4] ImpulseBank skipped (no builtin IR yet)");
             }
 
+            // TEST 5: Full-track Drop & Buildup structure analyzer (Chill -> Buildup -> Drop classification!)
+            var synthWave = new float[SoundCloudBar.BarCount];
+            for (int i = 0; i < synthWave.Length; i++)
+                synthWave[i] = i < 60 ? 0.25f : i < 95 ? 0.42f + (i - 60) * 0.008f : i < 150 ? 0.92f : 0.30f;
+            var secs = SoundCloudBar.ComputeSections(synthWave);
+            int chillCnt = 0, buildCnt = 0, dropCnt = 0;
+            for (int i = 0; i < 55; i++) if (secs[i] == 0) chillCnt++;
+            for (int i = 88; i < 95; i++) if (secs[i] == 2) buildCnt++;
+            for (int i = 95; i < 145; i++) if (secs[i] == 3) dropCnt++;
+            Assert(chillCnt >= 40 && buildCnt >= 3 && dropCnt >= 40,
+                $"Drop/Buildup analyzer misclassified synthetic track (chill={chillCnt}, buildup={buildCnt}, drop={dropCnt})");
+            var msg5 = $"PASS [5/5] Track Drop/Buildup Analyzer (chill={chillCnt}/55, buildup={buildCnt}/7, drop={dropCnt}/50)";
+            Services.Paths.Log("self-test: " + msg5); Console.WriteLine(msg5);
+
             MusicBounce.Update(false, 0.016f);
             DisposeMotionBlurResources();
             DisposeDanceAtlas();
@@ -2422,20 +2436,61 @@ public static class MusicBounce
         float e = Math.Clamp(_bandPulse[b] * 0.78f + Kick * kickShare, 0f, 1.70f) * amp * drive;
         if (e <= 0.008f) return prev;
 
-        // Spectral-Fingerprint 2D Vector Field: each frequency pushes in its OWN distinct direction + real Stereo L/R pull!
+        // Spectral-Fingerprint 2D Vector Field + Musical Structure PatternMode (0=Piston, 1=Stereo Sway, 2=Diagonal Cross, 3=Buildup, 4=DROP!)
         float pan = AudioAnalyzer.StereoPan;
         float domAng = AudioAnalyzer.DominantAngle;
         float cent = AudioAnalyzer.SpectralCentroid;
         float sub = AudioAnalyzer.SubBass;
         float punch = AudioAnalyzer.PunchBass;
         float air = AudioAnalyzer.AirTreble;
+        int mode = AudioAnalyzer.PatternMode;
+        float buildup = AudioAnalyzer.BuildupLevel;
+        float drop = AudioAnalyzer.DropImpact;
+        int beatAlt = (AudioAnalyzer.BeatCount & 1) == 0 ? 1 : -1;
 
-        // Sub-bass -> deep vertical slam; Punch-bass -> directional kick along DominantAngle; Mids -> lateral Stereo L/R whip!
         float wave = MathF.Cos(_phase * 1.15f + b * 1.29f);
-        float dirX = MathF.Cos(domAng + b * 0.22f) * punch * 3.8f + pan * (2.6f + Mid * 4.2f);
-        float dirY = MathF.Sin(domAng + b * 0.18f) * punch * 3.2f - sub * Kick * 4.4f;
-        float dy = Math.Clamp(((-0.55f + 0.45f * wave) * e * 4.6f + dirY * amp * drive), -11.5f, 8.0f);
-        float dx = Math.Clamp((MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 2.1f + dirX * amp * drive), -9.0f, 9.0f);
+        float dx, dy, modeScaleBoost = 0f, modeRotBoost = 0f;
+
+        if (mode == 4) // DROP DETONATION: explosive 360° slam + giant vertical impact!
+        {
+            float blast = 1.28f + drop * 0.45f;
+            float dirX = MathF.Cos(domAng + b * 0.28f) * (punch * 5.2f + Kick * 3.2f) + pan * 6.0f;
+            float dirY = MathF.Sin(domAng + b * 0.22f) * punch * 4.2f - (sub * 5.8f + Kick * 4.5f);
+            dx = Math.Clamp((MathF.Sin(_phase * 1.05f + b * 1.73f) * e * 2.6f + dirX) * amp * drive * blast, -12.0f, 12.0f);
+            dy = Math.Clamp(((-0.62f + 0.48f * wave) * e * 5.4f + dirY) * amp * drive * blast, -14.5f, 9.5f);
+            modeScaleBoost = drop * 0.055f;
+            modeRotBoost = MathF.Sin(_highPhase * 0.9f + b) * 0.032f;
+        }
+        else if (mode == 3) // BUILDUP TENSION (Разгон!): tightening rapid micro-tremor rising upward!
+        {
+            float tense = 0.65f + buildup * 0.95f;
+            float jitterX = MathF.Sin(_highPhase * 2.2f + b * 2.1f) * (1.2f + buildup * 2.4f) + pan * 2.8f;
+            float liftY = -buildup * 3.8f + MathF.Cos(_highPhase * 1.9f + b * 1.7f) * (1.0f + buildup * 2.1f);
+            dx = Math.Clamp(jitterX * amp * tense, -6.5f, 6.5f);
+            dy = Math.Clamp(liftY * amp * tense, -8.5f, 5.5f);
+            modeRotBoost = MathF.Sin(_highPhase * 2.4f + b) * buildup * 0.026f;
+        }
+        else if (mode == 0) // LOCKED VERTICAL PISTON PUMP (Повторяющийся ритм -> чёткая тряска вверх-вниз!)
+        {
+            float pump = (-0.72f + 0.45f * wave) * (e * 5.8f + sub * Kick * 4.6f);
+            dx = Math.Clamp((pan * 3.2f + MathF.Sin(_phase * 0.9f + b) * e * 0.9f) * amp * drive, -5.0f, 5.0f);
+            dy = Math.Clamp(pump * amp * drive, -13.0f, 8.5f);
+            modeScaleBoost = Kick * 0.025f;
+        }
+        else if (mode == 2) // DIAGONAL KINETIC CROSS (Alternating diagonal punch on every beat!)
+        {
+            float diag = (e * 4.4f + punch * Kick * 4.2f) * amp * drive;
+            dx = Math.Clamp((beatAlt * diag * 0.85f + pan * 4.5f), -10.5f, 10.5f);
+            dy = Math.Clamp((-MathF.Abs(diag) * 0.92f + MathF.Sin(domAng) * 2.2f), -12.0f, 7.5f);
+            modeRotBoost = beatAlt * Kick * 0.030f;
+        }
+        else // Mode 1: STEREO LIQUID SWAY (Melodic / freeform stereo flow!)
+        {
+            float dirX = MathF.Cos(domAng + b * 0.22f) * punch * 3.8f + pan * (3.2f + Mid * 4.8f);
+            float dirY = MathF.Sin(domAng + b * 0.18f) * punch * 3.0f - sub * Kick * 4.0f;
+            dx = Math.Clamp((MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 2.2f + dirX * amp * drive), -9.5f, 9.5f);
+            dy = Math.Clamp(((-0.55f + 0.45f * wave) * e * 4.4f + dirY * amp * drive), -11.0f, 7.5f);
+        }
 
         if (textSafe)
         {
@@ -2445,8 +2500,8 @@ public static class MusicBounce
         }
 
         // Cover art / icons get full kinetic directional punch, scale shockwave & stereo/treble twist!
-        float sc = 1f + Math.Clamp((e * 0.044f + sub * Kick * 0.036f) * amp, 0f, 0.12f);
-        float ang = Math.Clamp((MathF.Sin(_phase * 1.07f + b * 2.31f) * e * (0.024f + cent * 0.022f) + pan * 0.032f + MathF.Cos(_highPhase + b) * air * 0.028f) * rotAmp, -0.085f, 0.085f);
+        float sc = 1f + Math.Clamp((e * 0.044f + sub * Kick * 0.038f + modeScaleBoost) * amp, 0f, 0.145f);
+        float ang = Math.Clamp((MathF.Sin(_phase * 1.07f + b * 2.31f) * e * (0.024f + cent * 0.022f) + pan * 0.034f + MathF.Cos(_highPhase + b) * air * 0.028f + modeRotBoost) * rotAmp, -0.095f, 0.095f);
 
         var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.5f);
         var local = Matrix3x2.CreateScale(sc, sc, center)
