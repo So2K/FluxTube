@@ -42,6 +42,7 @@ public static class UI
     public static bool BlockInput;           // a native child (the video) owns the mouse this frame
     private static int _active;
     private static bool _animate;
+    private static bool _middleOverLink;
     private static int _cursorHand;
     public static readonly long StartTick = Environment.TickCount64;
     public static double Dt = 1 / 60.0;
@@ -56,7 +57,7 @@ public static class UI
     public static int Id(string s, int i = 0) => HashCode.Combine(s, i);
     public static int Id(int a, int b) => HashCode.Combine(a, b);
 
-    public static void BeginFrame() { _cursorHand = 0; Sel.BeginFrame(); }
+    public static void BeginFrame() { _cursorHand = 0; _middleOverLink = false; Sel.BeginFrame(); }
 
     /// <summary>The pointer is over something clickable that is not a plain Click rectangle.</summary>
     public static void Hand() => _cursorHand++;
@@ -75,6 +76,7 @@ public static class UI
         BlockInput = false;
         Wheel = 0;
         _active = 0;
+        _middleOverLink = false;
         _dragScroll = 0;
         Modal = null;
         StopAutoScroll();
@@ -103,7 +105,12 @@ public static class UI
 
     public static bool MiddleClick(R r)
     {
-        if (!MiddleClicked || !Hover(r)) return false;
+        if ((MiddleDown || MiddleClicked) && !BlockInput && r.Contains(MiddleDownX, MiddleDownY)
+            && Gfx.Clip.Contains(MiddleDownX, MiddleDownY) && (Modal is not { } m || m.Contains(MiddleDownX, MiddleDownY)))
+        {
+            _middleOverLink = true;
+        }
+        if (!MiddleClicked || !Hover(r) || !r.Contains(MiddleDownX, MiddleDownY)) return false;
         MiddleClicked = false;
         return true;
     }
@@ -269,15 +276,6 @@ public static class UI
         s.Max = MathF.Max(0, contentH - view.H);
         if (s.Max > 0)
         {
-            // Hold-and-drag autoscroll: activates as soon as middle button is held and moved > 10px (never behind open menus)
-            if (_autoScrollId == 0 && Modal == null && MiddleDown && view.Contains(MiddleDownX, MiddleDownY) && Gfx.Clip.Contains(MiddleDownX, MiddleDownY)
-                && (MathF.Abs(MY - MiddleDownY) > 10 || Now - MiddleDownAt > 220))
-            {
-                _autoScrollId = id;
-                _autoScrollX = MiddleDownX;
-                _autoScrollY = MiddleDownY;
-                AutoScrollHold = true;
-            }
             if (_autoScrollId == id)
             {
                 float dy = MY - _autoScrollY;
@@ -367,15 +365,27 @@ public static class UI
         _scrollCandStack[_scrollDepth] = default;
         _pendingBarStack[_scrollDepth] = default;
 
-        // If user clicked MMB inside this scroll view and no card/tab consumed it, toggle browser autoscroll!
-        if (MiddleClicked && Modal == null && _autoScrollId == 0 && cand.Id != 0 && cand.View.Contains(MX, MY) && Gfx.Clip.Contains(MX, MY))
+        // Browser-style autoscroll: only activates when MMB was pressed on empty space (not over a video card / link).
+        if (!_middleOverLink && Modal == null && _autoScrollId == 0 && cand.Id != 0
+            && cand.View.Contains(MiddleDownX, MiddleDownY) && Gfx.Clip.Contains(MiddleDownX, MiddleDownY))
         {
-            _autoScrollId = cand.Id;
-            _autoScrollX = MX;
-            _autoScrollY = MY;
-            AutoScrollHold = false;
-            MiddleClicked = false;
-            Animate();
+            if (MiddleDown && (MathF.Abs(MY - MiddleDownY) > 10 || Now - MiddleDownAt > 220))
+            {
+                _autoScrollId = cand.Id;
+                _autoScrollX = MiddleDownX;
+                _autoScrollY = MiddleDownY;
+                AutoScrollHold = true;
+                Animate();
+            }
+            else if (MiddleClicked && cand.View.Contains(MX, MY) && Gfx.Clip.Contains(MX, MY))
+            {
+                _autoScrollId = cand.Id;
+                _autoScrollX = MX;
+                _autoScrollY = MY;
+                AutoScrollHold = false;
+                MiddleClicked = false;
+                Animate();
+            }
         }
         if (bar.Id != 0)
         {

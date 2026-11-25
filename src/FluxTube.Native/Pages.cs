@@ -196,18 +196,20 @@ public static class Cards
             if (overChannel)
             {
                 Gfx.Fill(new R(tx, cy + name.H - 1.5f, name.W, 1), Th.Text);
-                if (UI.Click(UI.Id(id, 9), overName ? chRect : avRect, playSfx: false)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Channel));
+                var targetR = overName ? chRect : avRect;
+                if (UI.MiddleClick(targetR)) Shell.OpenInNewTab("channel", v.ChannelId!, v.Channel);
+                else if (UI.Click(UI.Id(id, 9), targetR, playSfx: false)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Channel));
             }
         }
 
         if (v.PlaylistId != null)
         {
-            if (UI.Click(id, card)) App.Post(() => Shell.OpenPlaylist(v.PlaylistId, v.Title));
+            if (UI.MiddleClick(card)) Shell.OpenInNewTab("playlist", v.PlaylistId, v.Title);
+            else if (UI.Click(id, card)) App.Post(() => Shell.OpenPlaylist(v.PlaylistId, v.Title));
             return;
         }
         if (over) hover.Over(v);
-        // On the home feed, leave MMB to the scroll view's autoscroll handler.
-        if (source != "home" && UI.MiddleClick(card)) Shell.OpenVideoInNewTab(v);
+        if (UI.MiddleClick(card)) Shell.OpenVideoInNewTab(v);
         else if (overChannel) { }
         else if (UI.Click(id, card, playSfx: false)) App.Post(() => Shell.OpenVideo(v, source));
         else if (UI.RightClick(card)) Menus.Popup(MenuFor(v));
