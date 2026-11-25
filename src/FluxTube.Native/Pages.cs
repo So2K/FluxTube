@@ -1537,13 +1537,9 @@ public sealed class WatchPage : IPage
 
         // Keep the rating control visually consistent with the neighboring action pills.
         Gfx.Fill(pill, Th.Card, h / 2);
-        Gfx.PushClip(pill);
-        if (overL) Gfx.Fill(likeR, Th.Hover);
-        if (overD) Gfx.Fill(disR, Th.Hover);
-        Gfx.PopClip();
 
-        uint likeC = isLike ? Th.Brand : Th.Text;
-        uint disC = isDis ? Th.Brand : Th.Text;
+        uint likeC = isLike || overL ? Th.Brand : Th.Text;
+        uint disC = isDis || overD ? Th.Brand : Th.Text;
         Gfx.Icon(Th.Like, new R(likeR.X + 14, y, 18, h), 15.5f, likeC);
         Gfx.Draw(lr, likeR.X + 39, y + (h - lr.H) / 2, likeC);
         Gfx.Fill(new R(x + leftW, y + 9, 1, h - 18), Th.Line);

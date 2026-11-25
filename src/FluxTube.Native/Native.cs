@@ -134,6 +134,15 @@ public sealed unsafe class Edit
             App.Post(() => Focus(selectAll: false));
         }
 
+        // An unfocused Win32 child EDIT can display stale pixels over the swap chain.
+        // Draw its text with Direct2D until it actually needs native input/IME.
+        if (!Focused && !_pendingFocus)
+        {
+            _wantShow = false;
+            DrawFallback(box, padLeft, padRight);
+            return;
+        }
+
         var s = Gfx.Scale;
         if (_fontScale != s)
         {
@@ -163,14 +172,13 @@ public sealed unsafe class Edit
 
     private void DrawFallback(R box, float padLeft, float padRight)
     {
-        if (Multiline) return;
         float tw = MathF.Max(8, box.W - padLeft - padRight);
         string shown = _cachedText.Length > 0 ? _cachedText : _placeholder;
         if (shown.Length == 0) return;
         uint col = _cachedText.Length > 0 ? Th.Text : Th.Dim;
-        var run = Gfx.Text(shown, 14f, 400, tw, 1);
+        var run = Gfx.Text(shown, Multiline ? 13.5f : 14f, 400, tw, Multiline ? 0 : 1);
         Gfx.PushClip(box);
-        Gfx.Draw(run, box.X + padLeft, Gfx.Snap(box.Y + (box.H - run.H) / 2), col);
+        Gfx.Draw(run, box.X + padLeft, Gfx.Snap(Multiline ? box.Y + 10 : box.Y + (box.H - run.H) / 2), col);
         Gfx.PopClip();
     }
 
