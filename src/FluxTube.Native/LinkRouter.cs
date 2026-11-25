@@ -57,7 +57,16 @@ public static unsafe class LinkRouter
     /// </summary>
     public static bool TryHandleCliRoute(string[] args)
     {
-        if (args.Length == 0 || args.Contains("--test")) return false;
+        if (args.Contains("--test") || args.Contains("--bench") || args.Contains("--test-loopback")) return false;
+
+        if (args.Length == 0)
+        {
+            // Single-instance guard: double-clicking FluxTube shortcut while already running focuses the existing window in 5ms!
+            var running = W.FindWindowW("FluxTubeMain", null);
+            if (running != 0 && W.IsWindowEnabled(running) && SendUrlToWindow(running, "__activate__"))
+                return true;
+            return false;
+        }
 
         string? url = null;
         bool isRoute = false;
@@ -90,7 +99,7 @@ public static unsafe class LinkRouter
 
         // YouTube URL -> deliver directly to already-running FluxTube instance via WM_COPYDATA!
         var existing = W.FindWindowW("FluxTubeMain", null);
-        if (existing != 0 && SendUrlToWindow(existing, norm))
+        if (existing != 0 && W.IsWindowEnabled(existing) && SendUrlToWindow(existing, norm))
             return true;
 
         // No running FluxTube yet -> remember URL so Shell.Init opens it immediately on startup!
@@ -125,6 +134,16 @@ public static unsafe class LinkRouter
         if (cds.dwData != CopyDataMagic || cds.lpData == 0 || cds.cbData == 0 || cds.cbData > 16384) return false;
         var url = Encoding.UTF8.GetString((byte*)cds.lpData, (int)cds.cbData).Trim();
         if (url.Length == 0) return false;
+        if (url == "__activate__")
+        {
+            App.Post(() =>
+            {
+                if (W.IsIconic(App.Hwnd)) W.ShowWindow(App.Hwnd, 9 /*SW_RESTORE*/);
+                W.SetForegroundWindow(App.Hwnd);
+                App.Invalidate();
+            });
+            return true;
+        }
         App.Post(() => Shell.HandleDropped(url, newTab: true, backgroundTab: false));
         return true;
     }

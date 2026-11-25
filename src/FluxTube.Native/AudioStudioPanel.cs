@@ -133,7 +133,7 @@ public static class AudioStudioPanel
         _pendingSpeed = false;
         MpvPlayer.Instance.ApplyAudioDsp(syncSpeed);
         BgPlayers.ApplyAudioDsp(syncSpeed);
-        Shell.PushPlayerState();
+        if (syncSpeed) Shell.PushPlayerState();
         _saveDueAt = UI.Now + 350;
     }
 
@@ -348,17 +348,24 @@ public static class AudioStudioPanel
     private static void PickCustomIr(AppSettings s)
     {
         App.Post(() => Dialogs.PickFileAsync(
-            "WAV Impulse Response (*.wav)\0*.wav\0All files\0*.*\0\0",
+            "Impulse Response (*.wav;*.flac;*.mp3)\0*.wav;*.flac;*.mp3\0All files\0*.*\0\0",
             file =>
             {
                 if (string.IsNullOrWhiteSpace(file) || !File.Exists(file)) return;
-                s.CustomIrPath = file;
-                s.FxReverbRoom = "custom";
-                if (s.FxReverb < 8f) s.FxReverb = 36f;
-                AudioDsp.MarkCustom(s);
-                ApplyNow();
-                Shell.Toast(L.T("Загружен IR: ", "Loaded IR: ") + Path.GetFileName(file), Th.Good, 2400);
-                App.Invalidate();
+                _ = Task.Run(() =>
+                {
+                    ImpulseBank.PrepareCustomIr(file);
+                    App.Post(() =>
+                    {
+                        s.CustomIrPath = file;
+                        s.FxReverbRoom = "custom";
+                        if (s.FxReverb < 8f) s.FxReverb = 36f;
+                        AudioDsp.MarkCustom(s);
+                        ApplyNow();
+                        Shell.Toast(L.T("Загружен IR: ", "Loaded IR: ") + Path.GetFileName(file), Th.Good, 2400);
+                        App.Invalidate();
+                    });
+                });
             }));
     }
 
@@ -1260,26 +1267,36 @@ public static class AudioStudioPanel
         Gfx.Draw(L.T("HOT CUES (ЛКМ — поставить / прыгнуть · ПКМ — очистить)", "HOT CUES (click = set / jump · right-click = clear)"), mx, my, 10.5f, Th.Sub, 600);
         my += 16f;
         var cueKey = curVid ?? "_none";
-        if (!_hotCues.TryGetValue(cueKey, out var cues)) _hotCues[cueKey] = cues = new double?[4];
+        _hotCues.TryGetValue(cueKey, out var cues);
         float cueW = (mw - 18f) / 4f;
         for (int i = 0; i < 4; i++)
         {
             var cr = new R(mx + i * (cueW + 6f), my, cueW, 38f);
-            bool hasCue = cues[i].HasValue;
+            double? cueVal = cues != null ? cues[i] : null;
+            bool hasCue = cueVal.HasValue;
             uint col = CueColors[i];
             bool ov = UI.Hover(cr);
             Gfx.Fill(cr, hasCue ? Gfx.Fade(col, ov ? 0.36f : 0.25f) : Th.A(ov ? 0.12f : 0.06f), Gfx.Corner(9));
             Gfx.Stroke(cr, hasCue ? col : Gfx.Fade(col, ov ? 0.55f : 0.28f), Gfx.Corner(9), hasCue ? 1.4f : 1f);
             var topT = Gfx.Text($"CUE {i + 1}", 10f, 700);
-            var botT = Gfx.Text(hasCue ? Fmt.Time(cues[i]!.Value) : L.T("+ точка", "+ set"), 11.5f, hasCue ? 700 : 500);
+            var botT = Gfx.Text(hasCue ? Fmt.Time(cueVal!.Value) : L.T("+ точка", "+ set"), 11.5f, hasCue ? 700 : 500);
             Gfx.Draw(topT, cr.X + (cr.W - topT.W) * 0.5f, cr.Y + 5f, col);
             Gfx.Draw(botT, cr.X + (cr.W - botT.W) * 0.5f, cr.Y + 19f, hasCue ? 0xFFFFFFFF : Th.Sub);
             if (ov) UI.Hand();
-            if (UI.RightClick(cr)) { cues[i] = null; Sfx.Back(); }
+            if (UI.RightClick(cr)) { if (cues != null) cues[i] = null; Sfx.Back(); }
             else if (UI.Click(UI.Id("dj:cue", i), cr) && mpv.HasMedia)
             {
-                if (!hasCue) { cues[i] = mpv.TimePos; Sfx.Like(); }
-                else { mpv.SeekAbsolute(cues[i]!.Value); if (mpv.Paused) mpv.SetPause(false); Sfx.Tick(); }
+                if (!hasCue)
+                {
+                    if (cues == null)
+                    {
+                        if (_hotCues.Count > 64) _hotCues.Clear();
+                        _hotCues[cueKey] = cues = new double?[4];
+                    }
+                    cues[i] = mpv.TimePos;
+                    Sfx.Like();
+                }
+                else { mpv.SeekAbsolute(cueVal!.Value); if (mpv.Paused) mpv.SetPause(false); Sfx.Tick(); }
             }
         }
         my += 46f;

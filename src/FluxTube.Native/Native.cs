@@ -678,6 +678,8 @@ public static unsafe class Suggest
 public static unsafe partial class Dialogs
 {
     [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)] private static partial int MessageBoxW(nint h, string text, string caption, uint type);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static partial bool AllowSetForegroundWindow(int dwProcessId);
+    [LibraryImport("kernel32.dll")] private static partial int GetCurrentProcessId();
 
     [StructLayout(LayoutKind.Sequential)]
     private struct BROWSEINFOW { public nint hwndOwner, pidlRoot; public char* pszDisplayName, lpszTitle; public uint ulFlags; public nint lpfn, lParam; public int iImage; }
@@ -696,7 +698,52 @@ public static unsafe partial class Dialogs
     [LibraryImport("comdlg32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static partial bool GetOpenFileNameW(OPENFILENAMEW* ofn);
 
     private static int _dialogBusy;
+    private static int _ownerClassReg;
     public static bool IsDialogOpen => Volatile.Read(ref _dialogBusy) != 0;
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
+    private static nint OwnerProc(nint h, uint m, nuint w, nint l) => W.DefWindowProcW(h, m, w, l);
+
+    /// <summary>
+    /// Creates a tiny invisible same-thread popup window centered on App.Hwnd to own GetOpenFileNameW / SHBrowseForFolderW.
+    /// Avoids cross-thread hwndOwner attachment (which deadlocks Direct2D/OLE or opens behind App.Hwnd) AND never disables App.Hwnd!
+    /// </summary>
+    private static nint CreateSameThreadDialogOwner(int cx, int cy)
+    {
+        var inst = W.GetModuleHandleW(0);
+        if (Interlocked.CompareExchange(ref _ownerClassReg, 1, 0) == 0)
+        {
+            fixed (char* cls = "FluxDlgOwner")
+            {
+                var wc = new W.WNDCLASSEXW
+                {
+                    cbSize = (uint)sizeof(W.WNDCLASSEXW),
+                    lpfnWndProc = &OwnerProc,
+                    hInstance = inst,
+                    lpszClassName = cls,
+                };
+                W.RegisterClassExW(&wc);
+            }
+        }
+        var hwnd = W.CreateWindowExW(W.WS_EX_TOOLWINDOW | W.WS_EX_TOPMOST, "FluxDlgOwner", "", W.WS_POPUP, cx, cy, 1, 1, 0, 0, inst, 0);
+        if (hwnd != 0)
+        {
+            W.ShowWindow(hwnd, W.SW_SHOWNORMAL);
+            W.SetForegroundWindow(hwnd);
+        }
+        return hwnd;
+    }
+
+    private static (int X, int Y) GetMainCenterScreen()
+    {
+        if (App.Hwnd != 0)
+        {
+            W.RECT rc;
+            if (W.GetWindowRect(App.Hwnd, &rc))
+                return ((rc.L + rc.R) / 2, (rc.T + rc.B) / 2);
+        }
+        return (400, 300);
+    }
 
     private static void DrainMouseMessages()
     {
@@ -706,15 +753,18 @@ public static unsafe partial class Dialogs
 
     private static void RestoreMainWindow()
     {
-        if (App.Hwnd != 0)
+        if (App.Hwnd != 0 && !App.Test)
         {
-            W.EnableWindow(App.Hwnd, 1);
+            if (!W.IsWindowEnabled(App.Hwnd)) W.EnableWindow(App.Hwnd, 1);
             W.ReleaseCapture();
             W.SetForegroundWindow(App.Hwnd);
             W.SetFocus(App.Hwnd);
             DrainMouseMessages();
         }
-        UI.ResetInput();
+        UI.Down = UI.Pressed = UI.Released = UI.RightClicked = UI.MiddleDown = UI.MiddleClicked = false;
+        UI.BlockInput = false;
+        UI.Wheel = 0;
+        UI.StopAutoScroll();
         App.Invalidate();
     }
 
@@ -731,8 +781,8 @@ public static unsafe partial class Dialogs
     }
 
     /// <summary>
-    /// Runs the native Windows Explorer file picker on a dedicated STA thread so it NEVER nests inside WM_POST
-    /// or leaves App.Hwnd disabled / click-locked on repeated invocations.
+    /// Runs the native Windows Explorer file picker on a dedicated STA thread with its own same-thread owner HWND:
+    /// NEVER disables App.Hwnd (clicks in FluxTube never break!) and ALWAYS opens cleanly in the foreground.
     /// </summary>
     public static void PickFileAsync(string filter, Action<string> onPicked)
     {
@@ -741,60 +791,69 @@ public static unsafe partial class Dialogs
         AccountMenu.Close();
         Suggest.Hide();
         W.ReleaseCapture();
-        UI.ResetInput();
-        var owner = App.Hwnd;
-        if (owner != 0) W.EnableWindow(owner, 0);
+        UI.Down = UI.Pressed = UI.Released = UI.RightClicked = UI.MiddleDown = UI.MiddleClicked = false;
+        var (cx, cy) = GetMainCenterScreen();
+        AllowSetForegroundWindow(GetCurrentProcessId());
 
-        var t = new Thread(() =>
+        try
         {
-            string? picked = null;
-            try
+            var t = new Thread(() =>
             {
-                W.CoInitializeEx(0, 0x2 /*COINIT_APARTMENTTHREADED*/);
-                var buf = new char[4096];
-                fixed (char* pBuf = buf)
-                fixed (char* pFilter = filter)
+                string? picked = null;
+                nint dlgOwner = 0;
+                int hrCo = -1;
+                try
                 {
-                    pBuf[0] = '\0';
-                    var ofn = new OPENFILENAMEW
+                    hrCo = W.CoInitializeEx(0, 0x2 /*COINIT_APARTMENTTHREADED*/);
+                    dlgOwner = CreateSameThreadDialogOwner(cx, cy);
+                    var buf = new char[4096];
+                    fixed (char* pBuf = buf)
+                    fixed (char* pFilter = filter)
                     {
-                        lStructSize = (uint)sizeof(OPENFILENAMEW),
-                        hwndOwner = owner,
-                        lpstrFilter = pFilter,
-                        lpstrFile = pBuf,
-                        nMaxFile = (uint)buf.Length,
-                        Flags = 0x00080000 | 0x00001000 | 0x00000800 | 0x00000008 /*EXPLORER|FILEMUSTEXIST|PATHMUSTEXIST|NOCHANGEDIR*/,
-                    };
-                    if (GetOpenFileNameW(&ofn))
-                        picked = new string(pBuf);
+                        pBuf[0] = '\0';
+                        var ofn = new OPENFILENAMEW
+                        {
+                            lStructSize = (uint)sizeof(OPENFILENAMEW),
+                            hwndOwner = dlgOwner,
+                            lpstrFilter = pFilter,
+                            lpstrFile = pBuf,
+                            nMaxFile = (uint)buf.Length,
+                            Flags = 0x00080000 | 0x00001000 | 0x00000800 | 0x00000008 /*EXPLORER|FILEMUSTEXIST|PATHMUSTEXIST|NOCHANGEDIR*/,
+                        };
+                        if (GetOpenFileNameW(&ofn))
+                            picked = new string(pBuf);
+                    }
                 }
-            }
-            catch (Exception e)
-            {
-                Services.Paths.Log("PickFileAsync: " + e.Message);
-            }
-            finally
-            {
-                if (owner != 0)
+                catch (Exception e)
                 {
-                    W.EnableWindow(owner, 1);
-                    W.SetForegroundWindow(owner);
+                    Services.Paths.Log("PickFileAsync: " + e.Message);
                 }
-                Interlocked.Exchange(ref _dialogBusy, 0);
-                var result = picked;
-                App.Post(() =>
+                finally
                 {
-                    RestoreMainWindow();
-                    if (!string.IsNullOrEmpty(result)) onPicked(result);
-                });
-            }
-        })
-        { IsBackground = true, Name = "file-dialog" };
-        t.SetApartmentState(ApartmentState.STA);
-        t.Start();
+                    if (dlgOwner != 0) W.DestroyWindow(dlgOwner);
+                    if (hrCo >= 0) W.CoUninitialize();
+                    Interlocked.Exchange(ref _dialogBusy, 0);
+                    var result = picked;
+                    App.Post(() =>
+                    {
+                        RestoreMainWindow();
+                        if (!string.IsNullOrEmpty(result)) onPicked(result);
+                    });
+                }
+            })
+            { IsBackground = true, Name = "file-dialog" };
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+        }
+        catch (Exception e)
+        {
+            Interlocked.Exchange(ref _dialogBusy, 0);
+            Services.Paths.Log("PickFileAsync start: " + e.Message);
+            RestoreMainWindow();
+        }
     }
 
-    /// <summary>Runs the native folder browser on a dedicated STA thread, always restoring focus & click handling cleanly.</summary>
+    /// <summary>Runs the native folder browser on a dedicated STA thread with a same-thread owner HWND (never disables App.Hwnd).</summary>
     public static void PickFolderAsync(string title, Action<string> onPicked)
     {
         if (Interlocked.CompareExchange(ref _dialogBusy, 1, 0) != 0) return;
@@ -802,57 +861,66 @@ public static unsafe partial class Dialogs
         AccountMenu.Close();
         Suggest.Hide();
         W.ReleaseCapture();
-        UI.ResetInput();
-        var owner = App.Hwnd;
-        if (owner != 0) W.EnableWindow(owner, 0);
+        UI.Down = UI.Pressed = UI.Released = UI.RightClicked = UI.MiddleDown = UI.MiddleClicked = false;
+        var (cx, cy) = GetMainCenterScreen();
+        AllowSetForegroundWindow(GetCurrentProcessId());
 
-        var t = new Thread(() =>
+        try
         {
-            string? picked = null;
-            try
+            var t = new Thread(() =>
             {
-                W.CoInitializeEx(0, 0x2 /*COINIT_APARTMENTTHREADED*/);
-                var buf = new char[1024];
-                fixed (char* pBuf = buf)
-                fixed (char* pTitle = title)
+                string? picked = null;
+                nint dlgOwner = 0;
+                int hrCo = -1;
+                try
                 {
-                    var bi = new BROWSEINFOW
+                    hrCo = W.CoInitializeEx(0, 0x2 /*COINIT_APARTMENTTHREADED*/);
+                    dlgOwner = CreateSameThreadDialogOwner(cx, cy);
+                    var buf = new char[1024];
+                    fixed (char* pBuf = buf)
+                    fixed (char* pTitle = title)
                     {
-                        hwndOwner = owner,
-                        pszDisplayName = pBuf,
-                        lpszTitle = pTitle,
-                        ulFlags = 0x0001 | 0x0040 /*RETURNONLYFSDIRS|NEWDIALOGSTYLE*/,
-                    };
-                    var pidl = SHBrowseForFolderW(&bi);
-                    if (pidl != 0)
-                    {
-                        if (SHGetPathFromIDListW(pidl, pBuf)) picked = new string(pBuf);
-                        CoTaskMemFree(pidl);
+                        var bi = new BROWSEINFOW
+                        {
+                            hwndOwner = dlgOwner,
+                            pszDisplayName = pBuf,
+                            lpszTitle = pTitle,
+                            ulFlags = 0x0001 | 0x0040 /*RETURNONLYFSDIRS|NEWDIALOGSTYLE*/,
+                        };
+                        var pidl = SHBrowseForFolderW(&bi);
+                        if (pidl != 0)
+                        {
+                            if (SHGetPathFromIDListW(pidl, pBuf)) picked = new string(pBuf);
+                            CoTaskMemFree(pidl);
+                        }
                     }
                 }
-            }
-            catch (Exception e)
-            {
-                Services.Paths.Log("PickFolderAsync: " + e.Message);
-            }
-            finally
-            {
-                if (owner != 0)
+                catch (Exception e)
                 {
-                    W.EnableWindow(owner, 1);
-                    W.SetForegroundWindow(owner);
+                    Services.Paths.Log("PickFolderAsync: " + e.Message);
                 }
-                Interlocked.Exchange(ref _dialogBusy, 0);
-                var result = picked;
-                App.Post(() =>
+                finally
                 {
-                    RestoreMainWindow();
-                    if (!string.IsNullOrEmpty(result)) onPicked(result);
-                });
-            }
-        })
-        { IsBackground = true, Name = "folder-dialog" };
-        t.SetApartmentState(ApartmentState.STA);
-        t.Start();
+                    if (dlgOwner != 0) W.DestroyWindow(dlgOwner);
+                    if (hrCo >= 0) W.CoUninitialize();
+                    Interlocked.Exchange(ref _dialogBusy, 0);
+                    var result = picked;
+                    App.Post(() =>
+                    {
+                        RestoreMainWindow();
+                        if (!string.IsNullOrEmpty(result)) onPicked(result);
+                    });
+                }
+            })
+            { IsBackground = true, Name = "folder-dialog" };
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+        }
+        catch (Exception e)
+        {
+            Interlocked.Exchange(ref _dialogBusy, 0);
+            Services.Paths.Log("PickFolderAsync start: " + e.Message);
+            RestoreMainWindow();
+        }
     }
 }

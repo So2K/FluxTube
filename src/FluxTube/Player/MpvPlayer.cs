@@ -206,16 +206,11 @@ public sealed class MpvPlayer : IDisposable
             Command("seek", "0", "relative+exact");
     }
 
-    /// <summary>Ensures mpv's live vid property matches VideoEnabled (guards against any race during loadfile).</summary>
+    /// <summary>Ensures mpv's live vid property matches VideoEnabled asynchronously (zero synchronous mpv_get_property stall!).</summary>
     public void EnsureVideoTrackSynced()
     {
         if (!IsReady || !VideoEnabled) return;
-        var cur = GetString("vid");
-        if (string.Equals(cur, "no", StringComparison.OrdinalIgnoreCase))
-        {
-            Set("vid", "auto");
-            if (HasMedia) Command("seek", "0", "relative+exact");
-        }
+        Set("vid", "auto");
     }
 
     /// <summary>Smoothly ramps mpv volume to target (0..150) over ~100ms instead of a harsh step jump.</summary>

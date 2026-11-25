@@ -796,7 +796,6 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                         : L.T("Вы не вошли: лента собрана из похожих на ваши последние просмотры.", "Guest mode: feed built from videos related to your recent watches.");
                 }
                 Cards.WithProgress(page);
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false); // the parsed JSON tree is garbage now
                 App.Post(() =>
                 {
                     if (gen != _gen) return;
@@ -1612,7 +1611,6 @@ public sealed class WatchPage : IPage
 
     private float DrawRow(CRow row, float x0, float y, float w, R view, float avatar)
     {
-        PageBeatMotion.Current?.At(x0 + w / 2, y + 30);
         int i = row.RowId;
         var c = row.C;
         var tw = w - avatar - 16;
@@ -1625,6 +1623,7 @@ public sealed class WatchPage : IPage
         var h = 22 + text.H + (longText ? 22 : 0) + 34 + (hasReplies ? 6 : 0);
         if (text.Layout != null && full.Layout != null) { row.W = tw; row.H = h; row.SizedOpen = row.Open; }
         if (y + h <= view.Y - 20 || y >= view.Bottom + 20) return y + h;
+        PageBeatMotion.Current?.At(x0 + w / 2, y + 30);
 
         Cards.Avatar(x0, y, avatar, c.Avatar, c.Author.TrimStart('@'));
         if (UI.RightClick(new R(x0, y, w, h - 8)))
@@ -1743,7 +1742,12 @@ public sealed class WatchPage : IPage
         {
             var sOpt = AppSettings.Current;
             bool audioStage = sOpt.AudioOnlyMode && !Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id;
-            if (!audioStage) Ambient.Draw(video, id, isShort: false);
+            if (!audioStage)
+            {
+                Ambient.Draw(video, id, isShort: false);
+                if (Shell.VideoBeatGlow > 0.02f && !Pip.Active && MpvPlayer.Instance.CurrentVideoId == id)
+                    Gfx.Stroke(video.Inset(-1.5f), Gfx.Fade(Th.Brand, Shell.VideoBeatGlow * 0.52f), Gfx.Corner(13.5f), 2.0f);
+            }
             Gfx.Fill(video, 0xFF0A0A0E, 12);
             if (!audioStage) Shell.WantVideo(video, id, clip, radius: 12);
             if (Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id)
@@ -2251,13 +2255,16 @@ public sealed class WatchPage : IPage
 
         var view = new R(x0, r.Y, mainW + 12, r.H);
         var scroll = UI.BeginScroll(_infoScroll, view, topPad + videoH + infoContentH);
-        var video = new R(videoX, Gfx.Snap(view.Y + topPad - scroll), videoW, videoH);
-        using var pageBeat = new PageBeatMotion(video, MpvPlayer.Instance.CurrentVideoId == id);
-        float pageCenterX = video.X + video.W / 2;
-        pageBeat.At(pageCenterX, video.Y + video.H / 2, AppSettings.Current.AudioOnlyMode);
+        bool beatHere = MpvPlayer.Instance.CurrentVideoId == id && !AppSettings.Current.AudioOnlyMode && !Pip.Active;
+        var vShift = beatHere ? Shell.VideoBeatShift : default;
+        var videoBase = new R(videoX, Gfx.Snap(view.Y + topPad - scroll), videoW, videoH);
+        var video = vShift == default ? videoBase : new R(Gfx.Snap(videoBase.X + vShift.X), Gfx.Snap(videoBase.Y + vShift.Y), videoW, videoH);
+        using var pageBeat = new PageBeatMotion(videoBase, MpvPlayer.Instance.CurrentVideoId == id);
+        float pageCenterX = videoBase.X + videoBase.W / 2;
+        pageBeat.At(pageCenterX, videoBase.Y + videoBase.H / 2, AppSettings.Current.AudioOnlyMode);
         DrawVideoBox(video, view);
-        pageBeat.At(pageCenterX, video.Bottom + 40);
-        float y = video.Bottom + 12;
+        pageBeat.At(pageCenterX, videoBase.Bottom + 40);
+        float y = videoBase.Bottom + 12;
 
         // In normal video mode, no waveform strip under the player — instead feed timed comment avatar circles
         // directly to the mpv media player bar (fluxosc.lua) right above the seekbar!
@@ -2577,7 +2584,6 @@ public sealed class WatchPage : IPage
             var v = _related[i];
             float cx = x + (i % cols) * (cardW + gap);
             float cy = y + (i / cols) * rowH;
-            PageBeatMotion.Current?.At(cx + cardW / 2, cy + rowH / 2);
             var card = new R(cx, cy, cardW, rowH - 10);
             if (card.Bottom < view.Y - 40 || card.Y > view.Bottom + 40)
             {
@@ -2586,6 +2592,7 @@ public sealed class WatchPage : IPage
                     Images.Get(v.Thumb720, cardW, thumbH);
                 continue;
             }
+            PageBeatMotion.Current?.At(cx + cardW / 2, cy + rowH / 2);
             Cards.GridCard(card, thumbH, v, UI.Id(_relScroll, i), _hover, RelSource);
             if (_seen.Add(v.VideoId)) LogSeen(v);
         }

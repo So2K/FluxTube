@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using FluxTube.Models;
 using Microsoft.Data.Sqlite;
 
@@ -8,6 +9,13 @@ public static class Db
 {
     private static readonly SqliteConnection Conn;
     private static readonly object Lock = new();
+    private static readonly ConcurrentQueue<Action> _writeQueue = new();
+    private static readonly ManualResetEventSlim _writeWake = new(false);
+    private static readonly Thread _writerThread;
+    private static volatile bool _shuttingDown;
+    private static long _nextWatchSeed;
+    // Write-through RAM cache for O(1) zero-lock ResumePosition & ProgressFor on the UI thread!
+    private static readonly ConcurrentDictionary<string, (double Pos, double Dur)> _progressCache = new(StringComparer.Ordinal);
 
     static Db()
     {
@@ -16,6 +24,7 @@ public static class Db
         Exec("""
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=NORMAL;
+            PRAGMA temp_store=MEMORY;
             PRAGMA busy_timeout=5000;
             CREATE TABLE IF NOT EXISTS watch (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,10 +51,72 @@ public static class Db
                 video_id TEXT NOT NULL, itag INTEGER NOT NULL, length INTEGER, mime TEXT, ranges TEXT, bytes INTEGER DEFAULT 0,
                 PRIMARY KEY (video_id, itag));
             """);
+        _nextWatchSeed = Math.Max(Convert.ToInt64(Scalar("SELECT COALESCE(MAX(id), 0) FROM watch") ?? 0L), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 100);
+        _writerThread = new Thread(WriterLoop) { IsBackground = true, Name = "flux-db-writer", Priority = ThreadPriority.BelowNormal };
+        _writerThread.Start();
     }
 
-    /// <summary>Opens the DB and touches the hot indexes off the UI thread at startup.</summary>
-    public static void Warm() => Scalar("SELECT count(*) FROM watch");
+    private static void EnqueueWrite(Action work)
+    {
+        if (_shuttingDown)
+        {
+            try { lock (Lock) work(); } catch { }
+            return;
+        }
+        _writeQueue.Enqueue(work);
+        _writeWake.Set();
+    }
+
+    private static void FlushWriteBatch()
+    {
+        if (_writeQueue.IsEmpty) return;
+        lock (Lock)
+        {
+            if (_writeQueue.IsEmpty) return;
+            using var tx = Conn.BeginTransaction();
+            int n = 0;
+            while (n < 256 && _writeQueue.TryDequeue(out var act))
+            {
+                try { act(); } catch (Exception e) { Paths.Log("db async: " + e.Message); }
+                n++;
+            }
+            tx.Commit();
+        }
+    }
+
+    private static void WriterLoop()
+    {
+        while (!_shuttingDown)
+        {
+            _writeWake.Wait(220);
+            _writeWake.Reset();
+            if (!_writeQueue.IsEmpty)
+            {
+                if (!_shuttingDown) Thread.Sleep(45); // coalesce scroll bursts (50 Seen cards -> 1 SQLite transaction!)
+                while (!_writeQueue.IsEmpty) FlushWriteBatch();
+            }
+        }
+    }
+
+    public static void Flush()
+    {
+        try { while (!_writeQueue.IsEmpty) FlushWriteBatch(); } catch { }
+    }
+
+    /// <summary>Opens the DB, preloads recent resume positions into RAM, and prunes ancient seen rows off the UI thread.</summary>
+    public static void Warm()
+    {
+        try
+        {
+            foreach (var (vid, p, d) in Query("SELECT video_id, position_s, duration_s FROM watch ORDER BY last_at ASC LIMIT 2000",
+                         r => (r.GetString(0), r.GetDouble(1), r.GetDouble(2))))
+            {
+                _progressCache[vid] = (p, d);
+            }
+            EnqueueWrite(() => Exec("DELETE FROM seen WHERE id NOT IN (SELECT id FROM seen ORDER BY seen_at DESC LIMIT 12000)"));
+        }
+        catch { }
+    }
 
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
@@ -90,43 +161,65 @@ public static class Db
 
     // ---------------- watch history ----------------
 
+    private static readonly ConcurrentDictionary<long, string> _watchRowVid = new();
+
     public static long StartWatch(VideoItem v, string source)
     {
-        lock (Lock)
-        {
-            Exec("INSERT INTO watch(video_id,title,channel,channel_id,started_at,last_at,source) VALUES($v,$t,$c,$ci,$n,$n,$s)",
-                ("$v", v.VideoId), ("$t", v.Title), ("$c", v.Channel), ("$ci", v.ChannelId), ("$n", Now), ("$s", source));
-            return (long)Scalar("SELECT last_insert_rowid()")!;
-        }
+        long id = Interlocked.Increment(ref _nextWatchSeed);
+        var vid = v.VideoId;
+        var title = v.Title;
+        var ch = v.Channel;
+        var cid = v.ChannelId;
+        var now = Now;
+        if (_watchRowVid.Count > 512) _watchRowVid.Clear();
+        _watchRowVid[id] = vid;
+        EnqueueWrite(() => Exec("INSERT INTO watch(id,video_id,title,channel,channel_id,started_at,last_at,source) VALUES($id,$v,$t,$c,$ci,$n,$n,$s)",
+            ("$id", id), ("$v", vid), ("$t", title), ("$c", ch), ("$ci", cid), ("$n", now), ("$s", source)));
+        return id;
     }
 
     public static void UpdateWatch(long id, string? title, string? channel, double position, double duration, double watchedDelta)
-        => Exec("""
+    {
+        if (_watchRowVid.TryGetValue(id, out var vid))
+        {
+            double prevDur = _progressCache.TryGetValue(vid, out var prev) ? prev.Dur : 0;
+            _progressCache[vid] = (position, duration > 0 ? duration : prevDur);
+        }
+        var now = Now;
+        EnqueueWrite(() => Exec("""
             UPDATE watch SET position_s=$p, duration_s=CASE WHEN $d>0 THEN $d ELSE duration_s END,
               watched_s=watched_s+$w, last_at=$n,
               title=COALESCE(NULLIF($t,''),title), channel=COALESCE(NULLIF($c,''),channel)
             WHERE id=$id
-            """, ("$p", position), ("$d", duration), ("$w", watchedDelta), ("$n", Now), ("$t", title), ("$c", channel), ("$id", id));
+            """, ("$p", position), ("$d", duration), ("$w", watchedDelta), ("$n", now), ("$t", title), ("$c", channel), ("$id", id)));
+    }
 
     /// <summary>Updates the latest watch row for videoId without inserting blank ghost rows in History.</summary>
     public static void UpdateLatestPosition(string videoId, double position, double duration)
     {
         if (string.IsNullOrEmpty(videoId) || position <= 1) return;
-        lock (Lock)
+        double prevDur = _progressCache.TryGetValue(videoId, out var prev) ? prev.Dur : 0;
+        _progressCache[videoId] = (position, duration > 0 ? duration : prevDur);
+        var now = Now;
+        EnqueueWrite(() =>
         {
             var id = Scalar("SELECT id FROM watch WHERE video_id=$v ORDER BY last_at DESC LIMIT 1", ("$v", videoId));
             if (id is long rowId)
                 Exec("UPDATE watch SET position_s=$p, duration_s=CASE WHEN $d>0 THEN $d ELSE duration_s END, last_at=$n WHERE id=$id",
-                    ("$p", position), ("$d", duration), ("$n", Now), ("$id", rowId));
-        }
+                    ("$p", position), ("$d", duration), ("$n", now), ("$id", rowId));
+        });
     }
 
     public static void Shutdown()
     {
+        _shuttingDown = true;
+        _writeWake.Set();
+        try { _writerThread.Join(1200); } catch { }
         lock (Lock)
         {
             try
             {
+                while (!_writeQueue.IsEmpty) FlushWriteBatch();
                 Exec("PRAGMA wal_checkpoint(TRUNCATE);");
                 Conn.Close();
             }
@@ -134,13 +227,19 @@ public static class Db
         }
     }
 
-    /// <summary>Last saved position for resume; null when finished or never watched.</summary>
+    /// <summary>Last saved position for resume; O(1) lock-free RAM hit when prewarmed, SQLite fallback otherwise.</summary>
     public static double? ResumePosition(string videoId)
     {
+        if (_progressCache.TryGetValue(videoId, out var cached))
+        {
+            if (cached.Pos < 10 || (cached.Dur > 0 && cached.Pos > cached.Dur - 15)) return null;
+            return cached.Pos;
+        }
         var rows = Query("SELECT position_s, duration_s FROM watch WHERE video_id=$v ORDER BY last_at DESC LIMIT 1",
             r => (r.GetDouble(0), r.GetDouble(1)), ("$v", videoId));
         if (rows.Count == 0) return null;
         var (p, d) = rows[0];
+        _progressCache[videoId] = (p, d);
         if (p < 10 || (d > 0 && p > d - 15)) return null;
         return p;
     }
@@ -150,11 +249,24 @@ public static class Db
         var list = ids.Distinct().ToList();
         var result = new Dictionary<string, double>();
         if (list.Count == 0) return result;
-        var ps = string.Join(',', list.Select((_, i) => "$p" + i));
-        var args = list.Select((v, i) => ("$p" + i, (object?)v)).ToArray();
+        var missing = new List<string>();
+        foreach (var id in list)
+        {
+            if (_progressCache.TryGetValue(id, out var c))
+            {
+                if (c.Dur > 0) result[id] = Math.Clamp(c.Pos / c.Dur, 0, 1);
+            }
+            else missing.Add(id);
+        }
+        if (missing.Count == 0) return result;
+        var ps = string.Join(',', missing.Select((_, i) => "$p" + i));
+        var args = missing.Select((v, i) => ("$p" + i, (object?)v)).ToArray();
         foreach (var (id, p, d) in Query($"SELECT video_id, position_s, duration_s FROM watch WHERE video_id IN ({ps}) ORDER BY last_at",
                      r => (r.GetString(0), r.GetDouble(1), r.GetDouble(2)), args))
+        {
+            _progressCache[id] = (p, d);
             if (d > 0) result[id] = Math.Clamp(p / d, 0, 1);
+        }
         return result;
     }
 
@@ -178,17 +290,18 @@ public static class Db
                 r.GetDouble(5), r.GetDouble(6), r.GetDouble(7), FromUnix(r.GetInt64(8)), FromUnix(r.GetInt64(9)), Str(r, 10)),
             ("$f", string.IsNullOrWhiteSpace(filter) ? null : $"%{filter}%"), ("$l", limit));
 
-    public static void DeleteWatch(long id) => Exec("DELETE FROM watch WHERE id=$id", ("$id", id));
-    public static void ClearHistory() => Exec("DELETE FROM watch");
+    public static void DeleteWatch(long id) => EnqueueWrite(() => Exec("DELETE FROM watch WHERE id=$id", ("$id", id)));
+    public static void ClearHistory() { _progressCache.Clear(); EnqueueWrite(() => Exec("DELETE FROM watch")); }
 
     public static List<string> RecentWatchedIds(int n)
-        => Query("SELECT video_id FROM watch GROUP BY video_id ORDER BY MAX(last_at) DESC LIMIT $n", r => r.GetString(0), ("$n", n));
+        => Query("SELECT video_id FROM watch ORDER BY last_at DESC LIMIT $n", r => r.GetString(0), ("$n", Math.Max(n * 5, 24)))
+            .Distinct(StringComparer.Ordinal).Take(n).ToList();
 
     // ---------------- seen (impressions) ----------------
 
     private static readonly Dictionary<string, long> SeenRecently = new();
 
-    /// <summary>Records that a card was actually shown on screen. Same video+source within 30 min counts once.</summary>
+    /// <summary>Records that a card was actually shown on screen. Batched on background SQLite writer thread (zero scroll stalls).</summary>
     public static void Seen(VideoItem v, string source)
     {
         var key = v.VideoId + "|" + source;
@@ -196,12 +309,14 @@ public static class Db
         lock (SeenRecently)
         {
             if (SeenRecently.TryGetValue(key, out var t) && now - t < 1800) return;
-            if (SeenRecently.Count > 4000) SeenRecently.Clear(); // a long session: start over rather than grow
+            if (SeenRecently.Count > 4000) SeenRecently.Clear();
             SeenRecently[key] = now;
         }
-        Exec("INSERT INTO seen(video_id,title,channel,channel_id,duration,meta,avatar,source,seen_at) VALUES($v,$t,$c,$ci,$d,$m,$a,$s,$n)",
-            ("$v", v.VideoId), ("$t", v.Title), ("$c", v.Channel), ("$ci", v.ChannelId), ("$d", v.Duration), ("$m", v.Meta),
-            ("$a", v.AvatarUrl), ("$s", source), ("$n", now));
+        var vid = v.VideoId; var title = v.Title; var ch = v.Channel; var cid = v.ChannelId;
+        var dur = v.Duration; var meta = v.Meta; var av = v.AvatarUrl;
+        EnqueueWrite(() => Exec("INSERT INTO seen(video_id,title,channel,channel_id,duration,meta,avatar,source,seen_at) VALUES($v,$t,$c,$ci,$d,$m,$a,$s,$n)",
+            ("$v", vid), ("$t", title), ("$c", ch), ("$ci", cid), ("$d", dur), ("$m", meta),
+            ("$a", av), ("$s", source), ("$n", now)));
     }
 
     public sealed record SeenRow(VideoItem Video, string Source, DateTime At);
@@ -261,10 +376,10 @@ public static class Db
     }
 
     public static void CacheSaveStream(string videoId, int itag, long length, string mime, string ranges, long bytes)
-        => Exec("""
+        => EnqueueWrite(() => Exec("""
             INSERT INTO cache_stream(video_id,itag,length,mime,ranges,bytes) VALUES($v,$i,$l,$m,$r,$b)
             ON CONFLICT(video_id,itag) DO UPDATE SET length=$l, mime=$m, ranges=$r, bytes=$b
-            """, ("$v", videoId), ("$i", itag), ("$l", length), ("$m", mime), ("$r", ranges), ("$b", bytes));
+            """, ("$v", videoId), ("$i", itag), ("$l", length), ("$m", mime), ("$r", ranges), ("$b", bytes)));
 
     public static (string Quality, int Vitag, int Aitag, int Plays)? CacheVideo(string videoId)
     {
@@ -275,10 +390,13 @@ public static class Db
 
     /// <summary>Creates or refreshes the entry. A different quality or format replaces the old one (its files are stale).</summary>
     public static void CacheTouch(string videoId, string quality, int vitag, int aitag, bool addPlay)
-        => Exec("""
+    {
+        var now = Now;
+        EnqueueWrite(() => Exec("""
             INSERT INTO cache_video(video_id,quality,vitag,aitag,plays,last_play,created) VALUES($v,$q,$vi,$ai,$p,$n,$n)
             ON CONFLICT(video_id) DO UPDATE SET quality=$q, vitag=$vi, aitag=$ai, plays=plays+$p, last_play=$n
-            """, ("$v", videoId), ("$q", quality), ("$vi", vitag), ("$ai", aitag), ("$p", addPlay ? 1 : 0), ("$n", Now));
+            """, ("$v", videoId), ("$q", quality), ("$vi", vitag), ("$ai", aitag), ("$p", addPlay ? 1 : 0), ("$n", now)));
+    }
 
     public static List<(string Id, int Plays, long Last, long Bytes)> CacheVideos()
         => Query("""
@@ -297,11 +415,21 @@ public static class Db
 
 public static class Fmt
 {
+    private static readonly string?[] _timeMemo = new string?[7201];
+
     public static string Time(double s)
     {
         if (s <= 0 || double.IsNaN(s)) return "";
-        var t = TimeSpan.FromSeconds(s);
-        return t.TotalHours >= 1 ? $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}" : $"{t.Minutes}:{t.Seconds:00}";
+        int sec = (int)s;
+        if ((uint)sec <= 7200u)
+            return _timeMemo[sec] ??= FormatTimeSec(sec);
+        return FormatTimeSec(sec);
+    }
+
+    private static string FormatTimeSec(int sec)
+    {
+        int h = sec / 3600, m = (sec % 3600) / 60, sc = sec % 60;
+        return h >= 1 ? $"{h}:{m:00}:{sc:00}" : $"{m}:{sc:00}";
     }
 
     public static string When(DateTime t)

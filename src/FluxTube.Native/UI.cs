@@ -357,7 +357,10 @@ public static class UI
             if (MathF.Abs(s.VelY) < 25f) s.VelY = 0f;
         }
 
-        _mbActiveStack[_scrollDepth] = Gfx.PushMotionBlur(view, 0f, -s.VelY);
+        // Skip full-viewport DirectionalBlur over live hardware video child HWND so 4K60 mpv keeps 100% GPU bandwidth!
+        bool liveVideoScroll = !Services.AppSettings.Current.AudioOnlyMode && !Pip.Active
+            && Shell.Current is FluxTube.Pages.WatchPage wpMb && Shell.VideoShown(wpMb.Video.VideoId);
+        _mbActiveStack[_scrollDepth] = !liveVideoScroll && Gfx.PushMotionBlur(view, 0f, -s.VelY);
         _scrollDepth++;
         Gfx.PushClip(view);
         // Sub-pixel smooth scroll while moving (silky at 120-240Hz); snap to crisp physical pixel when settled

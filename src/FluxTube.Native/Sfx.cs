@@ -97,8 +97,41 @@ public static partial class Sfx
     private static readonly Dictionary<string, nint> _rendered = new();
     private static readonly nint[] _volTierBufs = new nint[VolTiers];
     private static readonly object _lock = new();
-    private static volatile bool _ready;
+    private static readonly AutoResetEvent _playWake = new(false);
+    private static Thread? _playThread;
+    private static nint _pendingSoundPtr;
+    private static volatile bool _ready, _sfxDisposed;
     private static long _lastTickAt, _lastClickAt, _lastVolAt;
+
+    /// <summary>Dispatches PlaySoundW off the Win32 UI thread so winmm waveOutReset NEVER stalls 144Hz rendering!</summary>
+    private static unsafe void EnqueuePlayPtr(nint ptr)
+    {
+        if (ptr == 0 || _sfxDisposed) return;
+        if (_playThread == null)
+        {
+            lock (_lock)
+            {
+                if (_playThread == null)
+                {
+                    _playThread = new Thread(() =>
+                    {
+                        while (!_sfxDisposed)
+                        {
+                            _playWake.WaitOne(2000);
+                            if (_sfxDisposed) break;
+                            var p = Interlocked.Exchange(ref _pendingSoundPtr, 0);
+                            if (p != 0)
+                                try { PlaySoundW((byte*)p, 0, SND_MEMORY | SND_ASYNC | SND_NODEFAULT); } catch { }
+                        }
+                    })
+                    { IsBackground = true, Name = "flux-sfx" };
+                    _playThread.Start();
+                }
+            }
+        }
+        Volatile.Write(ref _pendingSoundPtr, ptr);
+        _playWake.Set();
+    }
 
     private static void EnsureInit()
     {
@@ -630,8 +663,12 @@ public static partial class Sfx
         App.Invalidate();
     }
 
-    public static void Shutdown()
+    public static unsafe void Shutdown()
     {
+        _sfxDisposed = true;
+        Interlocked.Exchange(ref _pendingSoundPtr, 0);
+        _playWake.Set();
+        try { PlaySoundW(null, 0, 0); } catch { }
         lock (_lock)
         {
             FreeAllRenderedLocked();
@@ -653,11 +690,9 @@ public static partial class Sfx
         if (App.Mute || App.Test) return;
         if (!force && !AppSettings.Current.UiSounds) return;
         EnsureInit();
-        lock (_lock)
-        {
-            if (_rendered.TryGetValue(slot, out var ptr) && ptr != 0)
-                PlaySoundW((byte*)ptr, 0, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
-        }
+        nint ptr;
+        lock (_lock) _rendered.TryGetValue(slot, out ptr);
+        if (ptr != 0) EnqueuePlayPtr(ptr);
     }
 
     private static unsafe void PlayVolumeTier(double videoVolPct, bool force = false)
@@ -666,12 +701,13 @@ public static partial class Sfx
         if (!force && !AppSettings.Current.UiSounds) return;
         EnsureInit();
         int tier = Math.Clamp((int)Math.Round(videoVolPct / 12.0), 0, VolTiers - 1);
+        nint ptr;
         lock (_lock)
         {
-            var ptr = _volTierBufs[tier];
+            ptr = _volTierBufs[tier];
             if (ptr == 0) _rendered.TryGetValue("volume", out ptr);
-            if (ptr != 0) PlaySoundW((byte*)ptr, 0, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
         }
+        if (ptr != 0) EnqueuePlayPtr(ptr);
     }
 
     public static void Click()

@@ -67,7 +67,7 @@ public static unsafe class AudioAnalyzer
 
     /// <summary>Called only by visible UI panels that want live spectrum/wave data this frame.</summary>
     private static readonly bool SpectrumPreview = Environment.GetCommandLineArgs().Contains("--test-spectrum");
-    public static void RequestFrame(bool force = false)
+    public static void RequestFrame(bool force = false, bool visual = true)
     {
         if (_disposed || (!force && AppSettings.Current.VisualizerStyle == "off")) return;
         if (App.Test)
@@ -82,7 +82,7 @@ public static unsafe class AudioAnalyzer
                         _targetBands[i] = (0.25f + 0.5f * MathF.Pow(MathF.Sin(i * 0.22f + time * 2), 2)) * (1 - i / 45f);
                     for (int i = 0; i < WavePoints; i++) _targetWave[i] = MathF.Sin(i * 0.35f + time * 3) * 0.4f;
                 }
-                StepSmoothing(true);
+                StepSmoothing(true, visual: true);
             }
             return;
         }
@@ -97,7 +97,18 @@ public static unsafe class AudioAnalyzer
             EnsureThread();
             _wake.Set();
         }
-        StepSmoothing(playing);
+        StepSmoothing(playing, visual);
+    }
+
+    /// <summary>Keeps WASAPI beat capture alive without waking D2D rendering on silent/speech frames.</summary>
+    public static void KeepAlive()
+    {
+        if (_disposed || App.Test || W.IsIconic(App.Hwnd) || Gfx.Occluded || !IsPlayingAudio()) return;
+        var now = Environment.TickCount64;
+        Volatile.Write(ref _lastNeededAt, now);
+        Volatile.Write(ref _lastForcedAt, now);
+        EnsureThread();
+        _wake.Set();
     }
 
     private static void EnsureThread()
@@ -112,7 +123,7 @@ public static unsafe class AudioAnalyzer
         }
     }
 
-    private static void StepSmoothing(bool playing)
+    private static void StepSmoothing(bool playing, bool visual = true)
     {
         if (_lastStepFrame == Gfx.Frame) return;
         _lastStepFrame = Gfx.Frame;
@@ -122,7 +133,7 @@ public static unsafe class AudioAnalyzer
         float fall = 1f - MathF.Exp(-dt * 11f);
         float peakFall = dt * 0.42f;
         float waveLerp = 1f - MathF.Exp(-dt * 24f);
-        bool anyMotion = playing;
+        bool anyMotion = false;
 
         lock (_dataLock)
         {
@@ -138,6 +149,7 @@ public static unsafe class AudioAnalyzer
             float pressureTarget = playing && UI.Now - _capturedBassAt < 150 ? _capturedBassPressure : 0;
             _bassPressure += (pressureTarget - _bassPressure) * (1 - MathF.Exp(-dt * (pressureTarget > _bassPressure ? 35 : 10)));
             if (!playing) _bassPressure = 0;
+            if (_beatEnvelope > 0.002f) anyMotion = true;
             float bass = 0, mid = 0, high = 0;
             for (int i = 0; i < BandCount; i++)
             {
@@ -150,7 +162,7 @@ public static unsafe class AudioAnalyzer
                 if (next >= _peakBands[i]) _peakBands[i] = next;
                 else _peakBands[i] = MathF.Max(0f, _peakBands[i] - peakFall);
 
-                if (next > 0.003f || _peakBands[i] > 0.003f) anyMotion = true;
+                if (visual && (next > 0.003f || _peakBands[i] > 0.003f)) anyMotion = true;
                 if (i < 6) bass += next;
                 else if (i < 18) mid += next;
                 else high += next;
@@ -165,7 +177,7 @@ public static unsafe class AudioAnalyzer
                 float next = _smoothWave[i] + (target - _smoothWave[i]) * waveLerp;
                 if (MathF.Abs(next) < 0.001f) next = 0f;
                 _smoothWave[i] = next;
-                if (MathF.Abs(next) > 0.002f) anyMotion = true;
+                if (visual && MathF.Abs(next) > 0.002f) anyMotion = true;
             }
         }
         if (anyMotion) UI.Animate();

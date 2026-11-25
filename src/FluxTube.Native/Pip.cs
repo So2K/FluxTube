@@ -85,6 +85,7 @@ public static unsafe class Pip
         Active = true;
         PinnedVideoId = PlaybackTracker.Instance.Current?.VideoId;
         PinnedTabKey = Shell.MainTabKey;
+        W.SetWindowRgn(App.VideoHwnd, 0, false);
         W.SetParent(App.VideoHwnd, _win);
         Layout();
         W.ShowWindow(_win, 4 /*SW_SHOWNOACTIVATE*/);

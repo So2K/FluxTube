@@ -53,30 +53,14 @@ public static class BgPlayers
         public double TimePos => Volatile.Read(ref _timePos);
         public double Duration => Volatile.Read(ref _duration);
 
-        /// <summary>Non-blocking cached live position (updated continuously by mpv's event thread).</summary>
-        public double LivePos()
-        {
-            lock (_stateLock)
-            {
-                var ctx = Volatile.Read(ref _ctx);
-                if (ctx != IntPtr.Zero && !_disposed && mpv_get_property(ctx, "time-pos", Format.Double, out double pos) >= 0 && pos > 0)
-                {
-                    Volatile.Write(ref _timePos, pos);
-                    return pos;
-                }
-            }
-            return Volatile.Read(ref _timePos);
-        }
+        /// <summary>Zero-lock, zero-IPC cached live position (updated continuously by mpv's event thread).</summary>
+        public double LivePos() => Volatile.Read(ref _timePos);
 
         public void Start(string? localFile, StreamInfo? stream, string fallbackUrl, double startSeconds)
         {
-            IntPtr ctx;
-            lock (_stateLock)
-            {
-                if (_disposed) return;
-                ctx = mpv_create();
-                if (ctx == IntPtr.Zero) return;
-            }
+            if (_disposed) return;
+            var ctx = mpv_create();
+            if (ctx == IntPtr.Zero) return;
             try
             {
                 Opt(ctx, "vid", "no");

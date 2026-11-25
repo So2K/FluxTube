@@ -345,11 +345,7 @@ public static class Shell
     public static double? GetSavedTabPos(string videoId)
         => _tabPos.TryGetValue(videoId, out var p) && p > 0.3 ? p : null;
 
-    private static double CurrentLivePos()
-    {
-        var live = P.GetDouble("time-pos");
-        return live > 0 ? live : P.TimePos;
-    }
+    private static double CurrentLivePos() => P.TimePos;
 
     private static bool VideoStillOpenInOtherTab(string videoId, int excludeIdx)
     {
@@ -1751,60 +1747,62 @@ public static class Shell
         return true;
     }
 
-    private static float _videoBeatEnvelope, _videoBeatPhase;
-    private static bool _videoBeatApplied;
-    private static long _videoBeatSentAt;
-    private static double _beatBaseX, _beatBaseY, _beatBaseZoom;
+    public static System.Numerics.Vector2 VideoBeatShift { get; private set; }
+    public static float VideoBeatGlow { get; private set; }
+    public static float VideoBeatPhase => _vbPhase;
+    private static float _vbBassAvg, _vbKick, _vbPhase;
 
     public static void ToggleVideoBeatShake()
     {
         AppSettings.Current.VideoBeatShake = !AppSettings.Current.VideoBeatShake;
-        AppSettings.Current.Save();
+        AppSettings.Current.SaveAsync();
         UpdateVideoBeat();
         App.Invalidate();
     }
 
+    /// <summary>
+    /// Zero-freeze hardware DWM child-sprite beat bounce ("Видео в бит"):
+    /// Uses pure v9.2.2 FFT bass transient physics to translate App.VideoHwnd with SWP_NOSIZE (0.00ms GPU,
+    /// ZERO libmpv video-pan/video-zoom VO reconfigurations, ZERO ResizeBuffers, ZERO idle spin during quiet dialogue!).
+    /// </summary>
     private static void UpdateVideoBeat()
     {
-        bool enabled = AppSettings.Current.VideoBeatShake && !AppSettings.Current.AudioOnlyMode &&
-            P.IsReady && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test &&
-            !W.IsIconic(App.Hwnd) && (_fullscreen || _cur is WatchPage || Pip.Active);
+        bool enabled = AppSettings.Current.VideoBeatShake && !AppSettings.Current.AudioOnlyMode
+            && P.IsReady && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test
+            && !W.IsIconic(App.Hwnd) && !Gfx.Occluded && !_fullscreen && !Pip.Active && _cur is WatchPage;
         if (!enabled)
         {
-            if (_videoBeatApplied && P.IsReady)
-            {
-                SendVideoPose(_beatBaseX, _beatBaseY, _beatBaseZoom);
-                _videoBeatApplied = false;
-            }
-            _videoBeatEnvelope = 0;
+            VideoBeatShift = default;
+            VideoBeatGlow = 0f;
+            _vbKick = 0f;
+            _vbBassAvg = 0f;
             return;
         }
-        AudioAnalyzer.RequestFrame(force: true);
-        _videoBeatEnvelope = AudioAnalyzer.BeatMotionStrength;
-        _videoBeatPhase = AudioAnalyzer.BeatPhase;
-        UI.Animate();
-        if (!_videoBeatApplied)
-        {
-            if (_videoBeatEnvelope < 0.01f && AudioAnalyzer.BassPressure < 0.01f) return;
-            _beatBaseX = P.GetDouble("video-pan-x");
-            _beatBaseY = P.GetDouble("video-pan-y");
-            _beatBaseZoom = P.GetDouble("video-zoom");
-            _videoBeatApplied = true;
-        }
-        if (UI.Now - _videoBeatSentAt < 8) return;
-        _videoBeatSentAt = UI.Now;
-        float e = _videoBeatEnvelope < 0.002f ? 0 : _videoBeatEnvelope;
-        SendVideoPose(_beatBaseX + MathF.Sin(_videoBeatPhase) * e * 0.030,
-            _beatBaseY + MathF.Cos(_videoBeatPhase * 1.3f) * e * 0.038,
-            _beatBaseZoom + AudioAnalyzer.BassPressure * 0.025 + e * 0.16);
-    }
 
-    private static void SendVideoPose(double x, double y, double zoom)
-    {
-        var culture = System.Globalization.CultureInfo.InvariantCulture;
-        P.Command("set", "video-pan-x", x.ToString("0.#####", culture));
-        P.Command("set", "video-pan-y", y.ToString("0.#####", culture));
-        P.Command("set", "video-zoom", zoom.ToString("0.#####", culture));
+        AudioAnalyzer.RequestFrame(force: true, visual: false);
+        float dt = (float)Math.Clamp(UI.Dt, 0.003, 0.04);
+        float bass = AudioAnalyzer.BassEnergy;
+        _vbBassAvg += (bass - _vbBassAvg) * (1f - MathF.Exp(-dt * 6.5f));
+        float kickRaw = MathF.Max(0f, bass - _vbBassAvg * 0.84f) * 2.85f
+                      + MathF.Max(0f, bass - 0.24f) * 0.88f
+                      + AudioAnalyzer.BeatMotionStrength * 0.55f;
+        _vbKick = MathF.Max(_vbKick * MathF.Exp(-dt * 14.5f), Math.Clamp(kickRaw, 0f, 1.45f));
+
+        if (_vbKick <= 0.015f)
+        {
+            VideoBeatShift = default;
+            VideoBeatGlow = 0f;
+            return;
+        }
+
+        _vbPhase += dt * (11.5f + _vbKick * 17.5f);
+        float waveY = -0.55f + 0.45f * MathF.Cos(_vbPhase * 1.15f);
+        float waveX = MathF.Sin(_vbPhase * 0.94f);
+        float dx = Gfx.Snap(Math.Clamp(waveX * _vbKick * 3.8f, -5.5f, 5.5f));
+        float dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 6.8f, -8.5f, 5.0f));
+        VideoBeatShift = new System.Numerics.Vector2(dx, dy);
+        VideoBeatGlow = Math.Clamp(_vbKick * 0.72f, 0f, 1.0f);
+        UI.Animate();
     }
 
     public static void Draw()
@@ -1836,10 +1834,12 @@ public static class Shell
         MusicBounce.Update(musicBounceOn, (float)UI.Dt);
         _shakeEnergy = 0f; _shakeBassAvg = 0f;
 
-        // Tactile frosted/matte glass backdrop behind the entire window + GPU stylization & stencil glass pass 1
+        // Tactile frosted/matte glass backdrop behind the entire window + GPU stylization
         Gfx.DrawFrostedBackdrop(w, h);
         Gfx.StylizeBackdropIfNeeded();
-        Gfx.CaptureGlassLayer();
+        // Pass 1 is only needed when the page itself draws frosted glass cards (skip wasted full-screen blur on FeedPage & normal video WatchPage!)
+        bool pageNeedsGlass = _cur is not FeedPage && !(_cur is WatchPage && !AppSettings.Current.AudioOnlyMode && !SharePanel.Open);
+        if (pageNeedsGlass) Gfx.CaptureGlassLayer();
 
         var playing = cur != null && P.HasMedia;
         var onWatch = (_cur is WatchPage wp && wp.Video.VideoId == cur?.VideoId)
@@ -2051,8 +2051,9 @@ public static class Shell
         else if (eff == "neon") DrawNeonAmbient(w, h);
         UI.DrawAutoScrollIndicator();
         UI.Modal = null;
-        // Pass 3: only when a popup/modal/tab preview is visible, re-capture full scene so floating glass blurs chrome too!
-        if (AnyModalOpen || (_hoverTab >= 0 && !_draggingTab)) Gfx.CaptureGlassLayer();
+        // Pass 3: only when a frosted-glass modal/overlay is actually open (never on tab hover or opaque popup menu!)
+        if (ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open || AccountMenu.Open || DropTarget.IsDragging)
+            Gfx.CaptureGlassLayer();
         DrawTabPreview();
         ThemeCodeEditor.Draw();
         AudioStudioPanel.Draw();
@@ -2524,19 +2525,23 @@ public static class Shell
             if (show)
             {
                 var s = Gfx.Scale;
-                var px = new W.RECT
-                {
-                    L = (int)MathF.Round(_videoRect.X * s), T = (int)MathF.Round(_videoRect.Y * s),
-                    R = (int)MathF.Round(_videoRect.Right * s), B = (int)MathF.Round(_videoRect.Bottom * s),
-                };
-                int vw = Math.Max(1, px.R - px.L), vh = Math.Max(1, px.B - px.T);
+                // Lock physical (vw, vh) strictly to _videoRect.W/H so scrolling or beat-shifting _videoRect NEVER causes +/-1px DXGI ResizeBuffers storms!
+                int vw = Math.Max(1, (int)MathF.Round(_videoRect.W * s));
+                int vh = Math.Max(1, (int)MathF.Round(_videoRect.H * s));
+                int pxL = (int)MathF.Round(_videoRect.X * s);
+                int pxT = (int)MathF.Round(_videoRect.Y * s);
+                var px = new W.RECT { L = pxL, T = pxT, R = pxL + vw, B = pxT + vh };
 
-                // Resize/move BEFORE applying SetWindowRgn so the new region matches the new window dimensions
-                bool moved = !_hostVisible || px.L != _hostPx.L || px.T != _hostPx.T || px.R != _hostPx.R || px.B != _hostPx.B;
+                bool sizeChanged = !_hostVisible || vw != (_hostPx.R - _hostPx.L) || vh != (_hostPx.B - _hostPx.T);
+                bool moved = sizeChanged || px.L != _hostPx.L || px.T != _hostPx.T;
                 if (moved)
                 {
+                    bool wasVis = _hostVisible;
                     _hostPx = px; _hostRect = vis; _hostVisible = true;
-                    W.SetWindowPos(App.VideoHwnd, 0, px.L, px.T, vw, vh, W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW);
+                    uint swpFlags = W.SWP_NOZORDER | W.SWP_NOACTIVATE | W.SWP_NOCOPYBITS
+                        | (!sizeChanged && wasVis ? W.SWP_NOSIZE : 0)
+                        | (!wasVis ? W.SWP_SHOWWINDOW : 0);
+                    W.SetWindowPos(App.VideoHwnd, 0, px.L, px.T, vw, vh, swpFlags);
                 }
                 else _hostRect = vis;
 
@@ -2567,12 +2572,20 @@ public static class Shell
 
                 int radPx = _videoRadius > 0.5f ? Math.Max(1, (int)MathF.Round(_videoRadius * s)) : 0;
                 int hash = HashCode.Combine(cl, ct, cr, cb, vw, vh, radPx, _holes.Count);
-                foreach (var hr in _holes) hash = HashCode.Combine(hash, (int)hr.X, (int)hr.Y, (int)hr.W, (int)hr.H);
+                foreach (var hr in _holes)
+                {
+                    int hl = (int)MathF.Floor((hr.X - _videoRect.X) * s);
+                    int ht = (int)MathF.Floor((hr.Y - _videoRect.Y) * s);
+                    int hrr = (int)MathF.Ceiling((hr.Right - _videoRect.X) * s);
+                    int hb = (int)MathF.Ceiling((hr.Bottom - _videoRect.Y) * s);
+                    hash = HashCode.Combine(hash, hl, ht, hrr, hb);
+                }
 
-                if (hash != _rgnHash || moved)
+                // Never recreate GDI window regions on pure window translation when window-local clip/hole geometry is unchanged!
+                if (hash != _rgnHash)
                 {
                     _rgnHash = hash;
-                    if (!clipped && _holes.Count == 0 && radPx == 0) W.SetWindowRgn(App.VideoHwnd, 0, true);
+                    if (!clipped && _holes.Count == 0 && radPx == 0) W.SetWindowRgn(App.VideoHwnd, 0, false);
                     else
                     {
                         nint rgn;
@@ -2596,7 +2609,7 @@ public static class Shell
                             W.CombineRgn(rgn, rgn, cut, 4 /*RGN_DIFF*/);
                             W.DeleteObject(cut);
                         }
-                        W.SetWindowRgn(App.VideoHwnd, rgn, true);
+                        W.SetWindowRgn(App.VideoHwnd, rgn, false);
                     }
                 }
             }
@@ -2930,7 +2943,13 @@ public static class Shell
         if (_volSaveDueAt > 0 && now >= _volSaveDueAt)
         {
             _volSaveDueAt = 0;
-            AppSettings.Current.Save();
+            AppSettings.Current.SaveAsync();
+        }
+        // Keep WASAPI beat detector warm during VideoBeatShake so silent speech sleeps at 0% GPU and wakes instantly on bass drops!
+        if (!App.Test && AppSettings.Current.VideoBeatShake && !AppSettings.Current.AudioOnlyMode
+            && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !W.IsIconic(App.Hwnd) && !_fullscreen && !Pip.Active && _cur is WatchPage)
+        {
+            AudioAnalyzer.KeepAlive();
         }
 
         // Gentle zero-stall idle memory reclamation (frees offscreen blur target 3.5s after scrolling, trims stale VRAM)

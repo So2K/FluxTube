@@ -28,6 +28,7 @@ public static partial class SoundCloudBar
     {
         public string VideoId = "";
         public float[] Peaks = new float[BarCount];
+        public double PeakTimeSec = -1;
         public bool RealReady;
         public bool Loading;
         public long LoadedAt;
@@ -35,6 +36,8 @@ public static partial class SoundCloudBar
 
     private static readonly object _lock = new();
     private static readonly Dictionary<string, WaveEntry> _cache = new(StringComparer.Ordinal);
+    private static CancellationTokenSource? _activeExtractCts;
+    private static string? _activeExtractVid;
     private static bool _scrubbing;
     private static string? _scrubVideoId;
     private static double _scrubTarget;
@@ -66,24 +69,52 @@ public static partial class SoundCloudBar
         return n > 0 ? new string(buf[..n]) : "track";
     }
 
-    /// <summary>Returns cached real waveform or instant deterministic placeholder while async ffmpeg analysis runs.</summary>
+    /// <summary>Returns cached loudest-moment timestamp (computed in the same lightweight single ffmpeg pass as the waveform).</summary>
+    public static double? TryGetPeakTime(string videoId, string? audioUrl)
+    {
+        if (App.Test || string.IsNullOrEmpty(videoId)) return null;
+        var entry = GetOrStart(videoId, audioUrl);
+        return entry.RealReady && entry.PeakTimeSec >= 0 ? entry.PeakTimeSec : null;
+    }
+
+    /// <summary>Returns cached real waveform or instant deterministic placeholder while async single-pass ffmpeg analysis runs.</summary>
     private static WaveEntry GetOrStart(string videoId, string? audioUrl)
     {
         WaveEntry entry;
+        bool startLoad = false;
+        CancellationToken token = default;
         lock (_lock)
         {
             if (!_cache.TryGetValue(videoId, out entry!))
             {
-                if (_cache.Count > 24) _cache.Clear();
-                entry = new WaveEntry { VideoId = videoId, Peaks = BuildPlaceholder(videoId) };
+                if (_cache.Count >= 24)
+                {
+                    var curId = MpvPlayer.Instance.CurrentVideoId;
+                    string? victim = null;
+                    long oldest = long.MaxValue;
+                    foreach (var kv in _cache)
+                    {
+                        if (kv.Key == curId) continue;
+                        if (kv.Value.LoadedAt < oldest) { oldest = kv.Value.LoadedAt; victim = kv.Key; }
+                    }
+                    if (victim != null) _cache.Remove(victim);
+                }
+                entry = new WaveEntry { VideoId = videoId, Peaks = BuildPlaceholder(videoId), LoadedAt = Environment.TickCount64 };
                 _cache[videoId] = entry;
-                TryLoadDisk(entry);
+                startLoad = true;
             }
-            if (!entry.RealReady && !entry.Loading && !string.IsNullOrWhiteSpace(audioUrl) && !App.Test)
+            if (!entry.RealReady && !entry.Loading && !App.Test && (startLoad || !string.IsNullOrWhiteSpace(audioUrl)))
             {
                 entry.Loading = true;
+                if (_activeExtractVid != videoId)
+                {
+                    try { _activeExtractCts?.Cancel(); _activeExtractCts?.Dispose(); } catch { }
+                    _activeExtractCts = new CancellationTokenSource();
+                    _activeExtractVid = videoId;
+                }
+                token = _activeExtractCts?.Token ?? default;
                 var urlCopy = audioUrl;
-                _ = Task.Run(() => ExtractRealWaveform(entry, urlCopy));
+                _ = Task.Run(() => ExtractRealWaveformAsync(entry, urlCopy, token));
             }
         }
         return entry;
@@ -113,29 +144,36 @@ public static partial class SoundCloudBar
         return bars;
     }
 
-    private static void TryLoadDisk(WaveEntry entry)
+    private static bool TryLoadDisk(WaveEntry entry)
     {
         try
         {
             var file = Path.Combine(WaveCacheDir, SafeId(entry.VideoId) + ".bin");
-            if (!File.Exists(file)) return;
+            if (!File.Exists(file)) return false;
             var raw = File.ReadAllBytes(file);
-            if (raw.Length != BarCount) return;
+            if (raw.Length != BarCount && raw.Length != BarCount + 4) return false;
             var peaks = new float[BarCount];
             for (int i = 0; i < BarCount; i++) peaks[i] = Math.Clamp(raw[i] / 255f, 0.08f, 1f);
-            entry.Peaks = peaks;
-            entry.RealReady = true;
-            entry.LoadedAt = Environment.TickCount64;
+            double peakSec = raw.Length == BarCount + 4 ? BitConverter.ToSingle(raw, BarCount) : -1;
+            lock (_lock)
+            {
+                entry.Peaks = peaks;
+                if (peakSec >= 0 && !double.IsNaN(peakSec)) entry.PeakTimeSec = peakSec;
+                entry.RealReady = true;
+                entry.LoadedAt = Environment.TickCount64;
+            }
+            return true;
         }
-        catch { }
+        catch { return false; }
     }
 
-    private static void SaveDisk(string videoId, float[] peaks)
+    private static void SaveDisk(string videoId, float[] peaks, float peakTimeSec)
     {
         try
         {
-            var raw = new byte[BarCount];
+            var raw = new byte[BarCount + 4];
             for (int i = 0; i < BarCount; i++) raw[i] = (byte)Math.Clamp(peaks[i] * 255f + 0.5f, 1, 255);
+            BitConverter.TryWriteBytes(raw.AsSpan(BarCount, 4), peakTimeSec);
             var dest = Path.Combine(WaveCacheDir, SafeId(videoId) + ".bin");
             var tmp = dest + ".tmp";
             File.WriteAllBytes(tmp, raw);
@@ -144,23 +182,34 @@ public static partial class SoundCloudBar
         catch { }
     }
 
-    private static string? FindFfmpeg()
-    {
-        var bundled = Path.Combine(AppContext.BaseDirectory, "tools", "ffmpeg.exe");
-        if (File.Exists(bundled)) return bundled;
-        var local = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "FluxTube", "tools", "ffmpeg.exe");
-        return File.Exists(local) ? local : null;
-    }
+    private static string? FindFfmpeg() => Paths.Ffmpeg;
 
-    /// <summary>Ultra-fast 2kHz mono ffmpeg decode -> 220-bar RMS+Peak waveform (takes ~0.3s on songs, caps cleanly on long mixes).</summary>
-    private static void ExtractRealWaveform(WaveEntry entry, string audioUrl)
+    /// <summary>
+    /// Unified single-pass 4kHz mono ffmpeg decode -> 220-bar RMS+Peak waveform + 100ms loudest-moment peak timestamp!
+    /// Waits 500ms so mpv gets 100% initial stream bandwidth, cancels on track switch, and ALWAYS kills ffmpeg in finally.
+    /// </summary>
+    private static async Task ExtractRealWaveformAsync(WaveEntry entry, string? audioUrl, CancellationToken cancel)
     {
         Process? proc = null;
         try
         {
+            if (TryLoadDisk(entry))
+            {
+                App.WakeUi();
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(audioUrl)) return;
+
+            // Let mpv fill its initial playback buffer unimpeded before background waveform decode opens StreamProxy
+            await Task.Delay(500, cancel).ConfigureAwait(false);
+            if (cancel.IsCancellationRequested) return;
+            var curId = MpvPlayer.Instance.CurrentVideoId;
+            if (curId != null && curId != entry.VideoId) return;
+
             var ff = FindFfmpeg();
             if (ff == null) return;
 
+            const int sr = 4000;
             var psi = new ProcessStartInfo(ff)
             {
                 UseShellExecute = false,
@@ -174,9 +223,9 @@ public static partial class SoundCloudBar
             psi.ArgumentList.Add("-vn");
             psi.ArgumentList.Add("-sn");
             psi.ArgumentList.Add("-i"); psi.ArgumentList.Add(audioUrl);
-            psi.ArgumentList.Add("-t"); psi.ArgumentList.Add("1800"); // cap at 30 min so 2h mixes never eat RAM/CPU
+            psi.ArgumentList.Add("-t"); psi.ArgumentList.Add("2400"); // cap at 40 min so 2h mixes never eat RAM/CPU
             psi.ArgumentList.Add("-ac"); psi.ArgumentList.Add("1");
-            psi.ArgumentList.Add("-ar"); psi.ArgumentList.Add("1600");
+            psi.ArgumentList.Add("-ar"); psi.ArgumentList.Add("4000");
             psi.ArgumentList.Add("-f"); psi.ArgumentList.Add("s16le");
             psi.ArgumentList.Add("pipe:1");
 
@@ -184,21 +233,31 @@ public static partial class SoundCloudBar
             if (proc == null) return;
             try { proc.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+            cts.CancelAfter(TimeSpan.FromSeconds(10));
             using var reg = cts.Token.Register(() => { try { if (!proc.HasExited) proc.Kill(true); } catch { } });
 
-            // Read 1600Hz mono PCM (~3.2 KB/sec -> 10-min track is only 1.9 MB!)
-            using var ms = new MemoryStream(256 * 1024);
-            var buf = new byte[16384];
-            var stdout = proc.StandardOutput.BaseStream;
-            int read;
-            const int maxBytes = 6 * 1024 * 1024;
-            while ((read = stdout.Read(buf, 0, buf.Length)) > 0)
+            // 4000Hz mono s16le = 8 KB/sec -> 10-min track is 4.8 MB; cap at 19.2 MB (40 min)
+            const int maxBytes = sr * 2 * 2400;
+            using var ms = new MemoryStream(512 * 1024);
+            var buf = System.Buffers.ArrayPool<byte>.Shared.Rent(32768);
+            try
             {
-                ms.Write(buf, 0, read);
-                if (ms.Length >= maxBytes) break;
+                var stdout = proc.StandardOutput.BaseStream;
+                int read;
+                while ((read = await stdout.ReadAsync(buf.AsMemory(0, buf.Length), cts.Token).ConfigureAwait(false)) > 0)
+                {
+                    int take = Math.Min(read, maxBytes - (int)ms.Length);
+                    if (take > 0) ms.Write(buf, 0, take);
+                    if (ms.Length >= maxBytes) break;
+                }
             }
-            try { if (!proc.HasExited) proc.WaitForExit(1000); } catch { }
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(buf);
+                // Always kill immediately if we hit maxBytes or cancelled so ffmpeg NEVER blocks on a closed pipe!
+                try { if (!proc.HasExited) proc.Kill(true); } catch { }
+            }
 
             int sampleCount = (int)(ms.Length / 2);
             if (sampleCount < BarCount * 2) return;
@@ -221,29 +280,60 @@ public static partial class SoundCloudBar
                     if (f > peak) peak = f;
                 }
                 float rms = MathF.Sqrt((float)(sumSq / Math.Max(1, s1 - s0)));
-                // Blend RMS + Peak for that unmistakable SoundCloud punchy bar silhouette
                 float v = rms * 0.65f + peak * 0.35f;
                 rawPeaks[b] = v;
                 if (v > globalMax) globalMax = v;
             }
 
+            // Exact 100ms rolling RMS window (400 samples @ 4000Hz = 10x 40-sample blocks) for PeakStarBurst!
+            const int blockLen = 40;
+            Span<double> win10 = stackalloc double[10];
+            int winIdx = 0, blockN = 0, totalBlocks = 0;
+            double blockE = 0, rollingE = 0, maxRolling = 0;
+            int bestPeakSample = 0;
+            for (int s = 0; s < sampleCount; s++)
+            {
+                short val = (short)(raw[s * 2] | (raw[s * 2 + 1] << 8));
+                blockE += (double)val * val;
+                if (++blockN == blockLen)
+                {
+                    rollingE += blockE - win10[winIdx];
+                    win10[winIdx] = blockE;
+                    winIdx = (winIdx + 1) % 10;
+                    blockE = 0;
+                    blockN = 0;
+                    if (++totalBlocks >= 10 && rollingE > maxRolling)
+                    {
+                        maxRolling = rollingE;
+                        bestPeakSample = Math.Max(0, s - 200);
+                    }
+                }
+            }
+            float peakTimeSec = maxRolling > 0 ? bestPeakSample / (float)sr : -1f;
+
             var norm = new float[BarCount];
             for (int b = 0; b < BarCount; b++)
                 norm[b] = Math.Clamp(MathF.Pow(rawPeaks[b] / globalMax, 0.72f), 0.10f, 1.0f);
 
-            SaveDisk(entry.VideoId, norm);
+            SaveDisk(entry.VideoId, norm, peakTimeSec);
             lock (_lock)
             {
                 entry.Peaks = norm;
+                entry.PeakTimeSec = peakTimeSec;
                 entry.RealReady = true;
                 entry.LoadedAt = Environment.TickCount64;
             }
             App.WakeUi();
         }
+        catch (OperationCanceledException) { }
         catch (Exception e) { Paths.Log("sc wave: " + e.Message); }
         finally
         {
-            try { proc?.Dispose(); } catch { }
+            if (proc != null)
+            {
+                try { if (!proc.HasExited) proc.Kill(true); } catch { }
+                proc.Dispose();
+            }
             lock (_lock) entry.Loading = false;
         }
     }
@@ -392,10 +482,11 @@ public static partial class SoundCloudBar
                 var key = mk.Avatar + "#" + px;
                 if (_overlayAvFiles.TryGetValue(key, out var cached))
                 {
-                    if (cached != null && File.Exists(cached)) file = cached;
+                    if (cached != null) file = cached;
                 }
                 else
                 {
+                    if (_overlayAvFiles.Count > 512) _overlayAvFiles.Clear();
                     var diskPath = Path.Combine(OverlayAvDir, $"av_{HashHex(mk.Avatar)}_{px}.bgra");
                     if (File.Exists(diskPath) && new FileInfo(diskPath).Length == px * px * 4)
                     {

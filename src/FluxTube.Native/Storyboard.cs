@@ -206,27 +206,32 @@ public static class Storyboard
 
         int tw = (int)Math.Round(240 * Gfx.Scale / 2) * 2;
         int th = (int)Math.Round((double)tw * book.TileH / book.TileW / 2) * 2;
-        int byteLen = tw * th * 4;
-        var dst = System.Buffers.ArrayPool<byte>.Shared.Rent(byteLen);
-        try
+        int tileW = book.TileW, tileH = book.TileH;
+        // Offload bicubic resample + 290 KB disk write off the Win32 UI thread so seekbar scrubbing stays 0.0ms smooth!
+        _ = Task.Run(() =>
         {
-            Resample(px, sw, sx, sy, book.TileW, book.TileH, dst, tw, th);
-
-            // mpv keeps the picture file mapped while it shows it: rotate through several files, so the one being
-            // written is never the one on screen (writing over it would flash black)
-            _slot = (_slot + 1) % 8;
-            var file = Path.Combine(Paths.Data, "preview" + _slot + ".bgra");
+            int byteLen = tw * th * 4;
+            var dst = System.Buffers.ArrayPool<byte>.Shared.Rent(byteLen);
             try
             {
-                using var fs = new FileStream(file, FileMode.Create, FileAccess.Write, FileShare.Read);
-                fs.Write(dst, 0, byteLen);
+                Resample(px, sw, sx, sy, tileW, tileH, dst, tw, th);
+                int slot = (Interlocked.Increment(ref _slot) & 0x7FFFFFFF) % 8;
+                var file = Path.Combine(Paths.Data, "preview" + slot + ".bgra");
+                try
+                {
+                    using var fs = new FileStream(file, FileMode.Create, FileAccess.Write, FileShare.Read);
+                    fs.Write(dst, 0, byteLen);
+                }
+                catch (Exception e) { Paths.Log("preview write: " + e.Message); return; }
+                App.Post(() =>
+                {
+                    if (_lastFile.Length == 0) Paths.Log($"preview ready: {tw}x{th} px");
+                    _lastKey = key; _lastFile = file; _lastW = tw; _lastH = th;
+                    Send(file, tw, th);
+                });
             }
-            catch (Exception e) { Paths.Log("preview write: " + e.Message); return; }
-            if (_lastFile.Length == 0) Paths.Log($"preview ready: {tw}x{th} px");
-            _lastKey = key; _lastFile = file; _lastW = tw; _lastH = th;
-            Send(file, tw, th);
-        }
-        finally { System.Buffers.ArrayPool<byte>.Shared.Return(dst); }
+            finally { System.Buffers.ArrayPool<byte>.Shared.Return(dst); }
+        });
     }
 
     private static void Send(string? file, int w, int h)

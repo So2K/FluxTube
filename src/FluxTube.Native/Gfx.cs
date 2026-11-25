@@ -664,6 +664,7 @@ public static unsafe class Gfx
         _brushes.Clear();
         _scratchBrush?.Dispose();
         _scratchBrush = null;
+        _lastScratchArgb = 0;
         _grainBrush?.Dispose();
         _grainBrush = null;
         _grainBmp?.Dispose();
@@ -830,7 +831,7 @@ public static unsafe class Gfx
         _mbEffect.SetInput(0, _mbBmp, true);
         float dev = _mbStdDev;
         float ang = _mbAngle;
-        uint opt = (uint)DirectionalBlurOptimization.Balanced;
+        uint opt = (uint)DirectionalBlurOptimization.Speed;
         uint bm = (uint)BorderMode.Hard;
         _mbEffect.SetValue((uint)DirectionalBlurProperties.StandardDeviation, PropertyType.Float, &dev, sizeof(float));
         _mbEffect.SetValue((uint)DirectionalBlurProperties.Angle, PropertyType.Float, &ang, sizeof(float));
@@ -1250,12 +1251,23 @@ public static unsafe class Gfx
     private static Color4 ToColor(uint argb)
         => new(((argb >> 16) & 255) / 255f, ((argb >> 8) & 255) / 255f, (argb & 255) / 255f, (argb >> 24) / 255f);
 
-    /// <summary>Zero-allocation reusable brush for immediate Draw/Fill/Stroke calls.</summary>
+    private static uint _lastScratchArgb;
+
+    /// <summary>Zero-allocation reusable brush for immediate Draw/Fill/Stroke calls (skips COM SetColor when color repeats).</summary>
     private static ID2D1SolidColorBrush Scratch(uint argb)
     {
-        var b = _scratchBrush ??= DC.CreateSolidColorBrush(ToColor(argb));
-        b.Color = ToColor(argb);
-        return b;
+        if (_scratchBrush == null)
+        {
+            _scratchBrush = DC.CreateSolidColorBrush(ToColor(argb));
+            _lastScratchArgb = argb;
+            return _scratchBrush;
+        }
+        if (_lastScratchArgb != argb)
+        {
+            _scratchBrush.Color = ToColor(argb);
+            _lastScratchArgb = argb;
+        }
+        return _scratchBrush;
     }
 
     /// <summary>Persistent solid brush (required for IDWriteTextLayout.SetDrawingEffect which stores a COM ref).</summary>
@@ -1904,7 +1916,11 @@ public static unsafe class Gfx
         if (_lucideFonts != null && LucideGlyphs.TryGetValue(glyph, out var lucide))
         {
             var key = Key(lucide, size, 400, 0, 1, true) with { Lucide = true };
-            var runLucide = _cur.TryGetValue(key, out var cached) ? cached : _cur[key] = Shape(key);
+            if (!_cur.TryGetValue(key, out var runLucide))
+            {
+                if (_prev.Remove(key, out runLucide)) _cur[key] = runLucide;
+                else _cur[key] = runLucide = Shape(key);
+            }
             Draw(runLucide, Snap(box.X + (box.W - runLucide.W) / 2), Snap(box.Y + (box.H - runLucide.H) / 2), color);
             return;
         }

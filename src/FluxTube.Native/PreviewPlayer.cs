@@ -266,23 +266,27 @@ public static class PreviewPlayer
         }
 
         var s = Gfx.Scale;
+        int vw = Math.Max(1, (int)MathF.Round(_wantRect.W * s));
+        int vh = Math.Max(1, (int)MathF.Round(_wantRect.H * s));
         var px = new W.RECT
         {
             L = (int)MathF.Round(_wantRect.X * s),
             T = (int)MathF.Round(_wantRect.Y * s),
-            R = (int)MathF.Round(_wantRect.Right * s),
-            B = (int)MathF.Round(_wantRect.Bottom * s),
+            R = (int)MathF.Round(_wantRect.X * s) + vw,
+            B = (int)MathF.Round(_wantRect.Y * s) + vh,
         };
-        int vw = Math.Max(1, px.R - px.L), vh = Math.Max(1, px.B - px.T);
 
-        bool moved = !_visible || px.L != _lastPx.L || px.T != _lastPx.T || px.R != _lastPx.R || px.B != _lastPx.B;
+        bool sizeChanged = !_visible || vw != (_lastPx.R - _lastPx.L) || vh != (_lastPx.B - _lastPx.T);
+        bool moved = sizeChanged || px.L != _lastPx.L || px.T != _lastPx.T;
         if (moved)
         {
+            bool wasVis = _visible;
             _lastPx = px;
             _visible = true;
             // Place below App.VideoHwnd (floating mini-player) if visible, otherwise top of child z-order
             nint zAfter = !Pip.Active && App.VideoHwnd != 0 && W.IsWindowVisible(App.VideoHwnd) ? App.VideoHwnd : 0;
-            W.SetWindowPos(Hwnd, zAfter, px.L, px.T, vw, vh, W.SWP_NOACTIVATE | W.SWP_SHOWWINDOW);
+            uint flags = W.SWP_NOACTIVATE | W.SWP_NOCOPYBITS | (!sizeChanged && wasVis ? W.SWP_NOSIZE : 0) | (!wasVis ? W.SWP_SHOWWINDOW : 0);
+            W.SetWindowPos(Hwnd, zAfter, px.L, px.T, vw, vh, flags);
         }
 
         int cl = Math.Clamp((int)MathF.Round((vis.X - _wantRect.X) * s), 0, vw);
@@ -296,10 +300,10 @@ public static class PreviewPlayer
         bool cutToast = toastRect.W > 0 && toastRect.Intersect(_wantRect) is { W: > 0, H: > 0 };
 
         int hash = HashCode.Combine(cl, ct, cr, cb, vw, vh, radPx, cutMini ? 1 : 0);
-        if (cutMini) hash = HashCode.Combine(hash, (int)miniVideoRect!.Value.X, (int)miniVideoRect.Value.Y);
-        if (cutToast) hash = HashCode.Combine(hash, (int)toastRect.X, (int)toastRect.Y);
+        if (cutMini) hash = HashCode.Combine(hash, (int)MathF.Floor((miniVideoRect!.Value.X - _wantRect.X) * s), (int)MathF.Floor((miniVideoRect.Value.Y - _wantRect.Y) * s));
+        if (cutToast) hash = HashCode.Combine(hash, (int)MathF.Floor((toastRect.X - _wantRect.X) * s), (int)MathF.Floor((toastRect.Y - _wantRect.Y) * s));
 
-        if (hash != _lastRgnHash || moved)
+        if (hash != _lastRgnHash)
         {
             _lastRgnHash = hash;
             nint rgn = radPx > 0
@@ -321,7 +325,7 @@ public static class PreviewPlayer
             }
             if (cutMini) Subtract(miniVideoRect!.Value);
             if (cutToast) Subtract(toastRect);
-            W.SetWindowRgn(Hwnd, rgn, true);
+            W.SetWindowRgn(Hwnd, rgn, false);
         }
     }
 

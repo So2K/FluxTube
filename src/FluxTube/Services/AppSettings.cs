@@ -213,6 +213,19 @@ public sealed class AppSettings
     public static readonly string[] Qualities = ["best", "2160", "1440", "1080", "720", "480", "360", "audio"];
 
     private static readonly object _saveLock = new();
+    private int _saveGen;
+
+    /// <summary>Debounced non-blocking background save for UI toggles, volume wheel, and sliders (0.0ms UI cost).</summary>
+    public void SaveAsync(int delayMs = 350)
+    {
+        int gen = Interlocked.Increment(ref _saveGen);
+        _ = Task.Run(async () =>
+        {
+            if (delayMs > 0) await Task.Delay(delayMs).ConfigureAwait(false);
+            if (gen != Volatile.Read(ref _saveGen)) return;
+            Save();
+        });
+    }
 
     public void Save()
     {

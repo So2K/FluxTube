@@ -252,13 +252,18 @@ public static unsafe class App
     }
 
     private static double _sumDraw, _sumFlush, _sumUp;
+    private static int _lastMouseRawX = int.MinValue, _lastMouseRawY = int.MinValue;
     public static void ResetBench() { _frameMs.Clear(); _sumDraw = _sumFlush = _sumUp = 0; Gfx.TextDrawMs = 0; Gfx.TextDraws = 0; }
 
-    private static void UpdateMouse(nint l)
+    private static bool UpdateMouse(nint l)
     {
-        UI.MX = W.LoWord(l) / Gfx.Scale;
-        UI.MY = W.HiWord(l) / Gfx.Scale;
+        int rx = W.LoWord(l), ry = W.HiWord(l);
         UI.LastInput = Environment.TickCount64;
+        if (rx == _lastMouseRawX && ry == _lastMouseRawY) return false;
+        _lastMouseRawX = rx; _lastMouseRawY = ry;
+        UI.MX = rx / Gfx.Scale;
+        UI.MY = ry / Gfx.Scale;
+        return true;
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvStdcall)])]
@@ -358,7 +363,7 @@ public static unsafe class App
                     return 0;
                 }
                 case W.WM_MOUSEMOVE:
-                    UpdateMouse(l);
+                    if (!UpdateMouse(l) && _tracking) return 0;
                     if (!_tracking)
                     {
                         var tme = new W.TRACKMOUSEEVENT { cbSize = (uint)sizeof(W.TRACKMOUSEEVENT), dwFlags = 2, hwndTrack = h };
@@ -369,6 +374,7 @@ public static unsafe class App
                     return 0;
                 case W.WM_MOUSELEAVE:
                     _tracking = false;
+                    _lastMouseRawX = _lastMouseRawY = int.MinValue;
                     if (!UI.Down) { UI.MX = UI.MY = -1; }
                     Invalidate();
                     return 0;
@@ -505,6 +511,7 @@ public static unsafe class App
                     break;
                 }
                 case W.WM_SETCURSOR:
+                    if (!Test && !W.IsWindowEnabled(h)) W.EnableWindow(h, 1);
                     if (W.LoWord(l) == 1 && (nint)w == h)
                     {
                         W.SetCursor(UI.WantHand ? _hand : Sel.WantIBeam ? _ibeam : _arrow);
@@ -552,10 +559,12 @@ public static unsafe class App
                     return 0;
                 case W.WM_ACTIVATE:
                     if (((int)w & 0xFFFF) == 0) { Suggest.Hide(); Shell.CancelSpace2x(); Loupe.Hide(); PreviewPlayer.HideNow(); }
-                    else if (!Dialogs.IsDialogOpen && !Test)
+                    else if (!Test)
                     {
                         if (!W.IsWindowEnabled(h)) W.EnableWindow(h, 1);
-                        UI.ResetInput();
+                        UI.Down = UI.Pressed = UI.Released = UI.RightClicked = UI.MiddleDown = UI.MiddleClicked = false;
+                        UI.BlockInput = false;
+                        UI.StopAutoScroll();
                         Invalidate();
                     }
                     break;
@@ -590,11 +599,19 @@ public static unsafe class App
 internal static unsafe class VideoHost
 {
     private static bool _tracking;
-    private static long _lastMove = Environment.TickCount64;
-    private static bool _cursorHidden;
+    private static long _lastMove = Environment.TickCount64, _lastMpvMouseAt;
+    private static bool _cursorHidden, _mousePending;
     private static int _lastX = -1, _lastY = -1;
 
     private static void Cmd(params string[] a) => MpvPlayer.Instance.Command(a);
+
+    private static void FlushPendingMouse()
+    {
+        if (!_mousePending || _lastX < 0) return;
+        _mousePending = false;
+        _lastMpvMouseAt = Environment.TickCount64;
+        Cmd("mouse", _lastX.ToString(), _lastY.ToString());
+    }
 
     // in the separate window a press on the picture may become a drag of the whole window
     private static int _pipDownX = -1, _pipDownY;
@@ -625,8 +642,9 @@ internal static unsafe class VideoHost
                 int x = W.LoWord(l), y = W.HiWord(l);
                 if (x == _lastX && y == _lastY) return 0;
                 _lastX = x; _lastY = y;
-                _lastMove = Environment.TickCount64;
-                Loupe.Poll();
+                var now = Environment.TickCount64;
+                _lastMove = now;
+                if (W.AsyncKeyDown(W.VK_CONTROL)) Loupe.Poll();
                 if (_cursorHidden) { _cursorHidden = false; W.SetCursor(W.LoadCursorW(0, 32512)); }
                 if (_pipDownX >= 0 && Math.Abs(x - _pipDownX) + Math.Abs(y - _pipDownY) > 6)
                 {
@@ -635,19 +653,27 @@ internal static unsafe class VideoHost
                     W.SendMessageW(Pip.Hwnd, 0x00A1 /*WM_NCLBUTTONDOWN*/, 2 /*HTCAPTION*/, 0);
                     return 0;
                 }
-                Cmd("mouse", x.ToString(), y.ToString());
+                // Coalesce 1000Hz-8000Hz gaming mouse packets to ~100Hz so libmpv's IPC ring & Lua OSC never choke!
+                if (now - _lastMpvMouseAt >= 10)
+                {
+                    _mousePending = false;
+                    _lastMpvMouseAt = now;
+                    Cmd("mouse", x.ToString(), y.ToString());
+                }
+                else _mousePending = true;
                 if (!_tracking)
                 {
                     var tme = new W.TRACKMOUSEEVENT { cbSize = (uint)sizeof(W.TRACKMOUSEEVENT), dwFlags = 2, hwndTrack = h };
                     W.TrackMouseEvent(&tme);
                     _tracking = true;
                     W.SetTimer(h, 1, 400, 0);
-                    W.SetTimer(h, 2, 50, 0); // instant Ctrl+hover detection even if mouse stops moving
+                    W.SetTimer(h, 2, 50, 0); // instant Ctrl+hover detection & trailing mouse flush
                 }
                 return 0;
             }
             case W.WM_MOUSELEAVE:
             {
+                _mousePending = false;
                 StopTimers(h);
                 Loupe.Poll();
                 // (scripted checks post mouse messages without a real pointer, which would read as an instant leave)
@@ -658,6 +684,7 @@ internal static unsafe class VideoHost
                 if (!W.IsWindowVisible(h)) { StopTimers(h); return 0; }
                 if (w == 2)
                 {
+                    FlushPendingMouse();
                     Loupe.Poll();
                     return 0;
                 }

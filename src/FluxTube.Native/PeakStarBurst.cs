@@ -1,18 +1,12 @@
-using System.Diagnostics;
-using System.Globalization;
-using System.Security.Cryptography;
-using System.Text;
-using FluxTube.Services;
-
 namespace FluxTube;
 
-/// <summary>One star burst at the strongest 100 ms RMS window of a fully decoded track.</summary>
+/// <summary>
+/// One star burst at the strongest 100 ms RMS window of the track.
+/// Reuses SoundCloudBar's unified single-pass background decode (ZERO second ffmpeg process, ZERO stream contention!).
+/// </summary>
 public static class PeakStarBurst
 {
-    private sealed record Peak(double Time, double Duration);
-    private static readonly Dictionary<string, Task<Peak?>> Analyses = new();
-    private static readonly HashSet<string> Fired = new();
-    private static readonly SemaphoreSlim DecodeSlot = new(1);
+    private static readonly HashSet<string> Fired = new(StringComparer.Ordinal);
     private static string? _current;
     private static double _previousPos;
     private static long _burstAt;
@@ -21,18 +15,19 @@ public static class PeakStarBurst
     {
         if (App.Test) return;
         if (_current != id) { _current = id; _previousPos = pos; _burstAt = 0; }
+        if (!playing) { _burstAt = 0; return; }
         double? peakTime = GetPeakTime(id, url, duration);
-        if (playing && !Fired.Contains(id) && peakTime is { } peak)
+        if (!Fired.Contains(id) && peakTime is { } peak)
         {
             bool continuous = pos >= _previousPos && pos - _previousPos < 0.75;
             if (continuous && _previousPos <= peak && pos >= peak && pos - peak < 0.25)
             {
+                if (Fired.Count > 256) Fired.Clear();
                 Fired.Add(id);
                 _burstAt = UI.Now;
             }
         }
         _previousPos = pos;
-        if (!playing) { _burstAt = 0; return; }
         float age = (UI.Now - _burstAt) / 2100f;
         if (_burstAt == 0 || age >= 1) return;
         Gfx.PushClip(stage);
@@ -69,83 +64,8 @@ public static class PeakStarBurst
 
     public static double? GetPeakTime(string id, string? url, double duration)
     {
-        if (App.Test) return null;
-        if (!Analyses.TryGetValue(id, out var job) && !string.IsNullOrWhiteSpace(url) && duration > 1)
-        {
-            job = Analyze(id, url, duration);
-            Analyses[id] = job;
-        }
-        return job is { IsCompletedSuccessfully: true } ? job.Result?.Time : null;
-    }
-
-    private static async Task<Peak?> Analyze(string id, string url, double duration)
-    {
-        // Decode the whole source, never a partial waveform or a guessed future peak.
-        await DecodeSlot.WaitAsync().ConfigureAwait(false);
-        Process? proc = null;
-        try
-        {
-            string dir = Path.Combine(Paths.Data, "track-peaks-v1");
-            Directory.CreateDirectory(dir);
-            string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(id)));
-            string cache = Path.Combine(dir, key + ".txt");
-            if (File.Exists(cache))
-            {
-                string[] values = (await File.ReadAllTextAsync(cache).ConfigureAwait(false)).Split('|');
-                if (values.Length == 2 && double.TryParse(values[0], CultureInfo.InvariantCulture, out double t) &&
-                    double.TryParse(values[1], CultureInfo.InvariantCulture, out double d) && Math.Abs(d - duration) < 0.5 && t >= 0 && t < d)
-                    return new Peak(t, d);
-            }
-            string? ff = Paths.Ffmpeg;
-            if (ff == null)
-            {
-                string installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "FluxTube", "tools", "ffmpeg.exe");
-                if (File.Exists(installed)) ff = installed;
-            }
-            if (ff == null) return null;
-            var start = new ProcessStartInfo(ff) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (string arg in new[] { "-nostdin", "-hide_banner", "-loglevel", "error", "-i", url, "-vn", "-sn", "-ac", "1", "-ar", "48000", "-f", "s16le", "pipe:1" }) start.ArgumentList.Add(arg);
-            proc = Process.Start(start);
-            if (proc == null) return null;
-            try { proc.PriorityClass = ProcessPriorityClass.BelowNormal; } catch { }
-            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
-            using var registration = timeout.Token.Register(() => { try { if (!proc.HasExited) proc.Kill(true); } catch { } });
-            var errors = proc.StandardError.ReadToEndAsync(timeout.Token);
-            byte[] buffer = new byte[32768];
-            double[] windows = new double[10];
-            int window = 0, blockSamples = 0, pending = -1, blocks = 0;
-            long samples = 0;
-            double blockEnergy = 0, rolling = 0, maximum = 0, peakTime = 0;
-            while (true)
-            {
-                int read = await proc.StandardOutput.BaseStream.ReadAsync(buffer, timeout.Token).ConfigureAwait(false);
-                if (read == 0) break;
-                for (int i = 0; i < read; i++)
-                {
-                    if (pending < 0) { pending = buffer[i]; continue; }
-                    short value = (short)(pending | buffer[i] << 8); pending = -1;
-                    blockEnergy += (double)value * value;
-                    samples++; blockSamples++;
-                    if (blockSamples != 480) continue;
-                    rolling += blockEnergy - windows[window]; windows[window] = blockEnergy;
-                    window = (window + 1) % windows.Length;
-                    blockEnergy = 0; blockSamples = 0; blocks++;
-                    if (blocks >= 10 && rolling > maximum)
-                    {
-                        maximum = rolling;
-                        peakTime = (samples - 2400) / 48000.0;
-                    }
-                }
-            }
-            await proc.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-            await errors.ConfigureAwait(false);
-            if (proc.ExitCode != 0 || maximum <= 0 || Math.Abs(samples / 48000.0 - duration) > 1) return null;
-            var result = new Peak(peakTime, duration);
-            await File.WriteAllTextAsync(cache, peakTime.ToString("R", CultureInfo.InvariantCulture) + "|" + duration.ToString("R", CultureInfo.InvariantCulture)).ConfigureAwait(false);
-            App.WakeUi();
-            return result;
-        }
-        catch { return null; }
-        finally { try { if (proc is { HasExited: false }) proc.Kill(true); } catch { } proc?.Dispose(); DecodeSlot.Release(); }
+        if (App.Test || duration <= 1) return null;
+        var t = SoundCloudBar.TryGetPeakTime(id, url);
+        return t is { } pt && pt >= 0 && pt < duration ? pt : null;
     }
 }

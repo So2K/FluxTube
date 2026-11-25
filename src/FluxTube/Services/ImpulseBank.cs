@@ -65,7 +65,12 @@ public static class ImpulseBank
         if (string.Equals(roomKey, "custom", StringComparison.OrdinalIgnoreCase))
         {
             if (!string.IsNullOrWhiteSpace(customIrPath) && File.Exists(customIrPath))
-                return customIrPath;
+            {
+                var ready = TryGetPreparedCustomIr(customIrPath);
+                if (ready != null) return ready;
+                // Kick off async normalization so UI thread never stalls, using hall fallback for 100ms until ready
+                _ = Task.Run(() => PrepareCustomIr(customIrPath));
+            }
             roomKey = "hall";
         }
         var key = roomKey.ToLowerInvariant() switch
@@ -75,6 +80,103 @@ public static class ImpulseBank
             _ => "hall",
         };
         return _paths.GetOrAdd(key, EnsureGenerated);
+    }
+
+    private static string CustomIrCachePath(string srcPath)
+    {
+        long ticks = 0;
+        try { ticks = File.GetLastWriteTimeUtc(srcPath).Ticks; } catch { }
+        var bytes = System.Text.Encoding.UTF8.GetBytes(srcPath.ToLowerInvariant() + "|" + ticks);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))[..16].ToLowerInvariant();
+        return Path.Combine(IrDir, $"custom_{hash}_48k.wav");
+    }
+
+    public static string? TryGetPreparedCustomIr(string srcPath)
+    {
+        if (string.IsNullOrWhiteSpace(srcPath) || !File.Exists(srcPath)) return null;
+        var dest = CustomIrCachePath(srcPath);
+        return File.Exists(dest) && new FileInfo(dest).Length > 1024 ? dest : null;
+    }
+
+    /// <summary>
+    /// Converts any user IR audio file (.wav/.flac/.mp3, any sample rate/channel count, Cyrillic/special path chars)
+    /// into a pure-ASCII cached 48 kHz stereo float32 WAV (max 5.5s) normalized to exact L2 = 1.00 unity!
+    /// </summary>
+    public static string? PrepareCustomIr(string srcPath)
+    {
+        if (string.IsNullOrWhiteSpace(srcPath) || !File.Exists(srcPath)) return null;
+        var dest = CustomIrCachePath(srcPath);
+        if (File.Exists(dest) && new FileInfo(dest).Length > 1024) return dest;
+
+        var ff = Paths.Ffmpeg;
+        if (ff == null) return srcPath;
+
+        System.Diagnostics.Process? proc = null;
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(ff)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = false,
+            };
+            psi.ArgumentList.Add("-nostdin");
+            psi.ArgumentList.Add("-hide_banner");
+            psi.ArgumentList.Add("-loglevel"); psi.ArgumentList.Add("error");
+            psi.ArgumentList.Add("-i"); psi.ArgumentList.Add(srcPath);
+            psi.ArgumentList.Add("-vn");
+            psi.ArgumentList.Add("-sn");
+            psi.ArgumentList.Add("-t"); psi.ArgumentList.Add("5.5");
+            psi.ArgumentList.Add("-ac"); psi.ArgumentList.Add("2");
+            psi.ArgumentList.Add("-ar"); psi.ArgumentList.Add("48000");
+            psi.ArgumentList.Add("-f"); psi.ArgumentList.Add("f32le");
+            psi.ArgumentList.Add("pipe:1");
+
+            proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return srcPath;
+            try { proc.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal; } catch { }
+
+            const int maxBytes = (int)(5.5 * SampleRate * 2 * 4);
+            using var ms = new MemoryStream(256 * 1024);
+            var buf = new byte[16384];
+            var stdout = proc.StandardOutput.BaseStream;
+            int read;
+            while ((read = stdout.Read(buf, 0, buf.Length)) > 0)
+            {
+                int take = Math.Min(read, maxBytes - (int)ms.Length);
+                if (take > 0) ms.Write(buf, 0, take);
+                if (ms.Length >= maxBytes) break;
+            }
+            try { if (!proc.HasExited) proc.Kill(true); } catch { }
+
+            int frames = (int)(ms.Length / 8);
+            if (frames < 64) return srcPath;
+            var raw = ms.GetBuffer();
+            var left = new float[frames];
+            var right = new float[frames];
+            for (int i = 0; i < frames; i++)
+            {
+                left[i] = BitConverter.ToSingle(raw, i * 8);
+                right[i] = BitConverter.ToSingle(raw, i * 8 + 4);
+            }
+            NormalizeStereoIrUnity(left, right);
+            WriteStereoFloatWav(dest, left, right, SampleRate);
+            return dest;
+        }
+        catch (Exception e)
+        {
+            Paths.Log("custom ir prep: " + e.Message);
+            return srcPath;
+        }
+        finally
+        {
+            if (proc != null)
+            {
+                try { if (!proc.HasExited) proc.Kill(true); } catch { }
+                proc.Dispose();
+            }
+        }
     }
 
     /// <summary>Escapes a Windows file path safely for FFmpeg/libmpv lavfi `amovie='...'` filter strings.</summary>
