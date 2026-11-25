@@ -468,6 +468,123 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     }
     private bool _fromDisk;
     private FeedPage_? _fresh;
+    private List<(string Title, string Token, bool Selected)> _chips = [];
+    private int _chipIdx;
+    private float _chipScroll;
+    private static readonly (string Title, string Token, bool Selected)[] FallbackHomeChips =
+    [
+        ("Все", "", true),
+        ("Видеоигры", "search:видеоигры", false),
+        ("Подкасты", "search:подкасты", false),
+        ("Музыка", "search:музыка", false),
+        ("Джемы", "search:music mix", false),
+        ("Сейчас в эфире", "search:прямой эфир", false),
+        ("Недавно опубликованные", "search:новые видео", false),
+        ("Новое для вас", "search:популярные видео", false),
+    ];
+
+    private void SelectChip(int idx)
+    {
+        if (idx < 0 || idx >= _chips.Count || idx == _chipIdx) return;
+        _chipIdx = idx;
+        var chip = _chips[idx];
+        var gen = ++_gen;
+        _loading = true;
+        _loadingMore = false;
+        _message = null;
+        App.Invalidate();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var yt = InnerTube.Instance;
+                FeedPage_ page;
+                if (string.IsNullOrEmpty(chip.Token))
+                    page = await yt.HomeAsync();
+                else if (chip.Token.StartsWith("search:", StringComparison.Ordinal))
+                    page = await yt.SearchAsync(chip.Token[7..]);
+                else
+                    page = await yt.ContinueAsync("browse", chip.Token);
+                Cards.WithProgress(page);
+                App.Post(() =>
+                {
+                    if (gen != _gen) return;
+                    _loading = false;
+                    Replace(page);
+                    if (_items.Count == 0) Say("По этой категории пока ничего не нашлось.", Th.Sub);
+                });
+            }
+            catch (Exception e)
+            {
+                Paths.Log($"home chip {chip.Title}: {e.Message}");
+                App.Post(() => { if (gen == _gen) { _loading = false; Say("Не удалось загрузить категорию: " + e.Message, Th.Brand); } });
+            }
+        });
+    }
+
+    private float DrawHomeChips(float x0, float y, float w)
+    {
+        if (_chips.Count == 0) return 0;
+        const float h = 32, gap = 8;
+        var barR = new R(x0, y, w, h);
+
+        // Compute total chip strip width for clean horizontal scrolling
+        float totalW = 0;
+        var widths = new float[_chips.Count];
+        for (int i = 0; i < _chips.Count; i++)
+        {
+            widths[i] = Gfx.Text(_chips[i].Title, 13, 600).W + 24;
+            totalW += widths[i] + (i > 0 ? gap : 0);
+        }
+        float maxScroll = MathF.Max(0, totalW - w);
+        if (UI.Hover(barR) && UI.Wheel != 0 && maxScroll > 0)
+        {
+            _chipScroll = Math.Clamp(_chipScroll - UI.Wheel * 96f, 0, maxScroll);
+            UI.Wheel = 0;
+            App.Invalidate();
+        }
+        _chipScroll = Math.Clamp(_chipScroll, 0, maxScroll);
+
+        Gfx.PushClip(barR);
+        float cx = x0 - _chipScroll;
+        for (int i = 0; i < _chips.Count; i++)
+        {
+            float pw = widths[i];
+            var r = new R(Gfx.Snap(cx), y, pw, h);
+            if (r.Right >= x0 && r.X <= x0 + w)
+            {
+                bool active = i == _chipIdx;
+                int id = UI.Id("hchip:" + i, _scroll);
+                bool over = UI.Hover(r);
+                if (active)
+                    Gfx.Fill(r, Th.Text, 8);
+                else
+                {
+                    Gfx.Fill(r, Th.A(over ? 0.16f : 0.085f), 8);
+                }
+                var tr = Gfx.Text(_chips[i].Title, 13, active ? 600 : 500);
+                Gfx.Draw(tr, Gfx.Snap(r.X + (r.W - tr.W) / 2), Gfx.Snap(r.Y + (r.H - tr.H) / 2), active ? Th.Bg : Th.Text);
+                if (UI.Click(id, r)) SelectChip(i);
+            }
+            cx += pw + gap;
+        }
+        Gfx.PopClip();
+
+        // Right/left scroll chevrons when chips overflow horizontally
+        if (_chipScroll > 2)
+        {
+            var lb = new R(x0, y, 28, h);
+            Gfx.Fill(lb, Gfx.Fade(Th.Bg, 0.92f), 6);
+            if (UI.IconButton(UI.Id("hchip:l", _scroll), lb, Th.Back, 11, Th.Text)) _chipScroll = MathF.Max(0, _chipScroll - 220);
+        }
+        if (_chipScroll < maxScroll - 2)
+        {
+            var rb = new R(x0 + w - 28, y, 28, h);
+            Gfx.Fill(rb, Gfx.Fade(Th.Bg, 0.92f), 6);
+            if (UI.IconButton(UI.Id("hchip:r", _scroll), rb, Th.ChevronRight, 11, Th.Text)) _chipScroll = MathF.Min(maxScroll, _chipScroll + 220);
+        }
+        return h + 14;
+    }
 
     private void Replace(FeedPage_ page)
     {
@@ -540,6 +657,11 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                         if (!_items.Take(8).Select(i => i.VideoId).SequenceEqual(page.Items.Take(8).Select(i => i.VideoId)))
                             Say("Лента обновилась. Нажмите «Обновить», чтобы показать новую.", Th.Sub);
                         return;
+                    }
+                    if (kind == "home")
+                    {
+                        if (page.Chips.Count > 0) { _chips = page.Chips; _chipIdx = Math.Max(0, _chips.FindIndex(c => c.Selected)); }
+                        else if (_chips.Count == 0) { _chips = [.. FallbackHomeChips]; _chipIdx = 0; }
                     }
                     if (page.Items.Count > 0 || !wasDisk) Replace(page);
                     if (note != null) Say(note, Th.Sub, inline: page.Items.Count > 0);
@@ -698,6 +820,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         }
 
         float top = r.Y + 48;
+        if (kind == "home") top += DrawHomeChips(x0, top, r.W - 48);
         if (kind == "search") top += DrawSearchBar(x0, top, r.W - 48);
         if (kind == "playlist" && _items.Count > 0 && arg is { Length: > 2 })
         {
@@ -1175,24 +1298,26 @@ public sealed class WatchPage : IPage
         var side = !AppSettings.Current.TheaterMode && r.W >= 980;
         // the side list glides away in theater mode and back, the video grows into the space
         var sideT = UI.Smooth(UI.Id(_relScroll, 5), side ? 1 : 0, 14);
-        float sideW = MathF.Min(410, r.W * 0.3f) * sideT;
-        float x0 = r.X + 20;
-        float mainW = r.W - 20 - sideW - 16 - 2 * sideT;
-        float videoH = MathF.Round(MathF.Min(mainW * 9 / 16, MathF.Max(240, r.H * 0.78f)));
+        const float padX = 24, topPad = 12, colGap = 24;
+        float sideW = MathF.Min(400, r.W * 0.29f) * sideT;
+        float x0 = Gfx.Snap(r.X + padX);
+        float mainW = Gfx.Snap(r.W - padX * 2 - sideW - colGap * sideT);
+        float videoH = MathF.Round(MathF.Min(mainW * 9 / 16, MathF.Max(240, r.H * 0.76f)));
         var id = Video.VideoId;
         bool wholePage = AppSettings.Current.ScrollWholeWatchPage;
 
         void DrawVideoBox(R video, R? clip)
         {
             Ambient.Draw(video, id, isShort: false);
-            Shell.WantVideo(video, id, clip);
+            Gfx.Fill(video, 0xFF0A0A0E, 12);
+            Shell.WantVideo(video, id, clip, radius: 12);
             if (Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id)
             {
-                Gfx.Fill(video, 0xFF0A0A0C);
+                Gfx.Fill(video, 0xFF0A0A0C, 12);
                 var img = Images.Get(Video.ThumbHq, 480, 270);
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
-                if (img != null) Gfx.Image(img.Bmp!, pr, 0.25f * Images.Alpha(img));
+                if (img != null) { Gfx.Image(img.Bmp!, pr, 0.25f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
                 var msg = Gfx.Text("Видео в отдельном окне", 18, 600);
                 Gfx.Draw(msg, video.X + (video.W - msg.W) / 2, video.Y + video.H / 2 - 40, 0xFFFFFFFF);
                 var bw = UI.PillWidth(Th.Mini, "Вернуть сюда");
@@ -1200,11 +1325,10 @@ public sealed class WatchPage : IPage
             }
             else if (!Shell.VideoShown(id))
             {
-                Gfx.Fill(video, 0xFF000000);
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
                 var pr = new R(video.X + (video.W - pw) / 2, video.Y + (video.H - pw * 9 / 16) / 2, pw, pw * 9 / 16);
                 var img = Images.Get(Video.ThumbHq, 480, 270);
-                if (img != null) Gfx.Image(img.Bmp!, pr, 0.55f * Images.Alpha(img));
+                if (img != null) { Gfx.Image(img.Bmp!, pr, 0.55f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
                 UI.Spinner(video.X + video.W / 2, video.Y + video.H / 2, 16, 0xFFFFFFFF);
             }
         }
@@ -1224,18 +1348,18 @@ public sealed class WatchPage : IPage
         if (wholePage)
         {
             view = new R(x0, r.Y, mainW + 12, r.H);
-            scroll = UI.BeginScroll(_infoScroll, view, videoH + 4 + infoContentH);
-            video = new R(Gfx.Snap(x0), Gfx.Snap(view.Y + 4 - scroll), Gfx.Snap(mainW), videoH);
+            scroll = UI.BeginScroll(_infoScroll, view, topPad + videoH + infoContentH);
+            video = new R(Gfx.Snap(x0), Gfx.Snap(view.Y + topPad - scroll), Gfx.Snap(mainW), videoH);
             DrawVideoBox(video, view);
-            y = video.Bottom + 14;
+            y = video.Bottom + 16;
         }
         else
         {
-            video = new R(Gfx.Snap(x0), Gfx.Snap(r.Y + 4), Gfx.Snap(mainW), videoH);
+            video = new R(Gfx.Snap(x0), Gfx.Snap(r.Y + topPad), Gfx.Snap(mainW), videoH);
             DrawVideoBox(video, null);
             view = new R(x0, video.Bottom, mainW + 12, r.Bottom - video.Bottom);
             scroll = UI.BeginScroll(_infoScroll, view, infoContentH);
-            y = view.Y + 14 - scroll;
+            y = view.Y + 16 - scroll;
         }
         if (Title.Length > 0) Sel.Text(UI.Id(_infoScroll, 8001), Title, x0, y, 20, Th.Text, 600, mainW, 3);
         Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, "Копировать название");
@@ -1354,9 +1478,10 @@ public sealed class WatchPage : IPage
 
         if (sideT > 0.03f)
         {
-            var full = MathF.Min(410, r.W * 0.3f);
-            Gfx.PushClip(new R(r.Right - sideW - 4, r.Y, sideW + 4, r.H));
-            var sideR = new R(r.Right - sideW - 4, r.Y + 4, full + 4, r.H - 4);
+            var full = MathF.Min(400, r.W * 0.29f);
+            float sx = Gfx.Snap(r.Right - padX - sideW);
+            Gfx.PushClip(new R(sx, r.Y, sideW + padX, r.H));
+            var sideR = new R(sx, r.Y + topPad, full, r.H - topPad);
             if (_list != null)
             {
                 var used = DrawPlaylist(sideR);

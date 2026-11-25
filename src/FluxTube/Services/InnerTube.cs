@@ -205,7 +205,21 @@ public sealed class InnerTube
         await EnsureBootAsync(ct);
         // the page's embedded feed follows the account language, the API call follows our hl: always use the API
         _bootInitialData = null;
-        return ParseFeed(await PostAsync("browse", new JsonObject { ["browseId"] = "FEwhat_to_watch" }, Origin + "/", ct));
+        var d = await PostAsync("browse", new JsonObject { ["browseId"] = "FEwhat_to_watch" }, Origin + "/", ct);
+        var page = ParseFeed(d);
+        if (J.FindFirst(d, "feedFilterChipBarRenderer")?.P("contents") is JsonArray chips)
+        {
+            foreach (var ch in chips)
+            {
+                if (ch.P("chipCloudChipRenderer") is not JsonObject c) continue;
+                var title = c.P("text").Text();
+                if (string.IsNullOrWhiteSpace(title)) continue;
+                var tok = c.S("navigationEndpoint", "continuationCommand", "token") ?? "";
+                var sel = c["isSelected"]?.GetValue<bool>() == true;
+                page.Chips.Add((title, tok, sel));
+            }
+        }
+        return page;
     }
 
     /// <summary>

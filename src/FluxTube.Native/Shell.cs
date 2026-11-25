@@ -345,16 +345,16 @@ public static class Shell
     {
         Gfx.Fill(strip, Th.Bg);
         Gfx.Fill(new R(strip.X, strip.Bottom - 1, strip.W, 1), Th.Line);
-        const float addW = 30;
-        float avail = MathF.Max(100, strip.W - 12 - addW - 6);
+        const float addW = 28;
+        float avail = MathF.Max(100, strip.W - 48 - addW - 8);
         float tw = Math.Clamp(avail / Math.Max(1, _tabs.Count), 108, 250);
-        float x = strip.X + 6;
+        float x = strip.X + 24;
         int hoveredNow = -1;
         R hoveredRect = default;
-        for (int i = 0; i < _tabs.Count && x < strip.Right - addW - 10; i++)
+        for (int i = 0; i < _tabs.Count && x < strip.Right - addW - 24; i++)
         {
             var t = _tabs[i];
-            var r = new R(Gfx.Snap(x), strip.Y + 3, tw - 4, TabH - 7);
+            var r = new R(Gfx.Snap(x), strip.Y + 4, tw - 6, TabH - 8);
             var active = i == _tab;
             var id = UI.Id("tab", i);
             var over = UI.Hover(r);
@@ -1099,38 +1099,40 @@ public static class Shell
             UI.Animate();
         }
 
-        // top bar: it is also the window's title bar
+        // top bar: it is also the window's title bar (clean 8px symmetric grid)
         _topHits.Clear();
         Gfx.Fill(new R(0, 0, w, TopH), Th.Bg);
-        var menuR = new R(10, 8, 36, 36);
+        var menuR = new R(16, 8, 36, 36);
         _topHits.Add(menuR);
         if (UI.IconButton(UI.Id("sidebar:toggle"), menuR, Th.Hamburger, 15, AppSettings.Current.SidebarCollapsed ? Th.Sub : Th.Text)) App.Post(ToggleSidebar);
-        var backR = new R(48, 8, 34, 36);
+        var backR = new R(56, 8, 34, 36);
         _topHits.Add(backR);
         if (UI.IconButton(UI.Id("back"), backR, Th.Back, 14, Th.Text, _back.Count > 0)) App.Post(Back);
-        var fwdR = new R(84, 8, 34, 36);
+        var fwdR = new R(92, 8, 34, 36);
         _topHits.Add(fwdR);
         if (UI.IconButton(UI.Id("fwd"), fwdR, "\uE72A", 14, Th.Text, _forward.Count > 0)) App.Post(Forward);
         // the logo is the way home
-        var logo = new R(122, 8, 122, 36);
+        var logo = new R(132, 8, 122, 36);
         _topHits.Add(logo);
         var logoId = UI.Id("logo");
         UI.Glow(logoId, logo, 8, UI.Hover(logo));
-        Gfx.Fill(new R(130, 17, 27, 18), Th.Brand, 5);
-        Gfx.Icon("\uF5B0", new R(130, 17, 27, 18), 9, Th.OnBrand);
-        Gfx.Draw("FluxTube", 165, 15, 15.5f, Th.Text, 600);
+        Gfx.Fill(new R(140, 17, 27, 18), Th.Brand, 5);
+        Gfx.Icon("\uF5B0", new R(140, 17, 27, 18), 9, Th.OnBrand);
+        Gfx.Draw("FluxTube", 175, 15, 15.5f, Th.Text, 600);
         if (UI.Click(logoId, logo)) App.Post(() => OpenRoot("home"));
 
-        // window buttons
-        const float cbw = 46, cbh = 34;
+        // window buttons (full-height 52px caption buttons for clean visual balance)
+        const float cbw = 46, cbh = TopH;
         var zoomed = W.IsZoomed(App.Hwnd);
         if (CaptionButton("cap:close", new R(w - cbw, 0, cbw, cbh), "\uE8BB", close: true)) App.Post(() => W.PostMessageW(App.Hwnd, W.WM_CLOSE, 0, 0));
         if (CaptionButton("cap:max", new R(w - cbw * 2, 0, cbw, cbh), zoomed ? "\uE923" : "\uE922")) App.Post(() => W.ShowWindow(App.Hwnd, zoomed ? 9 : 3));
         if (CaptionButton("cap:min", new R(w - cbw * 3, 0, cbw, cbh), "\uE921")) App.Post(() => W.ShowWindow(App.Hwnd, 6));
-        var rightEdge = w - cbw * 3 - 8;
+        var rightEdge = w - cbw * 3 - 12;
 
-        var sw = Math.Clamp(w - 720, 200, 600);
-        _searchBox = new R(Gfx.Snap((w - sw) / 2), 8, sw, 36);
+        var sw = Math.Clamp(w - 720, 220, 600);
+        float contentCenter = sideW + (w - sideW) * 0.5f;
+        float searchX = Math.Clamp(contentCenter - sw * 0.5f, logo.Right + 16, MathF.Max(logo.Right + 16, rightEdge - sw - 64));
+        _searchBox = new R(Gfx.Snap(searchX), 8, sw, 36);
         Gfx.Fill(_searchBox, Th.Card, 18);
         if (_search.Focused) Gfx.Stroke(_searchBox, Gfx.Fade(Th.Brand, 0.8f), 18, 1.2f);
         _topHits.Add(_searchBox);
@@ -1259,20 +1261,20 @@ public static class Shell
 
     private static void SideItem(float sx, ref float y, string glyph, string label, string tag, string current, bool dot = false)
     {
-        var r = new R(sx + 6, y, SideW - 12, 56);
+        var r = new R(sx + 8, y, SideW - 16, 48);
         var sel = tag == current;
         var id = UI.Id(tag, 77);
         var selA = UI.Anim(id ^ 0x77, sel ? 1 : 0, 18);
         if (selA > 0.01f) Gfx.Fill(r, Th.A(0.086f * selA), 10);
         if (!sel) UI.Glow(id, r, 10, UI.Hover(r));
-        if (sel) _markY = y + 16;
-        Gfx.Icon(glyph, new R(r.X, y + 7, r.W, 24), 19, sel ? Th.Text : Th.Icon);
+        if (sel) _markY = y + 12;
+        Gfx.Icon(glyph, new R(r.X, y + 5, r.W, 22), 18, sel ? Th.Text : Th.Icon);
         var run = Gfx.Text(label, 10.5f, sel ? 600 : 400);
-        Gfx.Draw(run, Gfx.Snap(r.X + (r.W - run.W) / 2), y + 34, sel ? Th.Text : Th.Sub);
-        if (dot) Gfx.Circle(r.X + r.W / 2 + 13, y + 11, 3.5f, Th.Brand);
+        Gfx.Draw(run, Gfx.Snap(r.X + (r.W - run.W) / 2), y + 29, sel ? Th.Text : Th.Sub);
+        if (dot) Gfx.Circle(r.X + r.W / 2 + 12, y + 9, 3.5f, Th.Brand);
         if (UI.MiddleClick(r) && tag != "tiktok") App.Post(() => OpenInNewTab("root", tag, ""));
         else if (UI.Click(id, r)) App.Post(() => OpenRoot(tag));
-        y += 60;
+        y += 52;
     }
 
     private static void NowPlaying(VideoItem cur, float sideW, float w, float h)

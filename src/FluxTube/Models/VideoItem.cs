@@ -33,6 +33,8 @@ public sealed class FeedPage
 {
     public List<VideoItem> Items { get; } = [];
     public string? Continuation { get; set; }
+    /// <summary>Home feed category filter chips (Все, Видеоигры, Музыка, ...).</summary>
+    public List<(string Title, string Token, bool Selected)> Chips { get; } = [];
 }
 
 /// <summary>A channel page: the header and either the home shelves or one tab's grid.</summary>
