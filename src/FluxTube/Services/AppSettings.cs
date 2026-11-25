@@ -56,6 +56,10 @@ public sealed class AppSettings
     public bool ShortsInfoOverlay { get; set; } = false;
     /// <summary>Theater mode on WatchPage (hides the right-side recommendations column), persisted across videos and restarts.</summary>
     public bool TheaterMode { get; set; } = false;
+    /// <summary>Seasonal overlay effect that can be applied on top of ANY theme: "none", "newyear" (snowflakes), or "halloween" (pumpkins).</summary>
+    public string SeasonalEffect { get; set; } = "none";
+    /// <summary>Subtle PS1/PS2-style UI sound effects (Silent Hill / Metal Gear Solid inspired) on clicks, toggles, and sliders.</summary>
+    public bool UiSounds { get; set; } = false;
 
     public string PlayerFormat => FormatFor(PlayerQuality);
     public string DownloadFormat => FormatFor(DownloadQuality);

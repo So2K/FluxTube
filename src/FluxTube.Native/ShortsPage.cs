@@ -118,6 +118,7 @@ public sealed class ShortsPage : IPage
     public void SetVolume(int vol)
     {
         vol = Math.Clamp(vol, 0, 100);
+        if (vol != AppSettings.Current.Volume) Sfx.Tick();
         AppSettings.Current.Volume = vol;
         if (vol > 0 && _muted)
         {

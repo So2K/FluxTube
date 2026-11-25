@@ -79,7 +79,9 @@ public static class UI
         var over = Hover(r);
         if (over && hand) _cursorHand++;
         if (over && Pressed) _active = id;
-        return Released && _active == id && over;
+        var hit = Released && _active == id && over;
+        if (hit) Sfx.Click();
+        return hit;
     }
 
     public static bool IsActive(int id) => _active == id && Down;
@@ -192,7 +194,11 @@ public static class UI
         var track = new R(r.Right - 40, r.Y + (r.H - 20) / 2, 40, 20);
         Gfx.Fill(track, Gfx.Mix(Th.Track, Th.Brand, t), 10);
         Gfx.Circle(track.X + 10 + 20 * t, track.Y + 10, 7 + (IsActive(id) ? 1 : 0), 0xFFFFFFFF);
-        return Click(id, r);
+        var over = Hover(r);
+        if (over) _cursorHand++;
+        if (over && Pressed) _active = id;
+        if (Released && _active == id && over) { Sfx.Toggle(!value); return true; }
+        return false;
     }
 
     // ---------------- scrolling ----------------

@@ -412,6 +412,23 @@ public sealed class SettingsPage : IPage
         if (UI.IconButton(UI.Id("set:zminus"), zm, "\uE738", 12)) Shell.AdjustZoom(-0.10f);
         ToggleRow("side", "Скрыть боковую панель", s.SidebarCollapsed, v => s.SidebarCollapsed = v, "Также переключается кнопкой меню сверху слева или Ctrl+B");
         ToggleRow("ambient", "Подсветка видео (Ambient Mode)", s.AmbientMode, v => s.AmbientMode = v, "Мягкое GPU-свечение вокруг плеера в цветах текущей сцены (обычные видео и Shorts)");
+        ToggleRow("sfx", "Звуки интерфейса (Silent Hill / MGS)", s.UiSounds, v => { s.UiSounds = v; if (v) Sfx.Tab(); }, "Тихие тактильные звуки кликов, переключателей и ползунков в духе PS1/PS2 (в 4 раза тише видео)");
+        var effRow = Row("Сезонные эффекты (на любую тему)", "Снежинки с гирляндой или падающие тыквы поверх любой выбранной темы", 58);
+        var effects = new (string Key, string Label)[] { ("none", "Выкл"), ("newyear", "❄ Новый год"), ("halloween", "🎃 Хэллоуин") };
+        float ex = effRow.Right - 14;
+        for (int ei = effects.Length - 1; ei >= 0; ei--)
+        {
+            var (ek, el) = effects[ei];
+            var ew = UI.PillWidth(null, el);
+            ex -= ew;
+            bool on = s.SeasonalEffect == ek;
+            if (UI.Pill(UI.Id("set:eff:" + ek), ex, effRow.Y + 12, 34, null, el, out _, accent: on))
+            {
+                s.SeasonalEffect = ek;
+                Saved();
+            }
+            ex -= 8;
+        }
 
         Section("Плеер");
         ChoiceRow("pq", "Качество по умолчанию", s.PlayerQuality, AppSettings.Qualities.Where(q => q != "audio"), v => { s.PlayerQuality = v; Resolver.Instance.Invalidate(); });

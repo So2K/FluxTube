@@ -375,6 +375,7 @@ public static class Shell
                 int delta = UI.Wheel > 0 ? 5 : -5;
                 UI.Wheel = 0;
                 _tabVolBoostUntil = UI.Now + 1400;
+                Sfx.Tick();
                 if (isMainPlaying)
                 {
                     var nv = Math.Clamp(AppSettings.Current.Volume + delta, 0, 150);
@@ -1213,7 +1214,9 @@ public static class Shell
             else Gfx.Fill(new R(sideW, h - barH, w - sideW, barH), Th.Panel);
         }
         DrawToast(w, h - barH);
-        if (Themes.IsNewYear) DrawNewYearFestive(w, h);
+        var eff = AppSettings.Current.SeasonalEffect;
+        if (eff == "halloween") DrawHalloweenFestive(w, h);
+        else if (eff == "newyear" || Themes.IsNewYear) DrawNewYearFestive(w, h);
         UI.DrawAutoScrollIndicator();
         UI.Modal = null;
         DrawTabPreview();
@@ -1223,6 +1226,7 @@ public static class Shell
 
     private static readonly (float X, float Y, float R, float Spd, float Phase, float Alpha)[] _snow = InitSnow();
     private static readonly uint[] _garlandCols = [0xFFFFD166, 0xFFE63946, 0xFF2EC4B6, 0xFF64B5F6, 0xFFFF9F1C];
+    private static readonly uint[] _halloCols = [0xFFFF6D00, 0xFF9D4EDD, 0xFFFFB703, 0xFF70E000];
 
     private static (float, float, float, float, float, float)[] InitSnow()
     {
@@ -1234,7 +1238,7 @@ public static class Shell
         return arr;
     }
 
-    /// <summary>Subtle falling snow + twinkling fairy lights along the top edge when the manual "Новогодняя" theme is active.</summary>
+    /// <summary>Subtle falling snow + twinkling fairy lights along the top edge (works on any theme).</summary>
     private static void DrawNewYearFestive(float w, float h)
     {
         float t = UI.Now / 1000f;
@@ -1255,6 +1259,50 @@ public static class Shell
             float y = (f.Y * h + t * f.Spd) % (h + 20) - 10;
             float x = (f.X * w + MathF.Sin(t * 0.85f + f.Phase) * 22f + w) % w;
             Gfx.Circle(x, y, f.R, Gfx.Fade(0xFFEAF4FF, f.Alpha));
+        }
+        UI.Animate();
+    }
+
+    /// <summary>Falling stylized glowing Halloween pumpkins + embers + spooky top garland (works on any theme).</summary>
+    private static void DrawHalloweenFestive(float w, float h)
+    {
+        float t = UI.Now / 1000f;
+        // Flickering orange/purple Halloween garland along the top edge
+        float step = 40f;
+        int idx = 0;
+        for (float gx = 20; gx < w - 150; gx += step, idx++)
+        {
+            float tw = 0.4f + 0.6f * (0.5f + 0.5f * MathF.Sin(t * 3.1f + idx * 1.7f));
+            var col = _halloCols[idx % _halloCols.Length];
+            Gfx.Circle(gx, 2.5f, 6.0f, Gfx.Fade(col, 0.16f * tw));
+            Gfx.Circle(gx, 2.5f, 2.2f, Gfx.Fade(col, 0.80f * tw));
+        }
+        // Drifting glowing mini-pumpkins (first 14) + warm autumn embers (rest)
+        for (int i = 0; i < _snow.Length; i++)
+        {
+            var f = _snow[i];
+            float y = (f.Y * h + t * (f.Spd * 0.85f)) % (h + 30) - 15;
+            float x = (f.X * w + MathF.Sin(t * 0.75f + f.Phase) * 26f + w) % w;
+            if (i < 14)
+            {
+                float pr = 4.2f + (f.R - 1.2f) * 1.6f; // ~4.2..7.7px mini pumpkin
+                float a = f.Alpha * 1.25f;
+                // Soft warm glow behind pumpkin
+                Gfx.Circle(x, y, pr * 1.7f, Gfx.Fade(0xFFFF6D00, 0.10f * a));
+                // Pumpkin body (two slightly overlapping lobes for authentic silhouette)
+                Gfx.Circle(x - pr * 0.24f, y, pr * 0.88f, Gfx.Fade(0xFFFF6D00, a));
+                Gfx.Circle(x + pr * 0.24f, y, pr * 0.88f, Gfx.Fade(0xFFE85D04, a));
+                // Green stem on top
+                Gfx.Fill(new R(x - 1.1f, y - pr * 1.15f, 2.2f, pr * 0.45f), Gfx.Fade(0xFF4CAF50, a), 1);
+                // Tiny glowing eyes
+                Gfx.Circle(x - pr * 0.30f, y - pr * 0.12f, MathF.Max(1.0f, pr * 0.17f), Gfx.Fade(0xFF1A0D00, a));
+                Gfx.Circle(x + pr * 0.30f, y - pr * 0.12f, MathF.Max(1.0f, pr * 0.17f), Gfx.Fade(0xFF1A0D00, a));
+            }
+            else
+            {
+                uint col = (i & 1) == 0 ? 0xFFFF9F1C : 0xFFC77DFF;
+                Gfx.Circle(x, y, f.R * 0.85f, Gfx.Fade(col, f.Alpha * 0.85f));
+            }
         }
         UI.Animate();
     }
