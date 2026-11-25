@@ -147,9 +147,12 @@ public sealed class MpvPlayer : IDisposable
         foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
             mpv_set_option_string(ctx, "ytdl-raw-options-append", kv);
         mpv_set_option_string(ctx, "http-proxy", string.IsNullOrWhiteSpace(s.Proxy) ? "" : s.Proxy);
+        mpv_set_option_string(ctx, "af", s.PlayerAudio8D ? Audio8DFilter : "");
     }
 
-    /// <summary>Pushes current settings (quality, cookies, proxy...) into mpv asynchronously.</summary>
+    private const string Audio8DFilter = "lavfi=[apulsator=hz=0.14:width=1:amount=0.85,aecho=0.82:0.84:48|82:0.28|0.18]";
+
+    /// <summary>Pushes current settings (quality, cookies, proxy, 8D audio...) into mpv asynchronously.</summary>
     public void ApplySettings()
     {
         if (!IsReady) return;
@@ -162,6 +165,7 @@ public sealed class MpvPlayer : IDisposable
         foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
             Command("set", "ytdl-raw-options-append", kv);
         Set("http-proxy", string.IsNullOrWhiteSpace(s.Proxy) ? "" : s.Proxy);
+        Set("af", s.PlayerAudio8D ? Audio8DFilter : "");
     }
 
     /// <summary>Smoothly ramps mpv volume to target (0..150) over ~100ms instead of a harsh step jump.</summary>

@@ -314,6 +314,12 @@ public static unsafe class Pip
                 _barDown = i >= 0 && i < Buttons ? i : -1;
                 return 0;
             }
+            case W.WM_MOUSEWHEEL:
+            {
+                var delta = (short)((w >> 16) & 0xFFFF) / 120f;
+                App.Post(() => Shell.AdjustMainVolume(delta > 0 ? 5 : -5));
+                return 0;
+            }
             case W.WM_LBUTTONUP:
             {
                 var i = (int)MathF.Floor(((short)(l & 0xFFFF) - 4 * Scale) / BtnW);

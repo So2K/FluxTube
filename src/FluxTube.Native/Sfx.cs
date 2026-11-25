@@ -1,19 +1,21 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
+using FluxTube.Player;
 using FluxTube.Services;
 
 namespace FluxTube;
 
 /// <summary>
 /// Synthesized PS1/PS2-era UI sound effects inspired by Silent Hill 1/2 and Metal Gear Solid 1/2,
-/// with per-slot custom sound replacement (WAV, MP3, OGG, FLAC, M4A) and 1-click ZIP soundpack import.
-/// Thread-safe, zero UI-thread freezes, ~4x quieter than video playback.
+/// with per-slot custom sound replacement (WAV, MP3, OGG, FLAC, M4A), 1-click ZIP soundpack import,
+/// adjustable master UI sound volume (10..300%), video-volume-scaled slider ticks, and stereo 8D reverb.
 /// </summary>
 public static partial class Sfx
 {
     private const int Rate = 44100;
-    private const int MaxWavBytes = 4 * 1024 * 1024;
+    private const int MaxWavBytes = 6 * 1024 * 1024;
+    private const int VolTiers = 11; // 0..10 amplitude tiers mapped to video playback volume
     private const uint SND_ASYNC = 0x0001, SND_NODEFAULT = 0x0002, SND_MEMORY = 0x0004;
 
     public static readonly (string Key, string Label)[] Slots =
@@ -69,105 +71,102 @@ public static partial class Sfx
     [return: MarshalAs(UnmanagedType.Bool)]
     private static unsafe partial bool PlaySoundW(byte* pszSound, nint hmod, uint fdwSound);
 
-    private static readonly Dictionary<string, nint> _builtin = new();
-    private static readonly Dictionary<string, nint> _custom = new();
+    private static readonly Dictionary<string, float[]> _rawBuiltin = new();
+    private static readonly Dictionary<string, float[]> _rawCustom = new();
+    private static readonly Dictionary<string, nint> _rendered = new();
+    private static readonly nint[] _volTierBufs = new nint[VolTiers];
     private static readonly object _lock = new();
     private static volatile bool _ready;
     private static long _lastTickAt, _lastClickAt, _lastVolAt;
 
-    private static unsafe void EnsureInit()
+    private static void EnsureInit()
     {
         if (_ready) return;
         lock (_lock)
         {
             if (_ready) return;
 
-            // Master gain ~0.085 (approx 4x quieter than normal video playback)
-            _builtin["click"] = (nint)BuildWav(0.062, (t, d) =>
+            // Built-in synthesized mono float PCM (master ~0.10 so 100% is subtle, 200-300% is punchy)
+            _rawBuiltin["click"] = Synth(0.062, t =>
             {
                 double env = Math.Exp(-t * 62.0) * Math.Min(1.0, t / 0.002);
                 double f1 = 1046.5 * (1.0 + 0.03 * Math.Exp(-t * 140.0));
                 double fm = Math.Sin(2 * Math.PI * f1 * t + 0.30 * Math.Sin(2 * Math.PI * 1568.0 * t) * Math.Exp(-t * 95.0));
-                return fm * env * 0.085;
+                return fm * env * 0.11;
             });
 
-            _builtin["video_open"] = (nint)BuildWav(0.145, (t, d) =>
+            _rawBuiltin["video_open"] = Synth(0.145, t =>
             {
-                // Distinct deep MGS/SH cinematic crystalline confirm chord (completely different from button click)
                 double env1 = Math.Exp(-t * 22.0) * Math.Min(1.0, t / 0.004);
                 double t2 = Math.Max(0.0, t - 0.028);
                 double env2 = t > 0.028 ? Math.Exp(-t2 * 24.0) * Math.Min(1.0, t2 / 0.004) : 0.0;
                 double low = Math.Sin(2 * Math.PI * 392.0 * t) * env1 * 0.45;
                 double mid = Math.Sin(2 * Math.PI * 587.33 * t + 0.25 * Math.Sin(2 * Math.PI * 1174.66 * t) * Math.Exp(-t * 40.0)) * env1 * 0.55;
                 double shimmer = Math.Sin(2 * Math.PI * 880.0 * t2) * env2 * 0.65;
-                return (low + mid + shimmer) * 0.075;
+                return (low + mid + shimmer) * 0.095;
             });
 
-            _builtin["like"] = (nint)BuildWav(0.115, (t, d) =>
+            _rawBuiltin["like"] = Synth(0.115, t =>
             {
-                // Warm harmonic rising fifth chime (SH save-point / MGS item pickup vibe)
                 double env1 = Math.Exp(-t * 38.0) * Math.Min(1.0, t / 0.002);
                 double t2 = Math.Max(0.0, t - 0.032);
                 double env2 = t > 0.032 ? Math.Exp(-t2 * 30.0) * Math.Min(1.0, t2 / 0.003) : 0.0;
                 double n1 = Math.Sin(2 * Math.PI * 880.0 * t) * env1 * 0.55;
                 double n2 = (Math.Sin(2 * Math.PI * 1318.5 * t2) + 0.28 * Math.Sin(2 * Math.PI * 2637.0 * t2) * Math.Exp(-t2 * 55.0)) * env2 * 0.72;
-                return (n1 + n2) * 0.085;
+                return (n1 + n2) * 0.105;
             });
 
-            _builtin["channel"] = (nint)BuildWav(0.110, (t, d) =>
+            _rawBuiltin["channel"] = Synth(0.110, t =>
             {
-                // Soft metallic sweep for entering a channel page
                 double env = Math.Exp(-t * 32.0) * Math.Min(1.0, t / 0.003);
                 double freq = 523.25 + 261.6 * (1.0 - Math.Exp(-t * 45.0));
                 double s = Math.Sin(2 * Math.PI * freq * t) + 0.3 * Math.Sin(2 * Math.PI * freq * 1.5 * t) * Math.Exp(-t * 50.0);
-                return s * env * 0.08;
+                return s * env * 0.10;
             });
 
-            _builtin["volume"] = (nint)BuildWav(0.024, (t, d) =>
+            _rawBuiltin["volume"] = Synth(0.026, t =>
             {
-                // Crisp MGS codec/radar precision tick for volume & sliders
-                double env = Math.Exp(-t * 165.0) * Math.Min(1.0, t / 0.001);
-                double s = Math.Sin(2 * Math.PI * 1640.0 * t) + 0.28 * Math.Sin(2 * Math.PI * 3280.0 * t);
-                return s * env * 0.065;
+                double env = Math.Exp(-t * 155.0) * Math.Min(1.0, t / 0.001);
+                double s = Math.Sin(2 * Math.PI * 1580.0 * t) + 0.28 * Math.Sin(2 * Math.PI * 3160.0 * t);
+                return s * env * 0.095;
             });
 
-            _builtin["toggle_on"] = (nint)BuildWav(0.052, (t, d) =>
+            _rawBuiltin["toggle_on"] = Synth(0.052, t =>
             {
                 double env = Math.Exp(-t * 68.0) * Math.Min(1.0, t / 0.0015);
                 double freq = 460.0 + 240.0 * (1.0 - Math.Exp(-t * 95.0));
                 double body = Math.Sin(2 * Math.PI * freq * t) + 0.25 * Math.Sin(2 * Math.PI * freq * 2.02 * t);
                 double snap = Math.Sin(2 * Math.PI * 2200.0 * t) * Math.Exp(-t * 320.0) * 0.35;
-                return (body * 0.75 + snap) * env * 0.085;
+                return (body * 0.75 + snap) * env * 0.105;
             });
 
-            _builtin["toggle_off"] = (nint)BuildWav(0.052, (t, d) =>
+            _rawBuiltin["toggle_off"] = Synth(0.052, t =>
             {
                 double env = Math.Exp(-t * 68.0) * Math.Min(1.0, t / 0.0015);
                 double freq = 540.0 - 210.0 * (1.0 - Math.Exp(-t * 85.0));
                 double body = Math.Sin(2 * Math.PI * freq * t) + 0.22 * Math.Sin(2 * Math.PI * freq * 1.98 * t);
                 double snap = Math.Sin(2 * Math.PI * 1800.0 * t) * Math.Exp(-t * 340.0) * 0.30;
-                return (body * 0.75 + snap) * env * 0.08;
+                return (body * 0.75 + snap) * env * 0.10;
             });
 
-            _builtin["tab"] = (nint)BuildWav(0.085, (t, d) =>
+            _rawBuiltin["tab"] = Synth(0.085, t =>
             {
                 double env1 = Math.Exp(-t * 48.0) * Math.Min(1.0, t / 0.002);
                 double t2 = Math.Max(0.0, t - 0.022);
                 double env2 = t > 0.022 ? Math.Exp(-t2 * 52.0) * Math.Min(1.0, t2 / 0.002) : 0.0;
                 double s1 = Math.Sin(2 * Math.PI * 698.46 * t) * env1 * 0.55;
                 double s2 = Math.Sin(2 * Math.PI * 1046.5 * t2) * env2 * 0.75;
-                return (s1 + s2) * 0.08;
+                return (s1 + s2) * 0.10;
             });
 
-            _builtin["back"] = (nint)BuildWav(0.072, (t, d) =>
+            _rawBuiltin["back"] = Synth(0.072, t =>
             {
                 double env = Math.Exp(-t * 50.0) * Math.Min(1.0, t / 0.002);
                 double freq = 470.0 - 150.0 * Math.Min(1.0, t / 0.045);
                 double s = Math.Sin(2 * Math.PI * freq * t) + 0.25 * Math.Sin(2 * Math.PI * freq * 1.5 * t) * Math.Exp(-t * 80.0);
-                return s * env * 0.08;
+                return s * env * 0.10;
             });
 
-            // Migrate legacy tick.wav -> volume.wav if user customized it earlier
             var oldTick = Path.Combine(SfxDir, "tick.wav");
             var volWav = Path.Combine(SfxDir, "volume.wav");
             if (File.Exists(oldTick) && !File.Exists(volWav))
@@ -178,29 +177,264 @@ public static partial class Sfx
             foreach (var (key, _) in Slots)
             {
                 var path = Path.Combine(SfxDir, key + ".wav");
-                if (File.Exists(path)) LoadCustomWavLocked(key, path);
+                if (File.Exists(path)) LoadCustomPcmLocked(key, path);
             }
+            RebuildAllLocked();
             _ready = true;
         }
     }
 
-    private static unsafe void LoadCustomWavLocked(string slot, string wavPath)
+    private static float[] Synth(double seconds, Func<double, double> sample)
+    {
+        int n = (int)(Rate * seconds);
+        var buf = new float[n];
+        for (int i = 0; i < n; i++) buf[i] = (float)sample((double)i / Rate);
+        return buf;
+    }
+
+    private static float[]? ReadWavPcm(string wavPath)
     {
         try
         {
             var fi = new FileInfo(wavPath);
-            if (!fi.Exists || fi.Length < 44 || fi.Length > MaxWavBytes) return;
+            if (!fi.Exists || fi.Length < 44 || fi.Length > MaxWavBytes) return null;
             var bytes = File.ReadAllBytes(wavPath);
-            var ptr = (byte*)NativeMemory.Alloc((nuint)bytes.Length);
-            bytes.AsSpan().CopyTo(new Span<byte>(ptr, bytes.Length));
-            if (_custom.TryGetValue(slot, out var old) && old != 0)
+            if (bytes.Length < 44 || bytes[0] != 'R' || bytes[1] != 'I' || bytes[2] != 'F' || bytes[3] != 'F') return null;
+            int channels = 1, bits = 16;
+            int pos = 12;
+            int dataOff = -1, dataLen = 0;
+            while (pos + 8 <= bytes.Length)
             {
-                PlaySoundW(null, 0, 0);
-                NativeMemory.Free((void*)old);
+                int sz = BitConverter.ToInt32(bytes, pos + 4);
+                if (sz < 0 || pos + 8 + sz > bytes.Length) break;
+                if (bytes[pos] == 'f' && bytes[pos + 1] == 'm' && bytes[pos + 2] == 't' && bytes[pos + 3] == ' ' && sz >= 16)
+                {
+                    channels = BitConverter.ToInt16(bytes, pos + 10);
+                    bits = BitConverter.ToInt16(bytes, pos + 22);
+                }
+                else if (bytes[pos] == 'd' && bytes[pos + 1] == 'a' && bytes[pos + 2] == 't' && bytes[pos + 3] == 'a')
+                {
+                    dataOff = pos + 8;
+                    dataLen = sz;
+                    break;
+                }
+                pos += 8 + sz + (sz & 1);
             }
-            _custom[slot] = (nint)ptr;
+            if (dataOff < 0 || bits != 16 || channels < 1 || channels > 2) return null;
+            int frames = Math.Min(Rate * 3, dataLen / (2 * channels));
+            var pcm = new float[frames];
+            for (int i = 0; i < frames; i++)
+            {
+                if (channels == 1)
+                    pcm[i] = BitConverter.ToInt16(bytes, dataOff + i * 2) / 32768f;
+                else
+                {
+                    float l = BitConverter.ToInt16(bytes, dataOff + i * 4) / 32768f;
+                    float r = BitConverter.ToInt16(bytes, dataOff + i * 4 + 2) / 32768f;
+                    pcm[i] = (l + r) * 0.5f;
+                }
+            }
+            return pcm;
         }
-        catch (Exception e) { Paths.Log($"sfx load {slot}: {e.Message}"); }
+        catch (Exception e) { Paths.Log($"sfx wav read: {e.Message}"); return null; }
+    }
+
+    private static void LoadCustomPcmLocked(string slot, string wavPath)
+    {
+        if (ReadWavPcm(wavPath) is { Length: > 0 } pcm) _rawCustom[slot] = pcm;
+    }
+
+    /// <summary>Re-renders all cached native stereo WAV buffers (call when UI volume or 8D Reverb setting changes).</summary>
+    public static void RebuildBuffers()
+    {
+        EnsureInit();
+        lock (_lock) RebuildAllLocked();
+    }
+
+    private static unsafe void FreeAllRenderedLocked()
+    {
+        PlaySoundW(null, 0, 0);
+        foreach (var p in _rendered.Values) if (p != 0) NativeMemory.Free((void*)p);
+        _rendered.Clear();
+        for (int i = 0; i < _volTierBufs.Length; i++)
+        {
+            if (_volTierBufs[i] != 0) { NativeMemory.Free((void*)_volTierBufs[i]); _volTierBufs[i] = 0; }
+        }
+    }
+
+    private static void RebuildAllLocked()
+    {
+        FreeAllRenderedLocked();
+        double masterGain = Math.Clamp(AppSettings.Current.UiSoundsVolume, 10, 300) / 100.0;
+        bool reverb8d = AppSettings.Current.UiSoundsReverb8D;
+
+        for (int s = 0; s < Slots.Length; s++)
+        {
+            var key = Slots[s].Key;
+            if (!_rawCustom.TryGetValue(key, out var src))
+                _rawBuiltin.TryGetValue(key, out src);
+            if (src == null || src.Length == 0) continue;
+
+            double phase = s * 0.85;
+            _rendered[key] = RenderStereoWav(src, masterGain, reverb8d, phase);
+
+            if (key == "volume")
+            {
+                for (int t = 0; t < VolTiers; t++)
+                {
+                    // Tier 0 (0% video vol) = subtle 0.16x whisper; Tier 8 (100% video vol) = 1.02x; Tier 10 (150% video vol) = 1.38x
+                    double tierMul = 0.16 + 1.22 * Math.Pow(t / (double)(VolTiers - 1), 1.15);
+                    // Subtle pitch lift on higher volume tiers when using built-in volume tick
+                    float[] tierSrc = src;
+                    if (!_rawCustom.ContainsKey("volume"))
+                    {
+                        double pitch = 0.82 + 0.36 * (t / (double)(VolTiers - 1));
+                        tierSrc = Synth(0.026, sec =>
+                        {
+                            double env = Math.Exp(-sec * 155.0) * Math.Min(1.0, sec / 0.001);
+                            double f = 1480.0 * pitch;
+                            return (Math.Sin(2 * Math.PI * f * sec) + 0.28 * Math.Sin(2 * Math.PI * f * 2.0 * sec)) * env * 0.095;
+                        });
+                    }
+                    _volTierBufs[t] = RenderStereoWav(tierSrc, masterGain * tierMul, reverb8d, t * 0.62);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Renders mono float PCM to a native 16-bit 44.1kHz stereo WAV buffer with master gain scaling,
+    /// soft tanh limiting, and optional spatial 8D stereo hall reverb (Haas ITD rotation + 4 detuned stereo combs + 2 allpasses).
+    /// </summary>
+    private static unsafe nint RenderStereoWav(float[] src, double gain, bool reverb8d, double panPhase)
+    {
+        int tail = reverb8d ? (int)(Rate * 0.54) : 0;
+        int frames = src.Length + tail;
+        var outL = new float[frames];
+        var outR = new float[frames];
+
+        if (!reverb8d)
+        {
+            for (int i = 0; i < src.Length; i++)
+            {
+                float v = SoftClip(src[i] * gain);
+                outL[i] = v;
+                outR[i] = v;
+            }
+        }
+        else
+        {
+            // 1. 8D spatial panning + Haas interaural micro-delay (~0.36ms = 16 samples)
+            const int haas = 16;
+            var dryL = new float[frames];
+            var dryR = new float[frames];
+            for (int i = 0; i < src.Length; i++)
+            {
+                double t = (double)i / Rate;
+                double pan = Math.Sin(panPhase + t * 2.0 * Math.PI * 0.85); // -1..+1 sweeping around listener
+                float gL = (float)Math.Cos((pan + 1.0) * Math.PI * 0.25);
+                float gR = (float)Math.Sin((pan + 1.0) * Math.PI * 0.25);
+                float s = (float)(src[i] * gain);
+                int idxL = pan > 0 ? Math.Min(frames - 1, i + (int)(haas * pan)) : i;
+                int idxR = pan < 0 ? Math.Min(frames - 1, i + (int)(haas * -pan)) : i;
+                dryL[idxL] += s * gL;
+                dryR[idxR] += s * gR;
+            }
+
+            // 2. Stereo Schroeder/Moorer hall reverb (detuned L/R comb lengths for ultra-wide 8D space)
+            ReadOnlySpan<int> combsL = [1309, 1637, 1811, 1931];
+            ReadOnlySpan<int> combsR = [1381, 1583, 1889, 1997];
+            ReadOnlySpan<float> fbs = [0.74f, 0.72f, 0.75f, 0.71f];
+            var wetL = new float[frames];
+            var wetR = new float[frames];
+            const float damp = 0.34f;
+
+            for (int c = 0; c < 4; c++)
+            {
+                var bufL = new float[combsL[c]];
+                var bufR = new float[combsR[c]];
+                int pL = 0, pR = 0;
+                float lpL = 0, lpR = 0, fb = fbs[c];
+                for (int i = 0; i < frames; i++)
+                {
+                    float yL = bufL[pL];
+                    lpL = yL * (1f - damp) + lpL * damp;
+                    bufL[pL] = (dryL[i] + dryR[i] * 0.22f) + lpL * fb;
+                    if (++pL >= bufL.Length) pL = 0;
+                    wetL[i] += yL;
+
+                    float yR = bufR[pR];
+                    lpR = yR * (1f - damp) + lpR * damp;
+                    bufR[pR] = (dryR[i] + dryL[i] * 0.22f) + lpR * fb;
+                    if (++pR >= bufR.Length) pR = 0;
+                    wetR[i] += yR;
+                }
+            }
+
+            // 3. Two stereo allpass diffusers for silky reverberation tail
+            ApplyAllpass(wetL, 241, 0.5f);
+            ApplyAllpass(wetL, 557, 0.5f);
+            ApplyAllpass(wetR, 263, 0.5f);
+            ApplyAllpass(wetR, 587, 0.5f);
+
+            // 4. Slow 8D rotation on the wet tail + fade-out end guard (no click)
+            int fadeLen = Math.Min(1200, frames / 4);
+            for (int i = 0; i < frames; i++)
+            {
+                double t = (double)i / Rate;
+                double rot = 0.5 + 0.5 * Math.Sin(panPhase * 1.3 + t * 2.0 * Math.PI * 0.9);
+                float wL = wetL[i] * 0.22f * (float)(0.65 + 0.35 * rot);
+                float wR = wetR[i] * 0.22f * (float)(0.65 + 0.35 * (1.0 - rot));
+                float fade = i > frames - fadeLen ? (frames - i) / (float)fadeLen : 1f;
+                outL[i] = SoftClip((dryL[i] * 0.80f + wL) * fade);
+                outR[i] = SoftClip((dryR[i] * 0.80f + wR) * fade);
+            }
+        }
+
+        int dataBytes = frames * 4; // 2 channels * 2 bytes (16-bit stereo)
+        int total = 44 + dataBytes;
+        var ptr = (byte*)NativeMemory.Alloc((nuint)total);
+        var span = new Span<byte>(ptr, total);
+        "RIFF"u8.CopyTo(span[0..4]);
+        BitConverter.TryWriteBytes(span[4..8], total - 8);
+        "WAVE"u8.CopyTo(span[8..12]);
+        "fmt "u8.CopyTo(span[12..16]);
+        BitConverter.TryWriteBytes(span[16..20], 16);
+        BitConverter.TryWriteBytes(span[20..22], (short)1);   // PCM
+        BitConverter.TryWriteBytes(span[22..24], (short)2);   // Stereo
+        BitConverter.TryWriteBytes(span[24..28], Rate);
+        BitConverter.TryWriteBytes(span[28..32], Rate * 4);
+        BitConverter.TryWriteBytes(span[32..34], (short)4);
+        BitConverter.TryWriteBytes(span[34..36], (short)16);
+        "data"u8.CopyTo(span[36..40]);
+        BitConverter.TryWriteBytes(span[40..44], dataBytes);
+
+        for (int i = 0; i < frames; i++)
+        {
+            short l16 = (short)Math.Round(Math.Clamp(outL[i], -1f, 1f) * 32767f);
+            short r16 = (short)Math.Round(Math.Clamp(outR[i], -1f, 1f) * 32767f);
+            int off = 44 + i * 4;
+            BitConverter.TryWriteBytes(span[off..(off + 2)], l16);
+            BitConverter.TryWriteBytes(span[(off + 2)..(off + 4)], r16);
+        }
+        return (nint)ptr;
+    }
+
+    private static float SoftClip(double x) => (float)Math.Tanh(x);
+
+    private static void ApplyAllpass(float[] data, int delay, float g)
+    {
+        var buf = new float[delay];
+        int p = 0;
+        for (int i = 0; i < data.Length; i++)
+        {
+            float x = data[i];
+            float b = buf[p];
+            float y = -x * g + b;
+            buf[p] = x + b * g;
+            if (++p >= delay) p = 0;
+            data[i] = y;
+        }
     }
 
     private static async Task<bool> ConvertToSlotWavAsync(string sourceFile, string destWav)
@@ -231,19 +465,15 @@ public static partial class Sfx
                 psi.ArgumentList.Add("-t");
                 psi.ArgumentList.Add("2.5");
                 psi.ArgumentList.Add("-af");
-                psi.ArgumentList.Add("volume=0.24");
+                psi.ArgumentList.Add("volume=0.36");
                 psi.ArgumentList.Add("-f");
                 psi.ArgumentList.Add("wav");
                 psi.ArgumentList.Add(tmp);
                 using var p = Process.Start(psi)!;
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
-                // Always drain stdout/stderr concurrently BEFORE WaitForExitAsync to prevent pipe deadlocks!
                 var errTask = p.StandardError.ReadToEndAsync(cts.Token);
                 var outTask = p.StandardOutput.ReadToEndAsync(cts.Token);
-                try
-                {
-                    await p.WaitForExitAsync(cts.Token);
-                }
+                try { await p.WaitForExitAsync(cts.Token); }
                 catch (OperationCanceledException)
                 {
                     try { p.Kill(true); } catch { }
@@ -291,7 +521,11 @@ public static partial class Sfx
                     App.Post(() => Shell.Toast("Не удалось загрузить звук (проверьте формат WAV/MP3/OGG)", Th.Warn));
                     return;
                 }
-                lock (_lock) LoadCustomWavLocked(slot, dest);
+                lock (_lock)
+                {
+                    LoadCustomPcmLocked(slot, dest);
+                    RebuildAllLocked();
+                }
                 App.Post(() =>
                 {
                     AppSettings.Current.CustomSfx[slot] = label;
@@ -310,7 +544,7 @@ public static partial class Sfx
         });
     }
 
-    /// <summary>Imports an entire .zip soundpack in one click, auto-matching filenames (click.mp3, video_open.wav, like.ogg, ...).</summary>
+    /// <summary>Imports an entire .zip soundpack in one click, auto-matching filenames.</summary>
     public static void ImportZip(string zipPath)
     {
         if (!File.Exists(zipPath)) return;
@@ -339,7 +573,7 @@ public static partial class Sfx
                 }
                 if (matched.Count == 0)
                 {
-                    App.Post(() => Shell.Toast("В архиве не найдено подходящих файлов (назовите их click, video_open, like, channel, volume, toggle_on, toggle_off, tab, back)", Th.Warn, 6000));
+                    App.Post(() => Shell.Toast("В архиве не найдено подходящих файлов (click, video_open, like, channel, volume, toggle_on, toggle_off, tab, back)", Th.Warn, 6000));
                     return;
                 }
                 var applied = new List<(string Slot, string Label)>();
@@ -348,10 +582,13 @@ public static partial class Sfx
                     var dest = Path.Combine(SfxDir, slot + ".wav");
                     if (await ConvertToSlotWavAsync(src, dest))
                     {
-                        lock (_lock) LoadCustomWavLocked(slot, dest);
+                        lock (_lock) LoadCustomPcmLocked(slot, dest);
                         applied.Add((slot, label));
                     }
                 }
+                if (applied.Count > 0)
+                    lock (_lock) RebuildAllLocked();
+
                 App.Post(() =>
                 {
                     foreach (var (slot, label) in applied) AppSettings.Current.CustomSfx[slot] = label;
@@ -378,16 +615,13 @@ public static partial class Sfx
         });
     }
 
-    public static unsafe void ResetSlot(string slot)
+    public static void ResetSlot(string slot)
     {
         EnsureInit();
         lock (_lock)
         {
-            if (_custom.Remove(slot, out var old) && old != 0)
-            {
-                PlaySoundW(null, 0, 0);
-                NativeMemory.Free((void*)old);
-            }
+            _rawCustom.Remove(slot);
+            RebuildAllLocked();
         }
         try { var p = Path.Combine(SfxDir, slot + ".wav"); if (File.Exists(p)) File.Delete(p); } catch { }
         AppSettings.Current.CustomSfx.Remove(slot);
@@ -396,14 +630,13 @@ public static partial class Sfx
         App.Invalidate();
     }
 
-    public static unsafe void ResetAll()
+    public static void ResetAll()
     {
         EnsureInit();
         lock (_lock)
         {
-            PlaySoundW(null, 0, 0);
-            foreach (var old in _custom.Values) if (old != 0) NativeMemory.Free((void*)old);
-            _custom.Clear();
+            _rawCustom.Clear();
+            RebuildAllLocked();
         }
         foreach (var (key, _) in Slots)
             try { var p = Path.Combine(SfxDir, key + ".wav"); if (File.Exists(p)) File.Delete(p); } catch { }
@@ -413,15 +646,13 @@ public static partial class Sfx
         App.Invalidate();
     }
 
-    public static unsafe void Shutdown()
+    public static void Shutdown()
     {
         lock (_lock)
         {
-            PlaySoundW(null, 0, 0);
-            foreach (var p in _custom.Values) if (p != 0) NativeMemory.Free((void*)p);
-            foreach (var p in _builtin.Values) if (p != 0) NativeMemory.Free((void*)p);
-            _custom.Clear();
-            _builtin.Clear();
+            FreeAllRenderedLocked();
+            _rawCustom.Clear();
+            _rawBuiltin.Clear();
             _ready = false;
         }
     }
@@ -433,38 +664,6 @@ public static partial class Sfx
         PlaySlot(slot, force: true);
     }
 
-    private static unsafe byte* BuildWav(double seconds, Func<double, double, double> sample)
-    {
-        int samples = (int)(Rate * seconds);
-        int dataBytes = samples * 2;
-        int total = 44 + dataBytes;
-        var ptr = (byte*)NativeMemory.Alloc((nuint)total);
-        var span = new Span<byte>(ptr, total);
-
-        "RIFF"u8.CopyTo(span[0..4]);
-        BitConverter.TryWriteBytes(span[4..8], total - 8);
-        "WAVE"u8.CopyTo(span[8..12]);
-        "fmt "u8.CopyTo(span[12..16]);
-        BitConverter.TryWriteBytes(span[16..20], 16);
-        BitConverter.TryWriteBytes(span[20..22], (short)1);
-        BitConverter.TryWriteBytes(span[22..24], (short)1);
-        BitConverter.TryWriteBytes(span[24..28], Rate);
-        BitConverter.TryWriteBytes(span[28..32], Rate * 2);
-        BitConverter.TryWriteBytes(span[32..34], (short)2);
-        BitConverter.TryWriteBytes(span[34..36], (short)16);
-        "data"u8.CopyTo(span[36..40]);
-        BitConverter.TryWriteBytes(span[40..44], dataBytes);
-
-        for (int i = 0; i < samples; i++)
-        {
-            double t = (double)i / Rate;
-            double v = Math.Clamp(sample(t, seconds), -1.0, 1.0);
-            short s16 = (short)Math.Round(v * 32767.0);
-            BitConverter.TryWriteBytes(span[(44 + i * 2)..(46 + i * 2)], s16);
-        }
-        return ptr;
-    }
-
     private static unsafe void PlaySlot(string slot, bool force = false)
     {
         if (App.Mute || App.Test) return;
@@ -472,9 +671,21 @@ public static partial class Sfx
         EnsureInit();
         lock (_lock)
         {
-            if (!_custom.TryGetValue(slot, out var ptr) || ptr == 0)
-                _builtin.TryGetValue(slot, out ptr);
-            // Executed INSIDE lock so a concurrent SetCustom/Reset cannot free ptr before PlaySoundW starts!
+            if (_rendered.TryGetValue(slot, out var ptr) && ptr != 0)
+                PlaySoundW((byte*)ptr, 0, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+        }
+    }
+
+    private static unsafe void PlayVolumeTier(double videoVolPct, bool force = false)
+    {
+        if (App.Mute || App.Test) return;
+        if (!force && !AppSettings.Current.UiSounds) return;
+        EnsureInit();
+        int tier = Math.Clamp((int)Math.Round(videoVolPct / 12.0), 0, VolTiers - 1);
+        lock (_lock)
+        {
+            var ptr = _volTierBufs[tier];
+            if (ptr == 0) _rendered.TryGetValue("volume", out ptr);
             if (ptr != 0) PlaySoundW((byte*)ptr, 0, SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
         }
     }
@@ -492,20 +703,27 @@ public static partial class Sfx
     public static void Channel() => PlaySlot("channel");
     public static void Toggle(bool on) => PlaySlot(on ? "toggle_on" : "toggle_off");
 
-    public static void Volume()
+    /// <summary>Slider/volume sound dynamically scaled to the current video volume (0..150%).</summary>
+    public static void Volume(double? videoVolumePct = null)
     {
         var now = Environment.TickCount64;
         if (now - _lastVolAt < 45) return;
         _lastVolAt = now;
-        PlaySlot("volume");
+        double v = videoVolumePct ?? (MpvPlayer.Instance.IsReady
+            ? (MpvPlayer.Instance.Muted ? 0 : MpvPlayer.Instance.Volume)
+            : AppSettings.Current.Volume);
+        PlayVolumeTier(v);
     }
 
-    public static void Tick()
+    public static void Tick(double? videoVolumePct = null)
     {
         var now = Environment.TickCount64;
         if (now - _lastTickAt < 48) return;
         _lastTickAt = now;
-        PlaySlot("volume");
+        double v = videoVolumePct ?? (MpvPlayer.Instance.IsReady
+            ? (MpvPlayer.Instance.Muted ? 0 : MpvPlayer.Instance.Volume)
+            : AppSettings.Current.Volume);
+        PlayVolumeTier(v);
     }
 
     public static void Tab() => PlaySlot("tab");

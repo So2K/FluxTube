@@ -429,16 +429,23 @@ local function seek_to_mouse(final)
     if S.dur <= 0 then return end
     S.drag_pct = clamp((S.mx - L.px0) / (L.px1 - L.px0), 0, 1)
     local t = now()
-    if final or t - S.last_seek > 0.09 then
+    if final then
+        S.time = S.drag_pct * S.dur
         S.last_seek = t
-        mp.commandv("seek", tostring(S.drag_pct * 100), final and "absolute-percent+exact" or "absolute-percent+keyframes")
+        mp.commandv("seek", tostring(S.drag_pct * 100), "absolute-percent+exact")
+    elseif t - S.last_seek > 0.08 then
+        S.last_seek = t
+        mp.commandv("seek", tostring(S.drag_pct * 100), "absolute-percent+keyframes")
     end
 end
 
 local function set_volume_from_mouse()
     if not L.vx0 then return end
     local v = clamp((S.mx - L.vx0) / (L.vx1 - L.vx0), 0, 1)
-    mp.set_property_number("volume", math.floor(v * 100 + 0.5))
+    local pct = math.floor(v * 100 + 0.5)
+    S.vol = pct
+    S.vol_until = now() + 1.2
+    mp.set_property_number("volume", pct)
     mp.set_property_bool("mute", false)
 end
 

@@ -40,6 +40,7 @@ public sealed class ShortsPage : IPage
     private string? _prevVideoId;
     private bool _loop = true;
     private bool _dragVol, _dragSeek;
+    private double _dragSeekTarget = -1;
     private long _volSaveAt, _lastDragSeekAt, _lastDragVolAt;
     private float _videoW = 360, _videoH = 640;
 
@@ -151,7 +152,7 @@ public sealed class ShortsPage : IPage
     public void SetVolume(int vol, bool smooth = true)
     {
         vol = Math.Clamp(vol, 0, 100);
-        if (vol != AppSettings.Current.Volume) Shell.PlayVolumeSfx();
+        if (vol != AppSettings.Current.Volume) Shell.PlayVolumeSfx(vol);
         AppSettings.Current.Volume = vol;
         var p = MpvPlayer.Instance;
         if (vol > 0 && p.Muted) p.Command("set", "mute", "no");
@@ -506,7 +507,12 @@ public sealed class ShortsPage : IPage
     public void Draw(R r)
     {
         if (_volSaveAt > 0 && UI.Now >= _volSaveAt) FlushVolume();
-        if (!UI.Down) { _dragVol = false; _dragSeek = false; }
+        if (!UI.Down)
+        {
+            if (_dragSeek && _dragSeekTarget >= 0) { MpvPlayer.Instance.SeekAbsolute(_dragSeekTarget); _dragSeekTarget = -1; }
+            _dragVol = false;
+            _dragSeek = false;
+        }
 
         var v = Cur;
         if (v == null)
@@ -609,8 +615,8 @@ public sealed class ShortsPage : IPage
 
         // ---- ALWAYS-VISIBLE YOUTUBE-STYLE VERTICAL CIRCULAR ACTION RAIL (bottom-right of the Short!) ----
         float rcx = Gfx.Snap(railX + railW / 2);
-        const float itemStep = 72;
         float avSize = 42;
+        float itemStep = Math.Clamp((video.H - avSize - 14) / 5f, 54f, 72f);
         float railItemsH = itemStep * 5 + avSize + 6;
         float ry = MathF.Max(video.Y + 4, video.Bottom - railItemsH - 4);
         var mine = _rating.GetValueOrDefault(v.VideoId, "");
@@ -765,12 +771,18 @@ public sealed class ShortsPage : IPage
         var seekHot = UI.Hover(seekHit) || _dragSeek;
         if (dur > 0)
         {
-            if (UI.Pressed && UI.Hover(seekHit)) _dragSeek = true;
+            if (UI.Pressed && UI.Hover(seekHit))
+            {
+                _dragSeek = true;
+                _dragSeekTarget = dur * Math.Clamp((UI.MX - sx) / sw, 0, 1);
+                _lastDragSeekAt = UI.Now;
+                p.SeekAbsolute(_dragSeekTarget);
+            }
             if (_dragSeek)
             {
-                double target = dur * Math.Clamp((UI.MX - sx) / sw, 0, 1);
-                if (UI.Now - _lastDragSeekAt >= 65) { _lastDragSeekAt = UI.Now; p.SeekAbsolute(target); }
-                pos = target;
+                _dragSeekTarget = dur * Math.Clamp((UI.MX - sx) / sw, 0, 1);
+                if (UI.Now - _lastDragSeekAt >= 55) { _lastDragSeekAt = UI.Now; p.SeekAbsolute(_dragSeekTarget); }
+                pos = _dragSeekTarget;
             }
             if (seekHot) UI.Hand();
         }

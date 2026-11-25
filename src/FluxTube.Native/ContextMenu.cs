@@ -248,11 +248,10 @@ public static class Menus
         float dy = (1 - ease) * 6;
         var r = new R(p.X, Gfx.Snap(p.Y + dy), p.W, p.H);
 
-        // soft layered shadow + themed surface + crisp border
+        // soft layered shadow + frosted matte glass surface + crisp border
         Gfx.Fill(new R(r.X + 2, r.Y + 6, r.W - 2, r.H + 2), Gfx.Fade(0xFF000000, 0.36f * ease), 12);
         Gfx.Fill(new R(r.X + 1, r.Y + 2, r.W, r.H), Gfx.Fade(0xFF000000, 0.22f * ease), 12);
-        Gfx.Fill(r, Gfx.Fade(Th.Menu, 0.98f * ease), 12);
-        Gfx.Stroke(r, Gfx.Fade(Th.A(0.14f), ease), 12, 1f);
+        Gfx.FillFrosted(r, Gfx.Fade(Th.Menu, ease), 12, opacity: 0.94f, border: true);
 
         // Deepest-first hit ownership: if pointer is inside an overlapping child submenu, parent must NOT steal hover/click!
         var panelHovered = r.Contains(UI.MX, UI.MY) && !AnyDescendantContains(p.Child, UI.MX, UI.MY);

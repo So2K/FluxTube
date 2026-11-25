@@ -70,6 +70,8 @@ public static unsafe class Gfx
     public static string IconFont = "Segoe Fluent Icons";
 
     private static ID2D1SolidColorBrush? _scratchBrush;
+    private static ID2D1Bitmap1? _grainBmp;
+    private static ID2D1BitmapBrush? _grainBrush;
     private sealed class RadialSlot
     {
         public ID2D1GradientStopCollection? Stops;
@@ -77,7 +79,7 @@ public static unsafe class Gfx
         public float R, G, B, A;
         public void Dispose() { Brush?.Dispose(); Stops?.Dispose(); Brush = null; Stops = null; A = -1; }
     }
-    private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new()];
+    private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new(), new(), new(), new()];
     private static readonly GradientStop[] _radialStopsBuf = new GradientStop[6];
 
     public static void Init(nint hwnd)
@@ -114,9 +116,53 @@ public static unsafe class Gfx
         DC = _d2dDev.CreateDeviceContext(DeviceContextOptions.None);
         DC.TextAntialiasMode = Vortice.Direct2D1.TextAntialiasMode.Grayscale;
         _scratchBrush = DC.CreateSolidColorBrush(new Color4(1, 1, 1, 1));
+        CreateGrainTexture();
         CreateTarget();
         DeviceGeneration++;
         Occluded = false;
+    }
+
+    /// <summary>Builds a seamless 256×256 fine sandblasted-glass micro-grain texture on the GPU (zero per-frame CPU cost).</summary>
+    private static void CreateGrainTexture()
+    {
+        _grainBrush?.Dispose();
+        _grainBmp?.Dispose();
+        const int sz = 256;
+        var px = new byte[sz * sz * 4];
+        uint rng = 0x9E3779B9u;
+        for (int i = 0; i < sz * sz; i++)
+        {
+            // Fast xorshift + triangular-ish frosted glass micro-speckle distribution
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            uint r1 = rng & 255;
+            rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+            uint r2 = rng & 255;
+            int grain = (int)((r1 + r2) >> 1); // 0..255 centered around 128
+            // Highlight micro-facets (bright white specks) & subtle etched pits (dark specks) in premultiplied BGRA
+            byte a, v;
+            if (grain > 134)
+            {
+                a = (byte)Math.Min(255, (grain - 134) * 2);
+                v = a; // premultiplied white micro-crystal
+            }
+            else if (grain < 120)
+            {
+                a = (byte)Math.Min(255, (120 - grain) * 2);
+                v = 0; // premultiplied dark etched pit
+            }
+            else
+            {
+                a = 0; v = 0;
+            }
+            int o = i * 4;
+            px[o] = v; px[o + 1] = v; px[o + 2] = v; px[o + 3] = a;
+        }
+        fixed (byte* p = px)
+        {
+            _grainBmp = DC.CreateBitmap(new SizeI(sz, sz), (nint)p, sz * 4,
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.None));
+        }
+        _grainBrush = DC.CreateBitmapBrush(_grainBmp, new BitmapBrushProperties(ExtendMode.Wrap, ExtendMode.Wrap, BitmapInterpolationMode.NearestNeighbor));
     }
 
     private static bool IsDeviceLost(int code)
@@ -131,6 +177,10 @@ public static unsafe class Gfx
         _brushes.Clear();
         _scratchBrush?.Dispose();
         _scratchBrush = null;
+        _grainBrush?.Dispose();
+        _grainBrush = null;
+        _grainBmp?.Dispose();
+        _grainBmp = null;
         foreach (var s in _radials) s.Dispose();
         ClearTextCache();
         while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
@@ -312,6 +362,68 @@ public static unsafe class Gfx
             s.Brush.RadiusY = ry;
         }
         DC.FillEllipse(new Ellipse(new Vector2(cx, cy), rx, ry), s.Brush);
+    }
+
+    /// <summary>
+    /// Draws a lush frosted / matte textured glass backdrop behind the entire UI:
+    /// deeply diffused ambient light blooms + fine 1:1 physical-pixel sandblasted glass grain.
+    /// </summary>
+    public static void DrawFrostedBackdrop(float w, float h)
+    {
+        var mode = Services.AppSettings.Current.FrostedGlass;
+        if (mode == "off") return;
+        bool strong = mode != "soft";
+        float mul = strong ? 1.0f : 0.55f;
+
+        // 1. Soft deeply diffused frosted light washes behind the glass (adapts automatically to any theme!)
+        float br = ((Th.Brand >> 16) & 255) / 255f;
+        float bg = ((Th.Brand >> 8) & 255) / 255f;
+        float bb = (Th.Brand & 255) / 255f;
+        // Cool complementary crystal sheen
+        float cr = MathF.Min(1f, br * 0.35f + (Th.Light ? 0.45f : 0.32f));
+        float cg = MathF.Min(1f, bg * 0.40f + (Th.Light ? 0.52f : 0.46f));
+        float cb = MathF.Min(1f, bb * 0.35f + (Th.Light ? 0.70f : 0.68f));
+
+        float a1 = (Th.Light ? 0.085f : 0.115f) * mul;
+        float a2 = (Th.Light ? 0.070f : 0.085f) * mul;
+        float a3 = (Th.Light ? 0.060f : 0.070f) * mul;
+        RadialGlow(w * 0.16f, h * 0.10f, w * 0.52f, h * 0.48f, br, bg, bb, a1, slot: 5);
+        RadialGlow(w * 0.86f, h * 0.22f, w * 0.50f, h * 0.52f, cr, cg, cb, a2, slot: 6);
+        RadialGlow(w * 0.52f, h * 0.94f, w * 0.60f, h * 0.44f, (br + cr) * 0.5f, (bg + cg) * 0.5f, (bb + cb) * 0.5f, a3, slot: 7);
+
+        // 2. Tactile sandblasted matte glass micro-grain at 1:1 physical pixel crispness
+        if (_grainBrush != null)
+        {
+            _grainBrush.Transform = Matrix3x2.CreateScale(1f / MathF.Max(0.5f, Scale));
+            _grainBrush.Opacity = (Th.Light ? 0.055f : 0.062f) * mul;
+            DC.FillRectangle(new Vortice.RawRectF(0, 0, w, h), _grainBrush);
+        }
+    }
+
+    /// <summary>Draws a frosted matte glass panel surface with translucent tint, fine tactile grain, and luminous 1px bevel.</summary>
+    public static void FillFrosted(R r, uint baseColor, float radius = 0, float opacity = 0.80f, bool border = false)
+    {
+        var mode = Services.AppSettings.Current.FrostedGlass;
+        if (mode == "off")
+        {
+            Fill(r, baseColor, radius);
+            if (border) Stroke(r, Th.Line, radius);
+            return;
+        }
+        bool strong = mode != "soft";
+        float effOp = strong ? opacity : MathF.Min(0.92f, opacity + 0.08f);
+        Fill(r, Fade(baseColor, effOp), radius);
+        if (_grainBrush != null)
+        {
+            _grainBrush.Transform = Matrix3x2.CreateScale(1f / MathF.Max(0.5f, Scale));
+            _grainBrush.Opacity = (Th.Light ? 0.045f : 0.055f) * (strong ? 1f : 0.55f);
+            if (radius > 0)
+                DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = radius, RadiusY = radius }, _grainBrush);
+            else
+                DC.FillRectangle(Raw(r), _grainBrush);
+        }
+        if (border)
+            Stroke(r, Th.A(Th.Light ? 0.14f : 0.13f), radius, 1f);
     }
 
     public static void Image(ID2D1Bitmap bmp, R dest, float opacity = 1)

@@ -253,12 +253,16 @@ public sealed class SettingsPage : IPage
     private string _version = "";
     private bool _updating;
     private bool _sfxGuideOpen;
+    private bool _dragSfxVol;
+    private long _lastSfxVolAt;
     private readonly int _scroll = UI.Id("settings");
     private static readonly (string Key, string Name)[] Cats =
         [("sponsor", "Спонсоры"), ("selfpromo", "Самореклама"), ("interaction", "«Подпишись»"), ("intro", "Заставки"), ("outro", "Концовки")];
     private static readonly float[] ZoomPresets = [0.75f, 0.85f, 0.90f, 1.00f, 1.10f, 1.25f, 1.40f, 1.50f];
     private static readonly (string Key, string Label)[] SeasonalEffects =
         [("none", "Выкл"), ("newyear", "❄ Новый год"), ("halloween", "🎃 Хэллоуин")];
+    private static readonly (string Key, string Label)[] FrostedModes =
+        [("off", "Выкл"), ("soft", "Лёгкое"), ("matte", "Матовое стекло")];
     private static readonly (string Code, string Name)[] AudioLangs =
     [
         ("", "Оригинал (как на YouTube)"),
@@ -380,8 +384,8 @@ public sealed class SettingsPage : IPage
             ? (curAcc is { Name.Length: > 0 } ? $"Активный аккаунт: {curAcc.Name}" : "Вы вошли в YouTube")
             : "Вы не вошли в аккаунт";
         var acc = Row(accTitle,
-            logged ? "Можно добавить несколько аккаунтов через окно входа и переключать их в 1 клик."
-                   : "Войдите в Google во встроенном окне — подписки, история и рекомендации подтянутся автоматически.", 58, 380);
+            logged ? $"Вход через {BrowserLogin.DefaultBrowserName}: добавляйте несколько аккаунтов и переключайте их в 1 клик."
+                   : $"Войдите в Google через {BrowserLogin.DefaultBrowserName} — подписки, история и рекомендации подтянутся автоматически.", 58, 430);
         if (Visible(acc.Y, acc.H))
         {
             float bx = acc.Right - 14;
@@ -391,9 +395,9 @@ public sealed class SettingsPage : IPage
                 if (UI.Pill(UI.Id("set:logout"), bx, acc.Y + 12, 34, null, "Выйти", out _)) App.Post(Shell.Logout);
                 bx -= 8;
             }
-            var addLabel = logged ? "Добавить аккаунт" : "Войти в YouTube";
-            var aw = UI.PillWidth(logged ? Th.Add : Th.Account, addLabel); bx -= aw;
-            if (UI.Pill(UI.Id("set:login"), bx, acc.Y + 12, 34, logged ? Th.Add : Th.Account, addLabel, out _, accent: true))
+            var addLabel = logged ? $"Добавить ({BrowserLogin.DefaultBrowserName})" : $"Войти через {BrowserLogin.DefaultBrowserName}";
+            var aw = UI.PillWidth(logged ? Th.Add : Th.Globe, addLabel); bx -= aw;
+            if (UI.Pill(UI.Id("set:login"), bx, acc.Y + 12, 34, logged ? Th.Add : Th.Globe, addLabel, out _, accent: true))
                 App.Post(Shell.LoginNewAccount);
             if (AccountMenu.Saved.Count > 0)
             {
@@ -407,21 +411,59 @@ public sealed class SettingsPage : IPage
                         check: logged && a.Id == AccountMenu.ActiveId,
                         icon: Th.Account)).ToList();
                     list.Add(MenuItem.Sep);
-                    list.Add(new("Добавить новый аккаунт…", Shell.LoginNewAccount, icon: Th.Add));
+                    list.Add(new($"Войти через {BrowserLogin.DefaultBrowserName}…", Shell.LoginNewAccount, icon: Th.Globe));
+                    list.Add(new("Встроенное окно входа…", Shell.LoginWebView, icon: Th.Account));
                     Menus.Popup(list);
                 }
             }
         }
-        var imp = Row("Импорт cookies.txt (резервный способ)", "Если удобнее перенести сессию файлом Netscape cookies.txt.", 54, 210);
+        var imp = Row("Резервные способы входа", "Встроенное окно входа или импорт файла Netscape cookies.txt.", 54, 380);
         if (Visible(imp.Y, imp.H))
         {
-            var w2 = UI.PillWidth(Th.Folder, "Выбрать cookies.txt");
-            if (UI.Pill(UI.Id("set:ck"), imp.Right - w2 - 14, imp.Y + 10, 34, Th.Folder, "Выбрать cookies.txt", out _))
-                App.Post(() => { if (Dialogs.PickFile("cookies.txt\0*.txt\0\0") is { } f) BrowserLogin.ImportFromFile(f); });
+            float bx = imp.Right - 14;
+            var w2 = UI.PillWidth(Th.Folder, "Выбрать cookies.txt"); bx -= w2;
+            if (UI.Pill(UI.Id("set:ck"), bx, imp.Y + 10, 34, Th.Folder, "Выбрать cookies.txt", out _))
+                App.Post(() => Dialogs.PickFileAsync("cookies.txt\0*.txt\0\0", BrowserLogin.ImportFromFile));
+            bx -= 8;
+            var w3 = UI.PillWidth(Th.Account, "Встроенное окно"); bx -= w3;
+            if (UI.Pill(UI.Id("set:wvlogin"), bx, imp.Y + 10, 34, Th.Account, "Встроенное окно", out _))
+                App.Post(Shell.LoginWebView);
         }
 
         Section("Оформление");
         _y += ThemePicker.Draw(_x, _y, _w);
+
+        var customThemeRow = Row("Свои темы (редактор кода)", "Пишите темы в JSON или key: #RRGGBB с живым превью · ПКМ по любой теме открывает её код", 58, 340);
+        if (Visible(customThemeRow.Y, customThemeRow.H))
+        {
+            float tx = customThemeRow.Right - 14;
+            var tdW = UI.PillWidth(Th.Folder, "Папка тем"); tx -= tdW;
+            if (UI.Pill(UI.Id("set:tdir"), tx, customThemeRow.Y + 12, 34, Th.Folder, "Папка тем", out _))
+                W.Open(Themes.CustomDir);
+            tx -= 8;
+            var teW = UI.PillWidth(Th.Add, "Создать / код темы…"); tx -= teW;
+            if (UI.Pill(UI.Id("set:tedit"), tx, customThemeRow.Y + 12, 34, Th.Add, "Создать / код темы…", out _, accent: true))
+                App.Post(() => ThemeCodeEditor.Show());
+        }
+
+        var frostRow = Row("Матовое стекло на фон", "Приятная шероховатая текстура матового стекла и мягкий рассеянный свет на любую тему", 58, 360);
+        if (Visible(frostRow.Y, frostRow.H))
+        {
+            float fx = frostRow.Right - 14;
+            for (int fi = FrostedModes.Length - 1; fi >= 0; fi--)
+            {
+                var (fk, fl) = FrostedModes[fi];
+                var fw = UI.PillWidth(null, fl); fx -= fw;
+                bool on = s.FrostedGlass == fk;
+                if (UI.Pill(UI.Id("set:frost:" + fk), fx, frostRow.Y + 12, 34, null, fl, out _, accent: on))
+                {
+                    s.FrostedGlass = fk;
+                    Saved();
+                    App.Invalidate();
+                }
+                fx -= 8;
+            }
+        }
         var zr = Row("Масштаб интерфейса", "Как в браузере: Ctrl + колёсико мыши, Ctrl + / − или Ctrl + 0 для сброса", 58, 220);
         if (Visible(zr.Y, zr.H))
         {
@@ -442,7 +484,57 @@ public sealed class SettingsPage : IPage
         }
         ToggleRow("side", "Скрыть боковую панель", s.SidebarCollapsed, v => s.SidebarCollapsed = v, "Также переключается кнопкой меню сверху слева или Ctrl+B");
         ToggleRow("ambient", "Подсветка видео (Ambient Mode)", s.AmbientMode, v => s.AmbientMode = v, "Мягкое GPU-свечение вокруг плеера в цветах текущей сцены (обычные видео и Shorts)");
-        ToggleRow("sfx", "Звуки интерфейса (Silent Hill / MGS)", s.UiSounds, v => { s.UiSounds = v; if (v) Sfx.Tab(); }, "Отдельные тактильные звуки на клик, открытие видео, лайк, канал, громкость, вкладки и переключатели");
+        ToggleRow("sfx", "Звуки интерфейса (Silent Hill / MGS)", s.UiSounds, v => { s.UiSounds = v; if (v) Sfx.Tab(); }, "Отдельные тактильные звуки на клик, открытие видео, лайк, канал, громкость (зависит от громкости видео), вкладки и тумблеры");
+
+        if (!UI.Down && _dragSfxVol)
+        {
+            _dragSfxVol = false;
+            Sfx.RebuildBuffers();
+            Sfx.Preview("click");
+            Saved();
+        }
+        var sfxVolRow = Row("Громкость звуков интерфейса", "Увеличьте (до 300%) или убавьте громкость стандартных и своих звуков", 58, 300);
+        if (Visible(sfxVolRow.Y, sfxVolRow.H))
+        {
+            int sv = Math.Clamp(s.UiSoundsVolume, 10, 300);
+            float bx = sfxVolRow.Right - 14;
+            var plusR = new R(bx - 30, sfxVolRow.Y + 14, 30, 30);
+            Gfx.Fill(plusR, Th.A(0.1f), 15);
+            if (UI.IconButton(UI.Id("set:svplus"), plusR, Th.Add, 11))
+            {
+                s.UiSoundsVolume = Math.Clamp(sv + 15, 10, 300);
+                Sfx.RebuildBuffers(); Sfx.Preview("click"); Saved();
+            }
+            bx -= 36;
+            var svTxt = Gfx.Text($"{sv}%", 12.5f, 600);
+            Gfx.Draw(svTxt, bx - svTxt.W, sfxVolRow.Y + (sfxVolRow.H - svTxt.H) / 2, Th.Text);
+            bx -= 48;
+            float slW = 136, slX = bx - slW;
+            var slHit = new R(slX - 4, sfxVolRow.Y + 12, slW + 8, 34);
+            var slHot = UI.Hover(slHit) || _dragSfxVol;
+            if (UI.Pressed && UI.Hover(slHit)) _dragSfxVol = true;
+            if (_dragSfxVol)
+            {
+                int nv = (int)MathF.Round((10 + Math.Clamp((UI.MX - slX) / slW, 0, 1) * 290) / 5f) * 5;
+                if (nv != s.UiSoundsVolume)
+                {
+                    s.UiSoundsVolume = Math.Clamp(nv, 10, 300);
+                    if (UI.Now - _lastSfxVolAt > 90) { _lastSfxVolAt = UI.Now; Sfx.RebuildBuffers(); Sfx.Preview("volume"); }
+                }
+            }
+            if (slHot) UI.Hand();
+            float frac = (s.UiSoundsVolume - 10) / 290f;
+            UI.Progress(new R(slX, sfxVolRow.Y + 27, slW, slHot ? 6 : 4), frac, Th.A(0.22f), Th.Brand);
+            Gfx.Circle(slX + slW * frac, sfxVolRow.Y + 29, slHot ? 6.5f : 5f, Th.Text);
+            var minusR = new R(slX - 36, sfxVolRow.Y + 14, 30, 30);
+            Gfx.Fill(minusR, Th.A(0.1f), 15);
+            if (UI.IconButton(UI.Id("set:svminus"), minusR, "\uE738", 11))
+            {
+                s.UiSoundsVolume = Math.Clamp(sv - 15, 10, 300);
+                Sfx.RebuildBuffers(); Sfx.Preview("click"); Saved();
+            }
+        }
+        ToggleRow("sfx8d", "8D Реверберация звуков интерфейса", s.UiSoundsReverb8D, v => { s.UiSoundsReverb8D = v; Sfx.RebuildBuffers(); Sfx.Preview("video_open"); }, "Объёмный 8D стерео-ревербератор (пространственное эхо вокруг головы на все стандартные и свои звуки)");
 
         var sfxCustomRow = Row("Свои звуки интерфейса (WAV / MP3 / OGG / FLAC / ZIP)",
             s.CustomSfx.Count > 0 ? $"Заменено звуков: {s.CustomSfx.Count} из {Sfx.Slots.Length}. Можно закинуть сразу .zip архив со звуками."
@@ -475,7 +567,7 @@ public sealed class SettingsPage : IPage
                     var hasCustom = s.CustomSfx.TryGetValue(k, out var cname) && !string.IsNullOrEmpty(cname);
                     var sub = new List<MenuItem>
                     {
-                        new("Выбрать свой файл…", () => App.Post(() => { if (Dialogs.PickFile(audioFilter) is { } f) Sfx.SetCustom(k, f); }), icon: Th.Folder),
+                        new("Выбрать свой файл…", () => App.Post(() => Dialogs.PickFileAsync(audioFilter, f => Sfx.SetCustom(k, f))), icon: Th.Folder),
                         new("Прослушать", () => Sfx.Preview(k), icon: Th.Play),
                     };
                     if (hasCustom) sub.Add(new("Сбросить на стандартный", () => Sfx.ResetSlot(k), icon: Th.Restart, danger: true));
@@ -493,7 +585,7 @@ public sealed class SettingsPage : IPage
             var zw2 = UI.PillWidth(Th.Download, "Архив .zip…");
             sfxX -= zw2;
             if (UI.Pill(UI.Id("set:sfxzip"), sfxX, sfxCustomRow.Y + 12, 34, Th.Download, "Архив .zip…", out _, accent: true))
-                App.Post(() => { if (Dialogs.PickFile("ZIP-архив со звуками (*.zip)\0*.zip\0\0") is { } f) Sfx.ImportZip(f); });
+                App.Post(() => Dialogs.PickFileAsync("ZIP-архив со звуками (*.zip)\0*.zip\0\0", Sfx.ImportZip));
         }
 
         if (_sfxGuideOpen)
@@ -552,6 +644,7 @@ public sealed class SettingsPage : IPage
                 }, check: a.Code == s.AudioLanguage, icon: Th.Volume)).ToList());
             }
         }
+        ToggleRow("audio8d", "8D Аудио и реверберация в плеере", s.PlayerAudio8D, v => s.PlayerAudio8D = v, "Плавный 8D-эффект вращения звука и глубокая реверберация на видео и музыку (включается на лету)");
         ToggleRow("wscroll", "Прокручивать всю страницу с видео", s.ScrollWholeWatchPage, v => s.ScrollWholeWatchPage = v, "Включено: при прокрутке вниз видео скрывается, удобно читать комментарии. Выключено: комментарии листаются отдельно.");
         ToggleRow("shov", "Подпись Shorts поверх видео при наведении", s.ShortsInfoOverlay, v => { s.ShortsInfoOverlay = v; Shell.PushPlayerState(); }, "Включено: когда панель Shorts скрыта, канал и название появляются поверх видео при наведении. Выключено: аккуратный блок текста сбоку.");
         ToggleRow("sb", "SponsorBlock", s.SponsorBlock, v => s.SponsorBlock = v, "Пропускать рекламные вставки авторов (выделяются жирной зелёной полосой на таймлайне)");
@@ -600,7 +693,7 @@ public sealed class SettingsPage : IPage
             }
             var pw = UI.PillWidth(null, "Выбрать…"); bx -= pw + 8;
             if (UI.Pill(UI.Id("set:pdir"), bx, dr.Y + 12, 34, null, "Выбрать…", out _))
-                App.Post(() => { if (Dialogs.PickFolder("Папка для загрузок") is { } d) { s.DownloadDir = d; Saved(); } });
+                App.Post(() => Dialogs.PickFolderAsync("Папка для загрузок", d => { s.DownloadDir = d; Saved(); }));
         }
         ChoiceRow("dq", "Качество по умолчанию", s.DownloadQuality, AppSettings.Qualities, v => s.DownloadQuality = v);
         ToggleRow("sbd", "Вырезать спонсорские вставки из скачанных файлов", s.SponsorBlockOnDownload, v => s.SponsorBlockOnDownload = v);

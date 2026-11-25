@@ -152,23 +152,24 @@ public static class Cards
         }
         var thumbR = new R(x, y, cardW, thumbH);
         var behind = UI.GlowOn(Th.Bg, glow);
-        bool previewing = false;
-        if (over && v.PlaylistId == null && !v.IsLive && v.VideoId.Length == 11)
+        bool wantPreview = over && v.PlaylistId == null && !v.IsLive && v.VideoId.Length == 11;
+        if (wantPreview)
         {
             if (_previewCardId != id) { _previewCardId = id; _previewSince = UI.Now; }
             double hSec = (UI.Now - _previewSince) / 1000.0;
-            if (hSec < 0.40) UI.Animate();
+            if (hSec < 0.38) UI.Animate();
             if (hSec >= 0.35)
             {
-                // Draw HD thumbnail once (without duration badge while storyboard fades in over it)
-                Thumb(thumbR, v, true, 12, badge: false, behind: behind);
-                previewing = Storyboard.TryDrawCardPreview(v.VideoId, thumbR, 12, behind, hSec);
-                if (!previewing && v.HasDuration)
+                // Real hardware-decoded muted HD live video preview (hq720.jpg stays underneath until 1st frame renders!)
+                PreviewPlayer.Want(v.VideoId, thumbR, Gfx.Clip, 12);
+                bool liveReady = PreviewPlayer.IsReadyFor(v.VideoId);
+                Thumb(thumbR, v, true, 12, badge: !liveReady, behind: behind);
+                if (!liveReady)
                 {
-                    var run = Gfx.Text(v.DurationBadge, 11.5f, 600);
-                    var b = new R(thumbR.Right - run.W - 15, thumbR.Bottom - run.H - 10, run.W + 9, run.H + 3);
-                    Gfx.Fill(b, Th.Badge, 4);
-                    Gfx.Draw(run, b.X + 4.5f, b.Y + 1, 0xFFFFFFFF);
+                    var pr = Gfx.Text("HD", 10.5f, 700);
+                    var pb = new R(thumbR.X + 8, thumbR.Y + 8, pr.W + 12, pr.H + 4);
+                    Gfx.Fill(pb, Gfx.Fade(0xFF0A0A0E, 0.72f), 5);
+                    Gfx.Draw(pr, pb.X + 6, pb.Y + 2, 0xFFFFFFFF);
                 }
             }
             else Thumb(thumbR, v, true, 12, behind: behind);
@@ -358,6 +359,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     public void Refresh()
     {
         _chipIdx = 0;
+        _chipCache.Clear();
         if (_fresh is { } p) { _fresh = null; _message = null; Replace(p, saveCache: true); }
         else Load();
     }
@@ -366,6 +368,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
         _loaded = false;
         _fresh = null;
         _chipIdx = 0;
+        _chipCache.Clear();
         _chips = [];
         _items = [];
         _ids.Clear();
@@ -500,6 +503,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     private bool _fromDisk;
     private FeedPage_? _fresh;
     private List<(string Title, string Token, bool Selected)> _chips = [];
+    private readonly Dictionary<int, FeedPage_> _chipCache = new();
     private int _chipIdx;
     private float _chipScroll;
 
@@ -541,14 +545,43 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
     private void SelectChip(int idx)
     {
         if (idx < 0 || idx >= _chips.Count || idx == _chipIdx) return;
-        var prevIdx = _chipIdx;
+        PreviewPlayer.HideNow();
+
+        // Snapshot current category into memory cache so switching back is 0ms instant!
+        if (_items.Count > 0 && !_chipCache.ContainsKey(_chipIdx))
+        {
+            var snap = new FeedPage_ { Continuation = _cont };
+            snap.Items.AddRange(_items);
+            _chipCache[_chipIdx] = snap;
+        }
+
         _chipIdx = idx;
         var chip = _chips[idx];
         var gen = ++_gen;
-        _loading = true;
         _loadingMore = false;
         _message = null;
+
+        // Instant 0ms switch when already visited!
+        if (_chipCache.TryGetValue(idx, out var cached) && cached.Items.Count > 0)
+        {
+            _loading = false;
+            Replace(cached, saveCache: false);
+            App.Invalidate();
+            return;
+        }
+
+        // Immediate visual switch: clear old cards right away so skeleton appears on click frame 0!
+        _items = [];
+        _ids.Clear();
+        _cont = null;
+        UI.ScrollReset(_scroll);
+        _loading = true;
         App.Invalidate();
+
+        var fallbackQuery = idx < Top5HomeSpecs.Length && Top5HomeSpecs[idx].FallbackToken.StartsWith("search:", StringComparison.Ordinal)
+            ? Top5HomeSpecs[idx].FallbackToken[7..]
+            : chip.Title;
+
         _ = Task.Run(async () =>
         {
             try
@@ -560,13 +593,19 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 else if (chip.Token.StartsWith("search:", StringComparison.Ordinal))
                     page = await yt.SearchAsync(chip.Token[7..]);
                 else
-                    page = await yt.ContinueAsync("browse", chip.Token);
+                {
+                    try { page = await yt.ContinueAsync("browse", chip.Token); }
+                    catch { page = new FeedPage_(); }
+                    // Auto-fallback to search if YouTube continuation token expired or returned 0 items
+                    if (page.Items.Count == 0 && !string.IsNullOrWhiteSpace(fallbackQuery))
+                        page = await yt.SearchAsync(fallbackQuery);
+                }
                 Cards.WithProgress(page);
                 App.Post(() =>
                 {
                     if (gen != _gen) return;
                     _loading = false;
-                    // Only overwrite disk Home cache when back on Рекомендации (idx == 0)
+                    if (page.Items.Count > 0) _chipCache[idx] = page;
                     Replace(page, saveCache: idx == 0);
                     if (_items.Count == 0) Say("По этой категории пока ничего не нашлось.", Th.Sub);
                 });
@@ -574,7 +613,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
             catch (Exception e)
             {
                 Paths.Log($"home chip {chip.Title}: {e.Message}");
-                App.Post(() => { if (gen == _gen) { _chipIdx = prevIdx; _loading = false; Say("Не удалось загрузить категорию: " + e.Message, Th.Brand); } });
+                App.Post(() => { if (gen == _gen) { _loading = false; Say("Не удалось загрузить категорию: " + e.Message, Th.Brand); } });
             }
         });
     }
@@ -661,6 +700,8 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
             Say("Войдите в аккаунт YouTube (кнопка справа сверху), чтобы видеть этот раздел.", Th.Sub);
             return;
         }
+        if (kind == "home" && _chips.Count == 0)
+            _chips = BuildTop5HomeChips([]);
         if (_items.Count == 0 && Cacheable && FeedCache.Load(kind) is { Count: > 0 } saved)
         {
             // yesterday's feed is on screen (and its streams are being prepared) while today's is on its way
@@ -714,6 +755,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                     {
                         _chips = BuildTop5HomeChips(page.Chips);
                         _chipIdx = 0;
+                        if (page.Items.Count > 0) _chipCache[0] = page;
                     }
                     Replace(page, saveCache: true);
                     if (note != null) Say(note, Th.Sub, inline: page.Items.Count > 0);

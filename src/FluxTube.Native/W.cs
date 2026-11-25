@@ -5,7 +5,7 @@ namespace FluxTube;
 /// <summary>The Win32 surface the shell uses. Blittable signatures only, so it compiles ahead of time.</summary>
 internal static unsafe partial class W
 {
-    public const uint WM_DESTROY = 0x0002, WM_SIZE = 0x0005, WM_SETFOCUS = 0x0007, WM_KILLFOCUS = 0x0008, WM_PAINT = 0x000F, WM_CLOSE = 0x0010,
+    public const uint WM_DESTROY = 0x0002, WM_SIZE = 0x0005, WM_SETFOCUS = 0x0007, WM_KILLFOCUS = 0x0008, WM_ENABLE = 0x000A, WM_PAINT = 0x000F, WM_CLOSE = 0x0010,
         WM_ERASEBKGND = 0x0014, WM_SHOWWINDOW = 0x0018, WM_CANCELMODE = 0x001F, WM_SETCURSOR = 0x0020, WM_GETMINMAXINFO = 0x0024, WM_SETFONT = 0x0030, WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_CHAR = 0x0102,
         WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105, WM_COMMAND = 0x0111, WM_TIMER = 0x0113, WM_CTLCOLOREDIT = 0x0133, WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201,
         WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203, WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205, WM_MBUTTONDOWN = 0x0207, WM_MBUTTONUP = 0x0208, WM_MOUSEWHEEL = 0x020A,
@@ -13,8 +13,9 @@ internal static unsafe partial class W
         WM_MOUSEACTIVATE = 0x0021, WM_NCCALCSIZE = 0x0083, WM_NCHITTEST = 0x0084, WM_GETTEXTLENGTH = 0x000E, WM_ENTERSIZEMOVE = 0x0231, WM_EXITSIZEMOVE = 0x0232;
 
     public const uint WS_OVERLAPPEDWINDOW = 0x00CF0000, WS_VISIBLE = 0x10000000, WS_CHILD = 0x40000000, WS_CLIPCHILDREN = 0x02000000,
-        WS_CLIPSIBLINGS = 0x04000000, WS_POPUP = 0x80000000, WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x00000080, WS_EX_TOPMOST = 0x00000008,
-        ES_AUTOHSCROLL = 0x0080;
+        WS_CLIPSIBLINGS = 0x04000000, WS_POPUP = 0x80000000, WS_VSCROLL = 0x00200000,
+        WS_EX_NOACTIVATE = 0x08000000, WS_EX_TOOLWINDOW = 0x00000080, WS_EX_TOPMOST = 0x00000008,
+        ES_MULTILINE = 0x0004, ES_AUTOVSCROLL = 0x0040, ES_AUTOHSCROLL = 0x0080, ES_WANTRETURN = 0x1000;
 
     public const uint SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOZORDER = 4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20, SWP_SHOWWINDOW = 0x40, SWP_HIDEWINDOW = 0x80;
     public const int SW_HIDE = 0, SW_SHOW = 5, SW_SHOWNA = 8, SW_SHOWNOACTIVATE = 4, SW_SHOWNORMAL = 1, SW_MAXIMIZE = 3;
@@ -47,6 +48,7 @@ internal static unsafe partial class W
     public static partial nint CreateWindowExW(uint ex, string cls, string? name, uint style, int x, int y, int w, int h, nint parent, nint menu, nint inst, nint param);
     [LibraryImport("user32.dll")] public static partial nint DefWindowProcW(nint h, uint m, nuint w, nint l);
     [LibraryImport("user32.dll")] public static partial int GetMessageW(MSG* msg, nint h, uint min, uint max);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool PeekMessageW(MSG* msg, nint h, uint min, uint max, uint remove);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool TranslateMessage(MSG* msg);
     [LibraryImport("user32.dll")] public static partial nint DispatchMessageW(MSG* msg);
     [LibraryImport("user32.dll")] public static partial void PostQuitMessage(int code);
@@ -74,6 +76,7 @@ internal static unsafe partial class W
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool TrackMouseEvent(TRACKMOUSEEVENT* e);
     [LibraryImport("user32.dll")] public static partial nint SetFocus(nint h);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool EnableWindow(nint h, int enable);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool IsWindowEnabled(nint h);
     [LibraryImport("user32.dll")] public static partial nint GetFocus();
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool GetCursorPos(POINT* p);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool ScreenToClient(nint h, POINT* p);
@@ -100,6 +103,8 @@ internal static unsafe partial class W
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool OpenClipboard(nint h);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool EmptyClipboard();
     [LibraryImport("user32.dll")] public static partial nint SetClipboardData(uint fmt, nint mem);
+    [LibraryImport("user32.dll")] public static partial nint GetClipboardData(uint fmt);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool IsClipboardFormatAvailable(uint fmt);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool CloseClipboard();
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool IsIconic(nint h);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool IsZoomed(nint h);
@@ -158,6 +163,31 @@ internal static unsafe partial class W
         GlobalUnlock(mem);
         SetClipboardData(13 /*CF_UNICODETEXT*/, mem);
         CloseClipboard();
+    }
+
+    public static string? GetClipboardText(nint owner, int maxChars = 16384)
+    {
+        if (!IsClipboardFormatAvailable(13 /*CF_UNICODETEXT*/)) return null;
+        for (int attempt = 0; !OpenClipboard(owner); attempt++)
+        {
+            if (attempt >= 6) return null;
+            Thread.Sleep(15);
+        }
+        try
+        {
+            var h = GetClipboardData(13 /*CF_UNICODETEXT*/);
+            if (h == 0) return null;
+            var p = (char*)GlobalLock(h);
+            if (p == null) return null;
+            try
+            {
+                int len = 0;
+                while (len < maxChars && p[len] != '\0') len++;
+                return len > 0 ? new string(p, 0, len) : null;
+            }
+            finally { GlobalUnlock(h); }
+        }
+        finally { CloseClipboard(); }
     }
 
     public static string GetText(nint h)

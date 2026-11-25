@@ -13,7 +13,10 @@ public sealed unsafe class Edit
     private static nint _oldProc;
     private static readonly Dictionary<uint, nint> _brushes = new();
 
+    public static bool AnyFocused => _all.ContainsKey(W.GetFocus());
+
     public nint H { get; }
+    public bool Multiline { get; }
     public Action? Enter, Changed, Escape;
     public Func<int, bool>? Arrow;
     /// <summary>Colour of the box the renderer draws behind the control (read on every repaint: themes change it).</summary>
@@ -24,14 +27,22 @@ public sealed unsafe class Edit
     private bool _visible;
     private bool _silent;
 
-    public Edit(string placeholder)
+    public Edit(string placeholder, bool multiline = false)
     {
-        H = W.CreateWindowExW(0, "EDIT", "", W.WS_CHILD | W.WS_CLIPSIBLINGS | W.ES_AUTOHSCROLL, 0, 0, 10, 10, App.Hwnd, 0, 0, 0);
+        Multiline = multiline;
+        uint style = W.WS_CHILD | W.WS_CLIPSIBLINGS | (multiline
+            ? (W.ES_MULTILINE | W.ES_WANTRETURN | W.ES_AUTOVSCROLL | W.ES_AUTOHSCROLL | W.WS_VSCROLL)
+            : W.ES_AUTOHSCROLL);
+        H = W.CreateWindowExW(0, "EDIT", "", style, 0, 0, 10, 10, App.Hwnd, 0, 0, 0);
         _all[H] = this;
         delegate* unmanaged[Stdcall]<nint, uint, nuint, nint, nint> proc = &Proc;
-        _oldProc = W.SetWindowLongPtrW(H, W.GWLP_WNDPROC, (nint)proc);
-        fixed (char* p = placeholder) W.SendMessageW(H, 0x1501 /*EM_SETCUEBANNER*/, 1, (nint)p);
-        W.SendMessageW(H, 0x00C5 /*EM_SETLIMITTEXT*/, 2000, 0);
+        var prev = W.SetWindowLongPtrW(H, W.GWLP_WNDPROC, (nint)proc);
+        if (_oldProc == 0) _oldProc = prev;
+        if (!multiline)
+        {
+            fixed (char* p = placeholder) W.SendMessageW(H, 0x1501 /*EM_SETCUEBANNER*/, 1, (nint)p);
+        }
+        W.SendMessageW(H, 0x00C5 /*EM_SETLIMITTEXT*/, multiline ? 16384u : 2000u, 0);
     }
 
     public string Text
@@ -48,12 +59,18 @@ public sealed unsafe class Edit
     }
 
     public bool Focused => W.GetFocus() == H;
-    public void Focus() { W.SetFocus(H); W.SendMessageW(H, 0x00B1, 0, -1); }
+    public void Focus(bool selectAll = true)
+    {
+        W.SetFocus(H);
+        if (selectAll) W.SendMessageW(H, 0x00B1, 0, -1);
+        else { var len = W.GetWindowTextLengthW(H); W.SendMessageW(H, 0x00B1, (nuint)len, len); }
+    }
 
-    /// <summary>Puts the control inside box (DIPs), vertically centred, and shows it.</summary>
-    public void Place(R box, float padLeft = 14, float padRight = 14)
+    /// <summary>Puts the control inside box (DIPs), vertically centred (single-line) or filling box (multiline), and shows it.</summary>
+    public void Place(R box, float padLeft = 14, float padRight = 14, bool allowInModal = false)
     {
         // a native control paints above everything the renderer draws: step aside for open overlays
+        if (!allowInModal && ThemeCodeEditor.Open) { Hide(); return; }
         if (AccountMenu.Open && AccountMenu.Rect is { W: > 0 } m && box.Right > m.X && box.X < m.Right && box.Bottom > m.Y && box.Y < m.Bottom) { Hide(); return; }
         if (Menus.Open && Menus.Bounds is { W: > 0 } mb && box.Right > mb.X && box.X < mb.Right && box.Bottom > mb.Y && box.Y < mb.Bottom) { Hide(); return; }
         if (Shell.TabPreviewRect is { W: > 0 } tp && box.Right > tp.X && box.X < tp.Right && box.Bottom > tp.Y && box.Y < tp.Bottom) { Hide(); return; }
@@ -61,16 +78,25 @@ public sealed unsafe class Edit
         if (_fontScale != s)
         {
             var oldFont = _font;
-            _font = W.CreateFontW(-(int)MathF.Round(14.5f * s), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5 /*CLEARTYPE*/, 0, Gfx.Font);
+            _font = W.CreateFontW(-(int)MathF.Round((Multiline ? 13.5f : 14.5f) * s), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5 /*CLEARTYPE*/, 0, Multiline ? "Consolas" : Gfx.Font);
             _fontScale = s;
             W.SendMessageW(H, W.WM_SETFONT, (nuint)_font, 1);
             if (oldFont != 0) W.DeleteObject(oldFont);
         }
-        int h = (int)MathF.Round(21 * s);
         int l = (int)MathF.Round((box.X + padLeft) * s);
         int r = Math.Max(l + 1, (int)MathF.Round((box.Right - padRight) * s));
-        var rc = new W.RECT { L = l, T = (int)MathF.Round((box.Y + box.H / 2) * s) - h / 2, R = r };
-        rc.B = rc.T + h;
+        W.RECT rc;
+        if (Multiline)
+        {
+            int padY = (int)MathF.Round(10 * s);
+            rc = new W.RECT { L = l, T = (int)MathF.Round(box.Y * s) + padY, R = r, B = Math.Max((int)MathF.Round(box.Y * s) + padY + 20, (int)MathF.Round(box.Bottom * s) - padY) };
+        }
+        else
+        {
+            int h = (int)MathF.Round(21 * s);
+            rc = new W.RECT { L = l, T = (int)MathF.Round((box.Y + box.H / 2) * s) - h / 2, R = r };
+            rc.B = rc.T + h;
+        }
         if (!_visible || rc.L != _last.L || rc.T != _last.T || rc.R != _last.R || rc.B != _last.B)
         {
             _last = rc; _visible = true;
@@ -126,15 +152,17 @@ public sealed unsafe class Edit
                 }
                 switch ((int)w)
                 {
-                    case W.VK_RETURN: e.Enter?.Invoke(); return 0;
+                    case W.VK_RETURN:
+                        if (!e.Multiline || W.KeyDown(W.VK_CONTROL)) { e.Enter?.Invoke(); return 0; }
+                        break;
                     case W.VK_ESCAPE: e.Escape?.Invoke(); W.SetFocus(App.Hwnd); return 0;
-                    case W.VK_UP: if (e.Arrow?.Invoke(-1) == true) return 0; break;
-                    case W.VK_DOWN: if (e.Arrow?.Invoke(1) == true) return 0; break;
+                    case W.VK_UP: if (!e.Multiline && e.Arrow?.Invoke(-1) == true) return 0; break;
+                    case W.VK_DOWN: if (!e.Multiline && e.Arrow?.Invoke(1) == true) return 0; break;
                 }
             }
             else if (m == W.WM_CHAR)
             {
-                if (w == 13 || w == 27 || w == 1) return 0; // no beep / no control char
+                if ((!e.Multiline && w == 13) || w == 27 || w == 1) return 0; // no beep / no control char
                 if (w == 0x7F) // Ctrl+Backspace: delete previous word instead of inserting a tofu square
                 {
                     uint sel0 = 0, sel1 = 0;
@@ -293,43 +321,164 @@ public static unsafe partial class Dialogs
     }
     [LibraryImport("comdlg32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static partial bool GetOpenFileNameW(OPENFILENAMEW* ofn);
 
+    private static int _dialogBusy;
+    public static bool IsDialogOpen => Volatile.Read(ref _dialogBusy) != 0;
+
+    private static void DrainMouseMessages()
+    {
+        W.MSG m;
+        while (W.PeekMessageW(&m, App.Hwnd, W.WM_LBUTTONDOWN, W.WM_MBUTTONUP, 1 /*PM_REMOVE*/)) { }
+    }
+
+    private static void RestoreMainWindow()
+    {
+        if (App.Hwnd != 0)
+        {
+            W.EnableWindow(App.Hwnd, 1);
+            W.ReleaseCapture();
+            W.SetForegroundWindow(App.Hwnd);
+            W.SetFocus(App.Hwnd);
+            DrainMouseMessages();
+        }
+        UI.ResetInput();
+        App.Invalidate();
+    }
+
     /// <summary>1 = yes/ok, 0 = no, -1 = cancel.</summary>
     public static int Ask(string text, string caption, bool threeWay = false)
     {
+        Menus.Close();
+        AccountMenu.Close();
+        W.ReleaseCapture();
+        UI.ResetInput();
         var r = MessageBoxW(App.Hwnd, text, caption, (threeWay ? 0x3u : 0x4u) | 0x20);
-        UI.Down = false;
+        RestoreMainWindow();
         return r == 6 ? 1 : r == 7 ? 0 : -1;
     }
 
-    public static string? PickFolder(string title)
+    /// <summary>
+    /// Runs the native Windows Explorer file picker on a dedicated STA thread so it NEVER nests inside WM_POST
+    /// or leaves App.Hwnd disabled / click-locked on repeated invocations.
+    /// </summary>
+    public static void PickFileAsync(string filter, Action<string> onPicked)
     {
-        var buf = stackalloc char[520];
-        fixed (char* t = title)
+        if (Interlocked.CompareExchange(ref _dialogBusy, 1, 0) != 0) return;
+        Menus.Close();
+        AccountMenu.Close();
+        Suggest.Hide();
+        W.ReleaseCapture();
+        UI.ResetInput();
+        var owner = App.Hwnd;
+        if (owner != 0) W.EnableWindow(owner, 0);
+
+        var t = new Thread(() =>
         {
-            var bi = new BROWSEINFOW { hwndOwner = App.Hwnd, pszDisplayName = buf, lpszTitle = t, ulFlags = 0x0001 | 0x0040 /*RETURNONLYFSDIRS|NEWDIALOGSTYLE*/ };
-            var pidl = SHBrowseForFolderW(&bi);
-            UI.Down = false;
-            if (pidl == 0) return null;
-            var ok = SHGetPathFromIDListW(pidl, buf);
-            CoTaskMemFree(pidl);
-            return ok ? new string(buf) : null;
-        }
+            string? picked = null;
+            try
+            {
+                W.CoInitializeEx(0, 0x2 /*COINIT_APARTMENTTHREADED*/);
+                var buf = new char[4096];
+                fixed (char* pBuf = buf)
+                fixed (char* pFilter = filter)
+                {
+                    pBuf[0] = '\0';
+                    var ofn = new OPENFILENAMEW
+                    {
+                        lStructSize = (uint)sizeof(OPENFILENAMEW),
+                        hwndOwner = owner,
+                        lpstrFilter = pFilter,
+                        lpstrFile = pBuf,
+                        nMaxFile = (uint)buf.Length,
+                        Flags = 0x00080000 | 0x00001000 | 0x00000800 | 0x00000008 /*EXPLORER|FILEMUSTEXIST|PATHMUSTEXIST|NOCHANGEDIR*/,
+                    };
+                    if (GetOpenFileNameW(&ofn))
+                        picked = new string(pBuf);
+                }
+            }
+            catch (Exception e)
+            {
+                Services.Paths.Log("PickFileAsync: " + e.Message);
+            }
+            finally
+            {
+                if (owner != 0)
+                {
+                    W.EnableWindow(owner, 1);
+                    W.SetForegroundWindow(owner);
+                }
+                Interlocked.Exchange(ref _dialogBusy, 0);
+                var result = picked;
+                App.Post(() =>
+                {
+                    RestoreMainWindow();
+                    if (!string.IsNullOrEmpty(result)) onPicked(result);
+                });
+            }
+        })
+        { IsBackground = true, Name = "file-dialog" };
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
     }
 
-    public static string? PickFile(string filter)
+    /// <summary>Runs the native folder browser on a dedicated STA thread, always restoring focus & click handling cleanly.</summary>
+    public static void PickFolderAsync(string title, Action<string> onPicked)
     {
-        var buf = stackalloc char[1024];
-        buf[0] = '\0';
-        fixed (char* f = filter)
+        if (Interlocked.CompareExchange(ref _dialogBusy, 1, 0) != 0) return;
+        Menus.Close();
+        AccountMenu.Close();
+        Suggest.Hide();
+        W.ReleaseCapture();
+        UI.ResetInput();
+        var owner = App.Hwnd;
+        if (owner != 0) W.EnableWindow(owner, 0);
+
+        var t = new Thread(() =>
         {
-            var ofn = new OPENFILENAMEW
+            string? picked = null;
+            try
             {
-                lStructSize = (uint)sizeof(OPENFILENAMEW), hwndOwner = App.Hwnd, lpstrFilter = f, lpstrFile = buf, nMaxFile = 1024,
-                Flags = 0x00001000 | 0x00000800 | 0x00000008 /*FILEMUSTEXIST|PATHMUSTEXIST|NOCHANGEDIR*/,
-            };
-            var ok = GetOpenFileNameW(&ofn);
-            UI.Down = false;
-            return ok ? new string(buf) : null;
-        }
+                W.CoInitializeEx(0, 0x2 /*COINIT_APARTMENTTHREADED*/);
+                var buf = new char[1024];
+                fixed (char* pBuf = buf)
+                fixed (char* pTitle = title)
+                {
+                    var bi = new BROWSEINFOW
+                    {
+                        hwndOwner = owner,
+                        pszDisplayName = pBuf,
+                        lpszTitle = pTitle,
+                        ulFlags = 0x0001 | 0x0040 /*RETURNONLYFSDIRS|NEWDIALOGSTYLE*/,
+                    };
+                    var pidl = SHBrowseForFolderW(&bi);
+                    if (pidl != 0)
+                    {
+                        if (SHGetPathFromIDListW(pidl, pBuf)) picked = new string(pBuf);
+                        CoTaskMemFree(pidl);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Services.Paths.Log("PickFolderAsync: " + e.Message);
+            }
+            finally
+            {
+                if (owner != 0)
+                {
+                    W.EnableWindow(owner, 1);
+                    W.SetForegroundWindow(owner);
+                }
+                Interlocked.Exchange(ref _dialogBusy, 0);
+                var result = picked;
+                App.Post(() =>
+                {
+                    RestoreMainWindow();
+                    if (!string.IsNullOrEmpty(result)) onPicked(result);
+                });
+            }
+        })
+        { IsBackground = true, Name = "folder-dialog" };
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
     }
 }

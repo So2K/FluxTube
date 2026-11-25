@@ -317,7 +317,7 @@ public static class AccountMenu
         const float w = 316;
         var h = _page switch
         {
-            "accounts" => 54 + _saved.Count * 54 + (_saved.Count > 0 ? 12 : 34) + 126,
+            "accounts" => 54 + _saved.Count * 54 + (_saved.Count > 0 ? 12 : 34) + 168,
             "theme" => 52 + (Themes.All.Length + 1) * 38 + 10,
             "lang" => 52 + Langs.Length * 38 + 10,
             _ => _mainH,
@@ -330,8 +330,7 @@ public static class AccountMenu
         Rect = r;
 
         Gfx.Fill(new R(r.X + 2, r.Y + 6, r.W - 4, r.H), Gfx.Fade(0xFF000000, 0.3f * ease), 14);
-        Gfx.Fill(r, Gfx.Fade(Th.Menu, ease), 14);
-        Gfx.Stroke(r, Gfx.Fade(Th.Line, ease), 14);
+        Gfx.FillFrosted(r, Gfx.Fade(Th.Menu, ease), 14, opacity: 0.94f, border: true);
         // a sub-page slides in from the right, the main page from the left
         var pt = Math.Clamp((UI.Now - _pageAt) / 150f, 0, 1);
         if (pt < 1) UI.Animate();
@@ -381,8 +380,8 @@ public static class AccountMenu
         else
         {
             Gfx.Draw("Вы не вошли", x + 16, y, 15, Th.Text, 600);
-            Gfx.Draw("Войдите в свой аккаунт Google во встроенном окне — можно добавить несколько аккаунтов и быстро их менять.", x + 16, y + 22, 12.5f, Th.Sub, 400, r.W - 32, 3);
-            if (UI.Pill(UI.Id("am:login"), x + 16, y + 66, 34, Th.Account, "Войти в YouTube", out _, accent: true)) { Close(); App.Post(Shell.LoginNewAccount); }
+            Gfx.Draw($"Вход через {BrowserLogin.DefaultBrowserName}: добавляйте несколько аккаунтов и меняйте их в 1 клик.", x + 16, y + 22, 12.5f, Th.Sub, 400, r.W - 32, 3);
+            if (UI.Pill(UI.Id("am:login"), x + 16, y + 66, 34, Th.Globe, "Войти через " + BrowserLogin.DefaultBrowserName, out _, accent: true)) { Close(); App.Post(Shell.LoginNewAccount); }
             y += 110;
         }
         Sep(r, ref y);
@@ -410,7 +409,7 @@ public static class AccountMenu
         float x = r.X + slide, y = r.Y + 8;
         Header(r, x, ref y, "Аккаунты YouTube");
         var view = new R(r.X, y, r.W, MathF.Max(40, r.Bottom - y - 4));
-        float totalH = (_saved.Count == 0 ? 34 : _saved.Count * 54 + 12) + 122;
+        float totalH = (_saved.Count == 0 ? 34 : _saved.Count * 54 + 12) + 164;
         var scroll = UI.BeginScroll(_scrollAcc, view, totalH);
         y -= scroll;
 
@@ -460,13 +459,14 @@ public static class AccountMenu
             Sep(r, ref y);
         }
 
-        if (Item(r, x, ref y, Th.Add, "Добавить новый аккаунт…", false)) { Close(); App.Post(Shell.LoginNewAccount); }
+        if (Item(r, x, ref y, Th.Globe, "Войти через " + BrowserLogin.DefaultBrowserName, false)) { Close(); App.Post(Shell.LoginNewAccount); }
+        if (Item(r, x, ref y, Th.Account, "Встроенное окно входа…", false)) { Close(); App.Post(Shell.LoginWebView); }
         if (Item(r, x, ref y, Th.Folder, "Импорт из cookies.txt…", false))
         {
             Close();
-            App.Post(() => { if (Dialogs.PickFile("cookies.txt\0*.txt\0\0") is { } f) BrowserLogin.ImportFromFile(f); });
+            App.Post(() => Dialogs.PickFileAsync("cookies.txt\0*.txt\0\0", BrowserLogin.ImportFromFile));
         }
-        if (Item(r, x, ref y, Th.Globe, "Открыть YouTube в браузере", false)) { Close(); W.Open("https://www.youtube.com/"); }
+        if (Item(r, x, ref y, Th.OpenNew, "Открыть YouTube в браузере", false)) { Close(); W.Open("https://www.youtube.com/"); }
         UI.EndScroll();
     }
 

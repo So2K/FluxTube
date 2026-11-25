@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Text;
+using System.Text.Json.Nodes;
 using FluxTube.Services;
 
 namespace FluxTube;
@@ -6,14 +9,12 @@ namespace FluxTube;
 public sealed record Theme(string Name, string Group, bool Light, uint Bg, uint Panel, uint Card, uint Text, uint Sub, uint Dim, uint Brand, uint OnBrand = 0xFFFFFFFF);
 
 /// <summary>
-/// The themes and the switch between them. Switching eases every colour from the old palette to the new one over a
-/// quarter of a second, so the whole window changes in one smooth move instead of a flash.
-/// Editor palettes are the published colours of the open-source themes (Zed's One/Ayu/Gruvbox, Catppuccin, Dracula,
-/// Nord, Tokyo Night, Rosé Pine, Solarized, VS Code, Monokai, GitHub).
+/// Built-in & user-authored custom code themes (stored in %USERPROFILE%\.fluxtube\themes\*.json).
+/// Switching eases every colour smoothly over 260 ms.
 /// </summary>
 public static class Themes
 {
-    public static readonly Theme[] All =
+    public static readonly Theme[] BuiltIn =
     [
         new("FluxTube", "Свои", false, 0xFF0E0E11, 0xFF151519, 0xFF1C1C22, 0xFFF2F2F4, 0xFFA6A6B2, 0xFF6C6C78, 0xFFFF3355),
         new("Новогодняя", "Свои", false, 0xFF0A1220, 0xFF101C30, 0xFF172740, 0xFFF3F7FF, 0xFF9FB5D1, 0xFF647B99, 0xFFE63946),
@@ -40,6 +41,21 @@ public static class Themes
         new("GitHub Dark", "Редакторы", false, 0xFF0D1117, 0xFF161B22, 0xFF21262D, 0xFFE6EDF3, 0xFF8B949E, 0xFF6E7681, 0xFF2F81F7),
     ];
 
+    public const string CustomGroup = "Мои темы (код)";
+    public static string CustomDir
+    {
+        get
+        {
+            var d = Path.Combine(Paths.Data, "themes");
+            Directory.CreateDirectory(d);
+            return d;
+        }
+    }
+
+    private static readonly Dictionary<string, string> _customFiles = new(StringComparer.OrdinalIgnoreCase);
+    public static Theme[] All { get; private set; } = BuiltIn;
+    public static (string Group, Theme[] Items)[] Groups { get; private set; } = BuildGroups(BuiltIn);
+
     /// <summary>Accent colours offered on top of any theme ("" = the theme's own).</summary>
     public static readonly (string Name, uint Color)[] Accents =
     [
@@ -48,13 +64,199 @@ public static class Themes
         ("Фиолетовый", 0xFF9B6CFF), ("Розовый", 0xFFFF5FA2),
     ];
 
-    public static readonly (string Group, Theme[] Items)[] Groups =
-        All.GroupBy(t => t.Group).Select(g => (g.Key, g.ToArray())).ToArray();
-
-    public static Theme Current { get; private set; } = All[0];
+    public static Theme Current { get; private set; } = BuiltIn[0];
     public static bool IsNewYear => Current.Name == "Новогодняя";
+    public static bool IsCustom(string name) => _customFiles.ContainsKey(name);
 
-    public static Theme ByName(string? name) => All.FirstOrDefault(t => t.Name == name) ?? All[0];
+    private static (string Group, Theme[] Items)[] BuildGroups(Theme[] list)
+        => list.GroupBy(t => t.Group).Select(g => (g.Key, g.ToArray())).ToArray();
+
+    public static void ReloadCustom()
+    {
+        _customFiles.Clear();
+        var custom = new List<Theme>();
+        try
+        {
+            if (Directory.Exists(CustomDir))
+            {
+                foreach (var file in Directory.GetFiles(CustomDir, "*.json").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var raw = File.ReadAllText(file);
+                        if (TryParseCode(raw, out var t, out _) && t != null)
+                        {
+                            var clean = t with { Group = CustomGroup };
+                            if (BuiltIn.Any(b => b.Name.Equals(clean.Name, StringComparison.OrdinalIgnoreCase)))
+                                clean = clean with { Name = clean.Name + " (своя)" };
+                            if (_customFiles.ContainsKey(clean.Name)) continue;
+                            _customFiles[clean.Name] = file;
+                            custom.Add(clean);
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch (Exception e) { Paths.Log("themes reload: " + e.Message); }
+
+        All = custom.Count > 0 ? [.. custom, .. BuiltIn] : BuiltIn;
+        Groups = BuildGroups(All);
+    }
+
+    public static string ExportCode(Theme t, string? nameOverride = null)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("{");
+        sb.AppendLine($"  \"name\": \"{(nameOverride ?? t.Name).Replace("\"", "'")}\",");
+        sb.AppendLine($"  \"light\": {(t.Light ? "true" : "false")},");
+        sb.AppendLine($"  \"bg\": \"{Hex(t.Bg)}\",");
+        sb.AppendLine($"  \"panel\": \"{Hex(t.Panel)}\",");
+        sb.AppendLine($"  \"card\": \"{Hex(t.Card)}\",");
+        sb.AppendLine($"  \"text\": \"{Hex(t.Text)}\",");
+        sb.AppendLine($"  \"sub\": \"{Hex(t.Sub)}\",");
+        sb.AppendLine($"  \"dim\": \"{Hex(t.Dim)}\",");
+        sb.AppendLine($"  \"brand\": \"{Hex(t.Brand)}\",");
+        sb.AppendLine($"  \"onBrand\": \"{Hex(t.OnBrand)}\"");
+        sb.Append('}');
+        return sb.ToString();
+    }
+
+    public static bool TryParseColor(string? s, out uint color)
+    {
+        color = 0;
+        if (string.IsNullOrWhiteSpace(s)) return false;
+        s = s.Trim().Trim('"', '\'', ',', ';');
+        if (s.StartsWith('#')) s = s[1..];
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) s = s[2..];
+        if (s.Length == 3) s = new string([s[0], s[0], s[1], s[1], s[2], s[2]]);
+        if (s.Length == 6 && uint.TryParse(s, NumberStyles.HexNumber, null, out var rgb))
+        {
+            color = 0xFF000000u | rgb;
+            return true;
+        }
+        if (s.Length == 8 && uint.TryParse(s, NumberStyles.HexNumber, null, out var argb))
+        {
+            color = argb | 0xFF000000u;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Parses a custom theme from either JSON ({"name":"Cyber","bg":"#08090F","brand":"#00F5D4",...})
+    /// OR relaxed key: value / CSS-like lines (name: Cyber\nbg: #08090F\nbrand: #00F5D4).
+    /// Unspecified secondary colours (panel, card, sub, dim, onBrand) are smartly derived automatically!
+    /// </summary>
+    public static bool TryParseCode(string code, out Theme? theme, out string? error)
+    {
+        theme = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(code)) { error = "Введите JSON или список цветов (например bg: #0D0F18)"; return false; }
+
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var trimmed = code.Trim();
+        if (trimmed.StartsWith('{'))
+        {
+            try
+            {
+                if (JsonNode.Parse(trimmed) is JsonObject obj)
+                {
+                    foreach (var kv in obj)
+                        if (kv.Value != null) dict[kv.Key] = kv.Value.ToString();
+                }
+            }
+            catch (Exception e) { error = "Ошибка JSON: " + e.Message; return false; }
+        }
+        else
+        {
+            foreach (var rawLine in trimmed.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                var line = rawLine.Trim();
+                if (line.Length == 0 || line.StartsWith("//") || line.StartsWith('#')) continue;
+                int sep = line.IndexOfAny([':', '=']);
+                if (sep <= 0) continue;
+                var k = line[..sep].Trim().TrimStart('-').Trim('"', '\'');
+                var v = line[(sep + 1)..].Trim().TrimEnd(',', ';').Trim('"', '\'');
+                if (k.Length > 0 && v.Length > 0) dict[k] = v;
+            }
+        }
+
+        string name = dict.TryGetValue("name", out var n) && !string.IsNullOrWhiteSpace(n) ? n.Trim() : "Моя тема";
+        if (name.Length > 32) name = name[..32].Trim();
+
+        uint bg = TryGetColor(dict, "bg") ?? TryGetColor(dict, "background") ?? 0;
+        if (bg == 0) { error = "Укажите цвет фона \"bg\": \"#RRGGBB\""; return false; }
+
+        bool light = dict.TryGetValue("light", out var ls)
+            ? ls.Equals("true", StringComparison.OrdinalIgnoreCase) || ls == "1"
+            : Luma(bg) > 0.55f;
+
+        uint ink = light ? 0xFF000000u : 0xFFFFFFFFu;
+        uint brand = TryGetColor(dict, "brand") ?? TryGetColor(dict, "accent") ?? 0xFFFF3355u;
+        uint panel = TryGetColor(dict, "panel") ?? Gfx.Mix(bg, ink, light ? 0.03f : 0.045f);
+        uint card = TryGetColor(dict, "card") ?? Gfx.Mix(bg, ink, light ? 0.06f : 0.085f);
+        uint text = TryGetColor(dict, "text") ?? (light ? 0xFF141418u : 0xFFF2F2F6u);
+        uint sub = TryGetColor(dict, "sub") ?? Gfx.Mix(text, bg, 0.34f);
+        uint dim = TryGetColor(dict, "dim") ?? Gfx.Mix(text, bg, 0.56f);
+        uint onBrand = TryGetColor(dict, "onBrand") ?? (Luma(brand) > 0.62f ? 0xFF111111u : 0xFFFFFFFFu);
+
+        theme = new Theme(name, CustomGroup, light, bg, panel, card, text, sub, dim, brand, onBrand);
+        return true;
+    }
+
+    private static uint? TryGetColor(Dictionary<string, string> dict, string key)
+        => dict.TryGetValue(key, out var v) && TryParseColor(v, out var c) ? c : null;
+
+    private static string SafeFileName(string name)
+    {
+        var sb = new StringBuilder();
+        foreach (var ch in name)
+            sb.Append(char.IsLetterOrDigit(ch) || ch is '-' or '_' or ' ' ? ch : '_');
+        var res = sb.ToString().Trim();
+        return res.Length > 0 ? res : "custom_theme";
+    }
+
+    public static bool SaveCustomFromCode(string code, out string? savedName, out string? error)
+    {
+        savedName = null;
+        if (!TryParseCode(code, out var t, out error) || t == null) return false;
+        if (BuiltIn.Any(b => b.Name.Equals(t.Name, StringComparison.OrdinalIgnoreCase)))
+            t = t with { Name = t.Name + " (своя)" };
+
+        try
+        {
+            var dest = Path.Combine(CustomDir, SafeFileName(t.Name) + ".json");
+            var tmp = dest + ".tmp";
+            File.WriteAllText(tmp, ExportCode(t), Encoding.UTF8);
+            File.Move(tmp, dest, overwrite: true);
+            ReloadCustom();
+            savedName = t.Name;
+            Apply(theme: savedName, accent: "");
+            return true;
+        }
+        catch (Exception e)
+        {
+            error = "Ошибка сохранения файла: " + e.Message;
+            return false;
+        }
+    }
+
+    public static bool DeleteCustom(string name)
+    {
+        if (!_customFiles.TryGetValue(name, out var path)) return false;
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+            ReloadCustom();
+            if (Current.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) Apply(theme: BuiltIn[0].Name);
+            else App.Invalidate();
+            return true;
+        }
+        catch (Exception e) { Paths.Log("theme delete: " + e.Message); return false; }
+    }
+
+    public static Theme ByName(string? name) => All.FirstOrDefault(t => t.Name == name) ?? BuiltIn[0];
 
     private static string? _cachedAccentStr;
     private static uint? _cachedAccentVal;
@@ -66,7 +268,7 @@ public static class Themes
             var s = AppSettings.Current.Accent;
             if (string.Equals(s, _cachedAccentStr, StringComparison.Ordinal)) return _cachedAccentVal;
             _cachedAccentStr = s;
-            _cachedAccentVal = s is { Length: 7 } && s[0] == '#' && uint.TryParse(s[1..], System.Globalization.NumberStyles.HexNumber, null, out var c)
+            _cachedAccentVal = s is { Length: 7 } && s[0] == '#' && uint.TryParse(s[1..], NumberStyles.HexNumber, null, out var c)
                 ? 0xFF000000 | c : null;
             return _cachedAccentVal;
         }
@@ -76,7 +278,6 @@ public static class Themes
     private static long _startedAt;
     private static bool _moving;
 
-    /// <summary>All colours the UI reads, as one value that can be blended.</summary>
     private struct Pal
     {
         public uint Bg, Panel, Card, Text, Sub, Dim, Brand, OnBrand, Ink, Hover, Press, Line, Thumb, Field, Menu, Icon, Track, Good, Warn;
@@ -134,9 +335,10 @@ public static class Themes
         Icon = Th.Icon, Track = Th.Track, Good = Th.Good, Warn = Th.Warn, Light = Th.Light,
     };
 
-    /// <summary>At start-up: the saved theme, no easing.</summary>
+    /// <summary>At start-up: load custom themes + saved theme, no easing.</summary>
     public static void Load()
     {
+        ReloadCustom();
         Current = ByName(AppSettings.Current.Theme);
         _to = Derive(Current, AccentOverride);
         Set(_to);
@@ -150,7 +352,6 @@ public static class Themes
         {
             var prev = AppSettings.Current.Theme;
             AppSettings.Current.Theme = theme;
-            // Selecting "Новогодняя" enables snow once, while still allowing the user to toggle SeasonalEffect off afterwards
             if (theme == "Новогодняя" && prev != "Новогодняя" && AppSettings.Current.SeasonalEffect == "none")
                 AppSettings.Current.SeasonalEffect = "newyear";
         }
@@ -165,10 +366,8 @@ public static class Themes
         App.Invalidate();
     }
 
-    /// <summary>Raised when the target palette changes (native controls and the player's controls repaint with it).</summary>
     public static event Action? Changed;
 
-    /// <summary>Once per frame, before drawing.</summary>
     public static void Tick()
     {
         if (!_moving) return;
@@ -179,10 +378,9 @@ public static class Themes
         UI.Animate();
     }
 
-    /// <summary>What a theme would look like, for its preview card (no side effects).</summary>
-    public static (uint Bg, uint Panel, uint Card, uint Text, uint Sub, uint Brand, uint OnBrand, uint Line) Preview(Theme t)
+    public static (uint Bg, uint Panel, uint Card, uint Text, uint Sub, uint Brand, uint OnBrand, uint Line) Preview(Theme t, bool useAccentOverride = true)
     {
-        var p = Derive(t, AccentOverride);
+        var p = Derive(t, useAccentOverride ? AccentOverride : null);
         return (p.Bg, p.Panel, p.Card, p.Text, p.Sub, p.Brand, p.OnBrand, p.Line);
     }
 

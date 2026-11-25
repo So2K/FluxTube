@@ -60,6 +60,14 @@ public sealed class AppSettings
     public string SeasonalEffect { get; set; } = "none";
     /// <summary>Subtle PS1/PS2-style UI sound effects (Silent Hill / Metal Gear Solid inspired) on clicks, toggles, and sliders.</summary>
     public bool UiSounds { get; set; } = false;
+    /// <summary>UI sound master volume percentage (10..300%, default 100%). Applies to both built-in and custom SFX.</summary>
+    public int UiSoundsVolume { get; set; } = 100;
+    /// <summary>Spatial 8D stereo hall reverb applied to all UI sounds (built-in & custom).</summary>
+    public bool UiSoundsReverb8D { get; set; } = false;
+    /// <summary>8D spatial audio & reverb filter on video/music playback in mpv.</summary>
+    public bool PlayerAudio8D { get; set; } = false;
+    /// <summary>Tactile frosted/matte textured glass backdrop ("off", "soft", "matte").</summary>
+    public string FrostedGlass { get; set; } = "matte";
     /// <summary>Optional custom sound display names per UI sound slot (normalized WAV copies stored in .fluxtube/sfx).</summary>
     public Dictionary<string, string> CustomSfx { get; set; } = new();
 

@@ -116,6 +116,7 @@ public static unsafe class App
         // the system caption is replaced by our own top bar: apply the new frame now
         W.SetWindowPos(Hwnd, 0, 0, 0, 0, 0, W.SWP_NOMOVE | W.SWP_NOSIZE | W.SWP_NOZORDER | W.SWP_NOACTIVATE | W.SWP_FRAMECHANGED);
         VideoHwnd = W.CreateWindowExW(0, "FluxVideoHost", null, W.WS_CHILD | W.WS_CLIPCHILDREN | W.WS_CLIPSIBLINGS, 0, 0, 16, 9, Hwnd, 0, inst, 0);
+        PreviewPlayer.RegisterAndCreate(Hwnd);
 
         Gfx.Init(Hwnd);
         UiThread.Post = a => Post(a);
@@ -391,7 +392,7 @@ public static unsafe class App
                         else Shell.AdjustZoom(delta > 0 ? 0.05f : -0.05f);
                         return 0;
                     }
-                    if (Shell.OverVideo(UI.MX, UI.MY)) MpvPlayer.Instance.Command("keypress", delta > 0 ? "WHEEL_UP" : "WHEEL_DOWN");
+                    if (Shell.OverVideo(UI.MX, UI.MY)) Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
                     else { UI.Wheel += delta; Invalidate(); }
                     return 0;
                 }
@@ -467,7 +468,13 @@ public static unsafe class App
                     }
                     return 0;
                 case W.WM_ACTIVATE:
-                    if (((int)w & 0xFFFF) == 0) { Suggest.Hide(); Shell.CancelSpace2x(); Loupe.Hide(); }
+                    if (((int)w & 0xFFFF) == 0) { Suggest.Hide(); Shell.CancelSpace2x(); Loupe.Hide(); PreviewPlayer.HideNow(); }
+                    else if (!Dialogs.IsDialogOpen && !Test)
+                    {
+                        if (!W.IsWindowEnabled(h)) W.EnableWindow(h, 1);
+                        UI.ResetInput();
+                        Invalidate();
+                    }
                     break;
                 case W.WM_MOVE:
                     Suggest.Hide();
@@ -597,6 +604,7 @@ internal static unsafe class VideoHost
                 }
                 if (W.GetFocus() != App.Hwnd) W.SetFocus(App.Hwnd);
                 Suggest.Hide();
+                if (ThemeCodeEditor.Open) return 0;
                 if (Menus.Open) { Menus.Close(); return 0; }
                 if (AccountMenu.Open) { AccountMenu.Close(); return 0; } // a click outside the menu only closes it
                 _lmbSent = true;
@@ -637,13 +645,13 @@ internal static unsafe class VideoHost
                     Loupe.AdjustZoom(delta > 0 ? 0.4f : -0.4f);
                     return 0;
                 }
-                // Wheel over ANY video (normal video or Shorts) ALWAYS adjusts volume!
+                // Wheel over ANY video (normal video, mini-player, PiP, or Shorts) smoothly adjusts volume!
                 if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp)
                 {
                     sp.AdjustVolume(delta > 0 ? 5 : -5);
                     return 0;
                 }
-                Cmd("keypress", delta > 0 ? "WHEEL_UP" : "WHEEL_DOWN"); // volume
+                Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
                 return 0;
             }
             case W.WM_ERASEBKGND:

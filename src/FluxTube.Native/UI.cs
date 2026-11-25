@@ -68,6 +68,18 @@ public static class UI
         Wheel = 0;
     }
 
+    /// <summary>Clears all held/active input state (e.g. after returning from a native Windows dialog or modal window).</summary>
+    public static void ResetInput()
+    {
+        Down = Pressed = Released = RightClicked = MiddleDown = MiddleClicked = false;
+        BlockInput = false;
+        Wheel = 0;
+        _active = 0;
+        _dragScroll = 0;
+        Modal = null;
+        StopAutoScroll();
+    }
+
     /// <summary>While set, only what is inside this rectangle can be hovered or clicked (an open panel).</summary>
     public static R? Modal;
 

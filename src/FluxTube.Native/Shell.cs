@@ -39,8 +39,12 @@ public static class Shell
     private static bool _mini = true;
 
     private static R _videoRect, _videoClip, _hostRect;
+    private static R? _miniVideoRect;
     private static float _videoRadius;
     private static bool _videoWanted, _hostVisible;
+    private static bool _npDragSeek, _npDragVol;
+    private static double _npDragSeekTarget;
+    private static long _npLastSeekAt, _npLastVolAt;
     private static string? _videoFor;
     private static W.RECT _hostPx;
     public static bool VideoReady { get; set; }
@@ -408,7 +412,7 @@ public static class Shell
 
     private static void DrawTabs(R strip)
     {
-        Gfx.Fill(strip, Th.Bg);
+        Gfx.FillFrosted(strip, Th.Bg, 0, opacity: 0.84f);
         Gfx.Fill(new R(strip.X, strip.Bottom - 1, strip.W, 1), Th.Line);
         const float addW = 28;
         float avail = MathF.Max(100, strip.W - 48 - addW - 8);
@@ -437,23 +441,24 @@ public static class Shell
             var playingNow = (isMainPlaying && !P.Paused) || (isBg && BgPlayers.IsPlaying(t.Arg));
             var bgLoading = isBg && BgPlayers.IsLoading(t.Arg);
 
-            // Mouse wheel over any video tab smoothly adjusts THAT tab's volume with custom volume SFX!
+            // Mouse wheel over any video tab smoothly adjusts THAT tab's volume with video-scaled volume SFX!
             if (over && isVideo && UI.Wheel != 0)
             {
                 int delta = UI.Wheel > 0 ? 5 : -5;
                 UI.Wheel = 0;
                 _tabVolBoostUntil = UI.Now + 1400;
-                PlayVolumeSfx();
                 if (isMainPlaying)
                 {
                     var nv = Math.Clamp((int)Math.Round(P.Volume) + delta, 0, 150);
                     AppSettings.Current.Volume = nv;
                     _volSaveDueAt = UI.Now + 450;
                     P.SetVolumeSmooth(nv);
+                    PlayVolumeSfx(nv);
                 }
                 else if (isBg)
                 {
                     BgPlayers.AdjustVolume(t.Arg, delta);
+                    PlayVolumeSfx(BgPlayers.GetVolume(t.Arg));
                 }
             }
 
@@ -668,12 +673,24 @@ public static class Shell
         return UI.Click(UI.Id(id), r, hand: false);
     }
 
-    public static void PlayVolumeSfx()
+    public static void PlayVolumeSfx(double? videoVolPct = null)
     {
         var now = Environment.TickCount64;
-        if (now - _lastVolSfxAt < 70) return;
+        if (now - _lastVolSfxAt < 65) return;
         _lastVolSfxAt = now;
-        Sfx.Volume();
+        Sfx.Volume(videoVolPct);
+    }
+
+    /// <summary>Smoothly adjusts the main player's volume (used by wheel over video/mini-player/PiP) with scaled volume SFX.</summary>
+    public static void AdjustMainVolume(int delta)
+    {
+        if (!P.IsReady) return;
+        var nv = Math.Clamp((int)Math.Round(P.Volume) + delta, 0, 150);
+        AppSettings.Current.Volume = nv;
+        _volSaveDueAt = Environment.TickCount64 + 450;
+        P.SetVolumeSmooth(nv);
+        PlayVolumeSfx(nv);
+        App.Invalidate();
     }
 
     public static void Init(string[] args)
@@ -707,7 +724,7 @@ public static class Shell
                 AppSettings.Current.Volume = iv;
                 _volSaveDueAt = Environment.TickCount64 + 500;
             }
-            PlayVolumeSfx();
+            PlayVolumeSfx(v);
             App.Invalidate();
         };
         P.MuteChanged += m => { Sfx.Toggle(!m); App.Invalidate(); };
@@ -791,6 +808,7 @@ public static class Shell
     public static void Navigate(IPage page, bool push = true)
     {
         if (_cur == page) return;
+        PreviewPlayer.HideNow();
         if (_cur != null)
         {
             _cur.Hidden();
@@ -1135,7 +1153,7 @@ public static class Shell
     public static bool OverVideo(float x, float y)
     {
         if (Pip.Active || !_hostVisible || !_hostRect.Contains(x, y)) return false;
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open) return false;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open) return false;
         if (_tabPreviewRect.W > 0 && _tabPreviewRect.Contains(x, y)) return false;
         if (_toastRect.W > 0 && _toastRect.Contains(x, y)) return false;
         return true;
@@ -1145,8 +1163,9 @@ public static class Shell
     {
         float w = Gfx.W, h = Gfx.H;
         _videoWanted = false;
+        _miniVideoRect = null;
         _toastRect = default;
-        if (Menus.Open || AccountMenu.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
+        if (Menus.Open || AccountMenu.Open || ThemeCodeEditor.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
         var cur = T.Current;
 
         if (_fullscreen)
@@ -1161,6 +1180,9 @@ public static class Shell
             Menus.Draw();
             return;
         }
+
+        // Tactile frosted/matte glass backdrop behind the entire window
+        Gfx.DrawFrostedBackdrop(w, h);
 
         var playing = cur != null && P.HasMedia;
         var onWatch = _cur is WatchPage wp && wp.Video.VideoId == cur?.VideoId || _cur is ShortsPage;
@@ -1181,9 +1203,9 @@ public static class Shell
             UI.Animate();
         }
 
-        // top bar: clean 8px symmetric grid
+        // top bar: clean 8px symmetric grid with frosted matte glass sheen
         _topHits.Clear();
-        Gfx.Fill(new R(0, 0, w, TopH), Th.Bg);
+        Gfx.FillFrosted(new R(0, 0, w, TopH), Th.Bg, 0, opacity: 0.84f);
         var menuR = new R(16, 8, 36, 36);
         _topHits.Add(menuR);
         if (UI.IconButton(UI.Id("sidebar:toggle"), menuR, Th.Hamburger, 15, AppSettings.Current.SidebarCollapsed ? Th.Sub : Th.Text)) App.Post(ToggleSidebar);
@@ -1259,7 +1281,8 @@ public static class Shell
         {
             Gfx.PushClip(new R(0, TopH, sideW, h - TopH));
             float sx = sideW - SideW;
-            Gfx.Fill(new R(sx, TopH, SideW, h - TopH), Th.Bg);
+            Gfx.FillFrosted(new R(sx, TopH, SideW, h - TopH), Th.Bg, 0, opacity: 0.82f);
+            Gfx.Fill(new R(sx + SideW - 1, TopH, 1, h - TopH), Gfx.Fade(Th.Line, 0.7f));
             float y = TopH + 4;
             var tag = _cur?.Tag ?? "";
             SideItem(sx, ref y, Th.Home, "Главная", "home", tag);
@@ -1295,6 +1318,7 @@ public static class Shell
         UI.DrawAutoScrollIndicator();
         UI.Modal = null;
         DrawTabPreview();
+        ThemeCodeEditor.Draw();
         AccountMenu.Draw();
         Menus.Draw();
     }
@@ -1461,40 +1485,130 @@ public static class Shell
 
     private static void NowPlaying(VideoItem cur, float sideW, float w, float h)
     {
+        // Commit final seek accurately when user releases the mini-player seek scrubber
+        if (!UI.Down)
+        {
+            if (_npDragSeek) { _npDragSeek = false; if (P.Duration > 0) P.SeekAbsolute(_npDragSeekTarget); }
+            _npDragVol = false;
+        }
+
         var r = new R(sideW, h - BarH, w - sideW, BarH);
-        Gfx.Fill(r, Th.Panel);
-        Gfx.Fill(new R(r.X, r.Y, r.W, 1), Th.Line);
+        Gfx.FillFrosted(r, Th.Panel, 0, opacity: 0.86f);
+        Gfx.Fill(new R(r.X, r.Y, r.W, 1), Th.A(0.14f));
+
+        // Wheel over the mini-player bar smoothly adjusts playback volume
+        if (UI.Wheel != 0 && UI.Hover(r))
+        {
+            AdjustMainVolume(UI.Wheel > 0 ? 5 : -5);
+            UI.Wheel = 0;
+        }
 
         if (_mini)
         {
             float mw = 384, mh = 216;
             var mr = new R(w - mw - 18, h - BarH - mh - 14, mw, mh);
-            Gfx.Fill(mr.Inset(-1), 0xFF000000, 2);
-            WantVideo(mr, cur.VideoId);
+            _miniVideoRect = mr;
+            Gfx.Fill(mr.Inset(-4), Gfx.Fade(0xFF000000, 0.36f), 15);
+            Gfx.Fill(mr.Inset(-1), 0xFF0A0A0E, 13);
+            Gfx.Stroke(mr.Inset(-1), Th.A(0.18f), 13, 1f);
+            WantVideo(mr, cur.VideoId, radius: 12);
             if (!VideoShown(cur.VideoId)) UI.Spinner(mr.X + mr.W / 2, mr.Y + mr.H / 2, 12, Th.Text);
         }
 
         var thumb = new R(r.X + 14, r.Y + 9, 78, 44);
-        Cards.Thumb(thumb, cur, false, 6, badge: false, behind: Th.Panel);
+        Cards.Thumb(thumb, cur, false, 7, badge: false, behind: Th.Panel);
+        if (UI.Click(UI.Id("np:thumb"), thumb)) App.Post(() => OpenVideo(cur, T.CurrentSource ?? "home"));
+
+        // Right controls: optional inline volume slider + 6 transport buttons
+        bool showVol = r.W > 740;
+        float volW = showVol ? 132 : 0;
         float bx = r.Right - 14 - 6 * 40;
-        float tx = thumb.Right + 12, tw = bx - tx - 16;
-        Gfx.Draw(string.IsNullOrEmpty(cur.Title) ? "Видео" : cur.Title, tx, r.Y + 9, 14, Th.Text, 600, tw);
+        float volX = bx - volW - (showVol ? 10 : 0);
+        float tx = thumb.Right + 12, tw = (showVol ? volX : bx) - tx - 14;
+
+        var titleText = string.IsNullOrEmpty(cur.Title) ? "Видео" : cur.Title;
+        var titleRun = Gfx.Text(titleText, 14, 600, MathF.Max(40, tw));
+        var titleR = new R(tx, r.Y + 8, MathF.Min(titleRun.W, MathF.Max(40, tw)), titleRun.H + 2);
+        Gfx.Draw(titleRun, titleR.X, titleR.Y, UI.Hover(titleR) ? Th.Brand : Th.Text);
+        if (UI.Click(UI.Id("np:title"), titleR)) App.Post(() => OpenVideo(cur, T.CurrentSource ?? "home"));
+
         var d = P.Duration;
-        var time = $"{Fmt.Time(P.TimePos)} / {Fmt.Time(d)}";
+        var shownPos = _npDragSeek ? _npDragSeekTarget : P.TimePos;
+        var time = $"{Fmt.Time(shownPos)} / {Fmt.Time(d)}";
         var timeRun = Gfx.Text(time, 12);
-        var ch = Gfx.Draw(cur.Channel, tx, r.Y + 31, 12, Th.Sub, 400, MathF.Min(240, tw / 3));
+        var ch = Gfx.Draw(cur.Channel, tx, r.Y + 31, 12, Th.Sub, 400, MathF.Min(210, MathF.Max(40, tw / 3)));
         var px = tx + ch.W + 12;
         var pw = tx + tw - timeRun.W - 12 - px;
         if (pw > 40)
         {
-            var pr = new R(px, r.Y + 37, pw, 4);
-            UI.Progress(pr, d > 0 ? P.TimePos / d : 0, Th.A(0.2f));
-            var hit = new R(px, r.Y + 28, pw, 22);
-            if (d > 0 && UI.Click(UI.Id("np:seek"), hit)) P.SeekAbsolute(d * Math.Clamp((UI.MX - px) / pw, 0, 1));
+            var hit = new R(px - 4, r.Y + 26, pw + 8, 24);
+            var hot = d > 0 && (UI.Hover(hit) || _npDragSeek);
+            if (d > 0)
+            {
+                if (UI.Pressed && UI.Hover(hit))
+                {
+                    _npDragSeek = true;
+                    _npDragSeekTarget = d * Math.Clamp((UI.MX - px) / pw, 0, 1);
+                    _npLastSeekAt = UI.Now;
+                    P.SeekAbsolute(_npDragSeekTarget);
+                }
+                else if (_npDragSeek)
+                {
+                    _npDragSeekTarget = d * Math.Clamp((UI.MX - px) / pw, 0, 1);
+                    if (UI.Now - _npLastSeekAt >= 55) { _npLastSeekAt = UI.Now; P.SeekAbsolute(_npDragSeekTarget); }
+                }
+                if (hot) UI.Hand();
+            }
+            float trackH = hot ? 6f : 4f;
+            var pr = new R(px, r.Y + 39 - trackH / 2, pw, trackH);
+            double frac = d > 0 ? Math.Clamp(shownPos / d, 0, 1) : 0;
+            UI.Progress(pr, frac, Th.A(0.22f), Th.Brand);
+            if (hot)
+            {
+                float kx = px + (float)(pw * frac);
+                Gfx.Circle(kx, r.Y + 39, 6.5f, Th.Brand);
+                Gfx.Circle(kx, r.Y + 39, 2.5f, 0xFFFFFFFF);
+                // Floating hover/drag timestamp tooltip above the slider
+                double hoverT = _npDragSeek ? _npDragSeekTarget : d * Math.Clamp((UI.MX - px) / pw, 0, 1);
+                var tipRun = Gfx.Text(Fmt.Time(hoverT), 11.5f, 600);
+                float tipW = tipRun.W + 14, tipH = tipRun.H + 6;
+                float tipX = Math.Clamp((_npDragSeek ? kx : UI.MX) - tipW / 2, px, px + pw - tipW);
+                var tipR = new R(Gfx.Snap(tipX), r.Y + 12 - tipH, tipW, tipH);
+                Gfx.Fill(tipR, Th.Menu, 5);
+                Gfx.Stroke(tipR, Th.Line, 5);
+                Gfx.Draw(tipRun, tipR.X + 7, tipR.Y + 3, Th.Text);
+            }
         }
         Gfx.Draw(timeRun, tx + tw - timeRun.W, r.Y + 31, Th.Sub);
 
         float by = r.Y + 13;
+        if (showVol)
+        {
+            bool muted = P.Muted;
+            int vol = muted ? 0 : Math.Clamp((int)Math.Round(P.Volume), 0, 150);
+            var muteR = new R(volX, by, 30, 36);
+            if (UI.IconButton(UI.Id("np:mute"), muteR, muted || vol == 0 ? Th.Mute : Th.Volume, 14, muted ? Th.Warn : Th.Text))
+                P.Command("cycle", "mute");
+            var vPct = Gfx.Text($"{vol}%", 11, 600);
+            Gfx.Draw(vPct, volX + volW - vPct.W, by + (36 - vPct.H) / 2, Th.Sub);
+            float vtx = muteR.Right + 4, vtw = MathF.Max(28, volX + volW - vPct.W - 6 - vtx);
+            var vHit = new R(vtx - 4, by + 4, vtw + 8, 28);
+            var vHot = UI.Hover(vHit) || _npDragVol;
+            if (UI.Pressed && UI.Hover(vHit)) _npDragVol = true;
+            if (_npDragVol && UI.Now - _npLastVolAt >= 40)
+            {
+                _npLastVolAt = UI.Now;
+                int nv = (int)MathF.Round(Math.Clamp((UI.MX - vtx) / vtw, 0, 1) * 100);
+                AppSettings.Current.Volume = nv;
+                _volSaveDueAt = UI.Now + 450;
+                P.SetVolumeSmooth(nv, 0);
+                PlayVolumeSfx(nv);
+            }
+            if (vHot) UI.Hand();
+            UI.Progress(new R(vtx, by + 16, vtw, vHot ? 5 : 4), Math.Clamp(vol / 100.0, 0, 1), Th.A(0.22f), muted ? Th.Dim : Th.Brand);
+            Gfx.Circle(vtx + vtw * Math.Clamp(vol / 100f, 0, 1), by + 18, vHot ? 5.5f : 4f, muted ? Th.Sub : Th.Text);
+        }
+
         if (UI.IconButton(UI.Id("np:b"), new R(bx, by, 36, 36), Th.Rewind)) P.Command("seek", "-10");
         if (UI.IconButton(UI.Id("np:p"), new R(bx + 40, by, 36, 36), P.Paused ? Th.Play : Th.Pause)) P.TogglePause();
         if (UI.IconButton(UI.Id("np:f"), new R(bx + 80, by, 36, 36), Th.Forward)) P.Command("seek", "10");
@@ -1580,6 +1694,8 @@ public static class Shell
                 _holes.Add(_toastRect);
             if (SharePanel.Open && SharePanel.Rect.W > 0 && SharePanel.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
                 _holes.Add(SharePanel.Rect);
+            if (ThemeCodeEditor.Open && ThemeCodeEditor.Rect.W > 0 && ThemeCodeEditor.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                _holes.Add(ThemeCodeEditor.Rect);
             if (AccountMenu.Open && AccountMenu.Rect.W > 0 && AccountMenu.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
                 _holes.Add(AccountMenu.Rect);
             if (Menus.Open)
@@ -1626,6 +1742,7 @@ public static class Shell
             _hostVisible = false;
             W.ShowWindow(App.VideoHwnd, W.SW_HIDE);
         }
+        PreviewPlayer.AfterFrame(_miniVideoRect, _toastRect);
     }
 
     // ---------------- hold Space for 2x speed (YouTube-style) ----------------
@@ -1635,7 +1752,7 @@ public static class Shell
 
     public static bool SpaceDown(bool repeat)
     {
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open) return false;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open) return false;
         if (T.Current == null || !P.HasMedia) return false;
         if (!repeat)
         {
@@ -1696,12 +1813,29 @@ public static class Shell
 
     // ---------------- keys ----------------
 
+    /// <summary>Global Ctrl+V when no text box is focused: pastes clipboard link or query straight into the search bar.</summary>
+    private static bool PasteToSearch()
+    {
+        var raw = W.GetClipboardText(App.Hwnd, 1024);
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        var clean = string.Join(' ', raw.Split(['\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries)).Trim();
+        if (clean.Length == 0) return false;
+        _search.Text = clean;
+        _search.Focus(selectAll: false);
+        OnSearchChanged();
+        bool isLink = ExtractYouTubeId(clean) != null || clean.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || clean.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        Toast(isLink ? "Ссылка вставлена в поиск — нажмите Enter, чтобы открыть" : "Текст вставлен в поиск — нажмите Enter", Th.Good, 2400);
+        App.Invalidate();
+        return true;
+    }
+
     public static bool Key(int vk, bool ctrl, bool alt)
     {
         if (Menus.Open && Menus.Key(vk)) return true;
         if (vk == W.VK_ESCAPE)
         {
             if (UI.AutoScrollActive) UI.StopAutoScroll();
+            else if (ThemeCodeEditor.Open) ThemeCodeEditor.Close();
             else if (AccountMenu.Open) AccountMenu.Close();
             else if (SharePanel.Open) SharePanel.Close();
             else if (_fullscreen) P.SetFullscreenFlag(false);
@@ -1709,7 +1843,11 @@ public static class Shell
             return true;
         }
         // Block navigation/player hotkeys while an overlay panel is open
-        if (AccountMenu.Open || SharePanel.Open) return false;
+        if (AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open) return false;
+
+        // Global Ctrl+V anywhere outside Edit boxes -> immediately paste link or text into search!
+        if (ctrl && !alt && vk == 'V' && !Edit.AnyFocused)
+            return PasteToSearch();
 
         if (alt && vk == W.VK_LEFT) { Back(); return true; }
         if (alt && vk == W.VK_RIGHT) { Forward(); return true; }
@@ -1812,17 +1950,15 @@ public static class Shell
         App.Invalidate();
     }
 
-    // ---------------- account, browser login window ----------------
+    // ---------------- account, default browser & WebView login ----------------
 
     public static void Login() => LoginNewAccount();
-    public static void LoginWebView() => LoginNewAccount();
 
-    /// <summary>
-    /// Opens the built-in browser Login Window with a completely clean session so the user can sign into
-    /// a NEW Google/YouTube account without being auto-logged back into the previous account, then saves it
-    /// to the multi-account vault for 1-click swapping.
-    /// </summary>
-    public static void LoginNewAccount()
+    /// <summary>Primary sign-in: opens the user's real DEFAULT Windows browser (Chrome/Edge/Brave/etc.) with clean profile + auto cookie capture.</summary>
+    public static void LoginNewAccount() => BrowserLogin.LoginWithDefaultBrowser();
+
+    /// <summary>Secondary fallback: opens the built-in WebView2 Login Window with a clean session.</summary>
+    public static void LoginWebView()
     {
         AccountMenu.SaveActiveToVault();
         try
@@ -2007,6 +2143,7 @@ public static class Shell
             T.Flush();
             Downloader.Instance.Shutdown();
             Loupe.Shutdown();
+            PreviewPlayer.Shutdown();
             Sfx.Shutdown();
             BgPlayers.DisposeAll();
             AppSettings.Current.Save();
