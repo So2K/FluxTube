@@ -1216,17 +1216,9 @@ public sealed class WatchPage : IPage
         Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, "Копировать название");
         y += titleRun.H + 14;
 
-        // channel + actions
+        // channel + actions (measure action bar first so channel name & subscriber count NEVER overlap the pills)
         var chName = _info?.Channel ?? Video.Channel;
-        Cards.Avatar(x0, y + 1, 42, _info?.ChannelAvatar, chName);
-        var nameRun = Gfx.Text(chName, 15, 600, 260);
-        var nameRect = new R(x0 + 54, y + 2, nameRun.W, nameRun.H);
-        Gfx.Draw(nameRun, nameRect.X, nameRect.Y, Th.Text);
-        Cards.CopyMenu(nameRect, chName, "Копировать название канала");
-        Gfx.Draw(_info?.Subscribers ?? "", x0 + 54, y + 24, 12, Th.Sub);
-        var chId = _info?.ChannelId ?? Video.ChannelId;
-        if (chId != null && UI.Click(UI.Id("ch", _infoScroll), nameRect)) App.Post(() => Shell.OpenChannel(chId, chName));
-
+        var subText = _info?.Subscribers ?? "";
         float bx = x0 + mainW, by = y + 4;
         const float ph = 36;
         bx -= 40;
@@ -1247,10 +1239,16 @@ public sealed class WatchPage : IPage
         var dl = _isDownloaded ? "Скачано" : "Скачать";
         bx -= UI.PillWidth(Th.Download, dl) + 8;
         if (UI.Pill(UI.Id("dl", _infoScroll), bx, by, ph, Th.Download, dl, out _)) DownloadMenu();
+
         var likeW = UI.PillWidth(Th.Like, _likes) + UI.PillWidth(Th.Dislike, _dislikes) - 12;
-        bx -= likeW + 8;
-        if (bx > x0 + 54 + nameRun.W + 16)
+        var nameFullW = Gfx.Text(chName, 15, 600, 260).W;
+        var subFullW = subText.Length > 0 ? Gfx.Text(subText, 12, 400, 260).W : 0;
+        var minChNeed = MathF.Min(200, MathF.Max(nameFullW, subFullW));
+        float leftEdge = bx;
+        if (bx - likeW - 8 > x0 + 54 + minChNeed + 16)
         {
+            bx -= likeW + 8;
+            leftEdge = bx;
             Gfx.Fill(new R(bx, by, likeW, ph), Th.A(0.12f), ph / 2);
             var lr = Gfx.Text(_likes, 13.5f, 600);
             float dx = bx + 38 + lr.W + 12;
@@ -1270,6 +1268,16 @@ public sealed class WatchPage : IPage
             if (UI.Click(likeId, likeR)) Rate(true);
             if (UI.Click(disId, disR)) Rate(false);
         }
+
+        var chMaxW = MathF.Max(70, MathF.Min(260, leftEdge - (x0 + 54) - 14));
+        Cards.Avatar(x0, y + 1, 42, _info?.ChannelAvatar, chName);
+        var nameRun = Gfx.Text(chName, 15, 600, chMaxW);
+        var nameRect = new R(x0 + 54, y + 2, nameRun.W, nameRun.H);
+        Gfx.Draw(nameRun, nameRect.X, nameRect.Y, Th.Text);
+        Cards.CopyMenu(nameRect, chName, "Копировать название канала");
+        if (subText.Length > 0) Gfx.Draw(subText, x0 + 54, y + 24, 12, Th.Sub, 400, chMaxW);
+        var chId = _info?.ChannelId ?? Video.ChannelId;
+        if (chId != null && UI.Click(UI.Id("ch", _infoScroll), nameRect)) App.Post(() => Shell.OpenChannel(chId, chName));
         y += 44 + 14;
         if (listInline)
         {

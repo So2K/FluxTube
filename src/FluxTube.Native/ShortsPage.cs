@@ -453,9 +453,10 @@ public sealed class ShortsPage : IPage
         }
         else
         {
-            // Settled: show the live mpv surface seamlessly inside the card
-            Gfx.Stroke(video.Inset(-1), Th.A(0.08f), 12, 1f);
-            Shell.WantVideo(video, v.VideoId);
+            // Settled: show the live mpv surface with matching 14px rounded corners so the contour stays crisp
+            Gfx.Fill(video, 0xFF0A0A0E, 14);
+            Gfx.Stroke(video.Inset(-1), Th.A(0.10f), 15, 1f);
+            Shell.WantVideo(video, v.VideoId, radius: 14);
             if (!Shell.VideoShown(v.VideoId))
             {
                 DrawShortPoster(v.VideoId, video, 0.82f);

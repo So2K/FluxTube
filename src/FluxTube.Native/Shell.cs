@@ -38,6 +38,7 @@ public static class Shell
     private static bool _mini = true;
 
     private static R _videoRect, _videoClip, _hostRect;
+    private static float _videoRadius;
     private static bool _videoWanted, _hostVisible;
     private static string? _videoFor;
     private static W.RECT _hostPx;
@@ -898,10 +899,10 @@ public static class Shell
 
     // ---------------- the frame ----------------
 
-    /// <summary>A page asks for the video to sit in this rectangle this frame, optionally clipped to clipRect.</summary>
-    public static void WantVideo(R r, string videoId, R? clipRect = null)
+    /// <summary>A page asks for the video to sit in this rectangle this frame, optionally clipped to clipRect and rounded by radius.</summary>
+    public static void WantVideo(R r, string videoId, R? clipRect = null, float radius = 0)
     {
-        _videoRect = r; _videoClip = clipRect ?? r; _videoWanted = true; _videoFor = videoId;
+        _videoRect = r; _videoClip = clipRect ?? r; _videoRadius = radius; _videoWanted = true; _videoFor = videoId;
     }
 
     public static void ToggleSidebar()
@@ -934,9 +935,8 @@ public static class Shell
     {
         float w = Gfx.W, h = Gfx.H;
         _videoWanted = false;
-        // an open menu takes the input: the page under it does not react to the pointer
-        if (Menus.Open) UI.Modal = Menus.Bounds.W > 0 ? Menus.Bounds : new R(0, 0, 0, 0);
-        else if (AccountMenu.Open) UI.Modal = AccountMenu.Rect.W > 0 ? AccountMenu.Rect : new R(0, 0, 0, 0);
+        // an open menu takes ALL input: nothing behind it (videos, related cards, tabs, buttons) can hover or click through
+        if (Menus.Open || AccountMenu.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
         var cur = T.Current;
 
         if (_fullscreen)
@@ -1226,16 +1226,31 @@ public static class Shell
                 foreach (var mr in Menus.ActiveRects)
                     if (mr.W > 0 && mr.Intersect(_videoRect) is { W: > 0, H: > 0 }) holes.Add(mr);
 
-            int hash = HashCode.Combine(cl, ct, cr, cb, vw, vh, holes.Count);
+            int radPx = _videoRadius > 0.5f ? Math.Max(1, (int)MathF.Round(_videoRadius * s)) : 0;
+            int hash = HashCode.Combine(cl, ct, cr, cb, vw, vh, radPx, holes.Count);
             foreach (var hr in holes) hash = HashCode.Combine(hash, (int)hr.X, (int)hr.Y, (int)hr.W, (int)hr.H);
 
             if (hash != _rgnHash || px.L != _hostPx.L || px.T != _hostPx.T || px.R != _hostPx.R || px.B != _hostPx.B)
             {
                 _rgnHash = hash;
-                if (!clipped && holes.Count == 0) W.SetWindowRgn(App.VideoHwnd, 0, true);
+                if (!clipped && holes.Count == 0 && radPx == 0) W.SetWindowRgn(App.VideoHwnd, 0, true);
                 else
                 {
-                    var rgn = W.CreateRectRgn(cl, ct, cr, cb);
+                    nint rgn;
+                    if (radPx > 0)
+                    {
+                        rgn = W.CreateRoundRectRgn(0, 0, vw + 1, vh + 1, radPx * 2, radPx * 2);
+                        if (clipped)
+                        {
+                            var clipRgn = W.CreateRectRgn(cl, ct, cr, cb);
+                            W.CombineRgn(rgn, rgn, clipRgn, 1 /*RGN_AND*/);
+                            W.DeleteObject(clipRgn);
+                        }
+                    }
+                    else
+                    {
+                        rgn = W.CreateRectRgn(cl, ct, cr, cb);
+                    }
                     foreach (var hr in holes)
                     {
                         var cut = W.CreateRectRgn(
