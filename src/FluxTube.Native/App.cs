@@ -364,6 +364,7 @@ public static unsafe class App
                 case W.WM_KEYDOWN:
                 case W.WM_SYSKEYDOWN:
                     UI.LastInput = Environment.TickCount64;
+                    if ((int)w == W.VK_CONTROL) Loupe.Update();
                     if ((int)w == W.VK_SPACE && !W.KeyDown(W.VK_CONTROL) && !W.KeyDown(W.VK_MENU))
                     {
                         bool repeat = (l.ToInt64() & (1L << 30)) != 0;
@@ -372,6 +373,7 @@ public static unsafe class App
                     if (Shell.Key((int)w, W.KeyDown(W.VK_CONTROL), W.KeyDown(W.VK_MENU))) return 0;
                     break;
                 case W.WM_KEYUP:
+                    if ((int)w == W.VK_CONTROL) Loupe.Hide();
                     if ((int)w == W.VK_SPACE && Shell.SpaceUp()) return 0;
                     break;
                 case W.WM_COMMAND:
@@ -419,7 +421,7 @@ public static unsafe class App
                     }
                     return 0;
                 case W.WM_ACTIVATE:
-                    if (((int)w & 0xFFFF) == 0) { Suggest.Hide(); Shell.CancelSpace2x(); }
+                    if (((int)w & 0xFFFF) == 0) { Suggest.Hide(); Shell.CancelSpace2x(); Loupe.Hide(); }
                     break;
                 case W.WM_MOVE:
                     Suggest.Hide();
@@ -467,6 +469,7 @@ internal static unsafe class VideoHost
                 if (x == _lastX && y == _lastY) return 0;
                 _lastX = x; _lastY = y;
                 _lastMove = Environment.TickCount64;
+                Loupe.Update();
                 if (_cursorHidden) { _cursorHidden = false; W.SetCursor(W.LoadCursorW(0, 32512)); }
                 if (_pipDownX >= 0 && Math.Abs(x - _pipDownX) + Math.Abs(y - _pipDownY) > 6)
                 {
@@ -489,6 +492,7 @@ internal static unsafe class VideoHost
             {
                 _tracking = false;
                 _lastX = _lastY = -1;
+                Loupe.Hide();
                 W.KillTimer(h, 1);
                 // (scripted checks post mouse messages without a real pointer, which would read as an instant leave)
                 if (!App.Test) Cmd("script-message-to", "fluxosc", "flux-leave"); // the controls hide like on YouTube when the pointer leaves
