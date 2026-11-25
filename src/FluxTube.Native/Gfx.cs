@@ -2283,7 +2283,10 @@ public static unsafe class Gfx
             MusicBounce.SetTestState(bass: 0.85f, mid: 0.65f, high: 0.55f, kick: 1.15f, loud: 1.45f);
             float loudAmp = MusicBounce.MeasureWaveAmp();
             Assert(loudAmp > quietAmp * 2.2f, $"Loudness scaling too weak: quiet={quietAmp:0.00} loud={loudAmp:0.00}");
-            var msg3 = $"PASS [3/4] MusicBounce textSafe pure-translation & loudness scaling (quiet={quietAmp:0.00} -> loud={loudAmp:0.00})";
+            // C1 smoothness check: spring-damper must NEVER teleport/jerk on sudden kicks or mode flips!
+            float maxStep = MusicBounce.MeasureMaxSpringStep();
+            Assert(maxStep < 4.5f, $"Spring-damper jerked too hard in one frame: maxStep={maxStep:0.00} DIPs");
+            var msg3 = $"PASS [3/5] MusicBounce textSafe, loudness ({quietAmp:0.00}->{loudAmp:0.00}) & C1 spring smoothness (maxStep={maxStep:0.00}px)";
             Services.Paths.Log("self-test: " + msg3); Console.WriteLine(msg3);
 
             // TEST 4: ImpulseBank Custom IR preparation with Cyrillic + brackets + spaces
@@ -2355,6 +2358,11 @@ public static class MusicBounce
     public static float LoudnessGain { get; private set; }
 
     private static float _bassAvg, _phase, _lowPhase, _midPhase, _highPhase;
+    // Pro VJ 2D Spring-Damper Gimbal (Resolume / TouchDesigner style): ZERO teleports, C1-smooth arcs!
+    private static float _sprX, _sprY, _velX, _velY, _sprRot, _velRot, _sprSc, _velSc;
+    private static float _wPiston, _wSway = 1f, _wCross, _wBuildup, _wDrop;
+    private static long _lastImpulseBeat;
+    private static int _crossSign = 1;
     private static readonly float[] _bandAvg = new float[32];
     private static readonly float[] _bandPulse = new float[32];
     private static readonly float[] _bandTrans = new float[32];
@@ -2367,6 +2375,8 @@ public static class MusicBounce
             {
                 Active = false;
                 Kick = Bass = Mid = High = HighPeak = LoudnessGain = _bassAvg = 0f;
+                _sprX = _sprY = _velX = _velY = _sprRot = _velRot = _sprSc = _velSc = 0f;
+                _wPiston = _wCross = _wBuildup = _wDrop = 0f; _wSway = 1f;
                 Array.Clear(_bandAvg);
                 Array.Clear(_bandPulse);
                 Array.Clear(_bandTrans);
@@ -2375,7 +2385,7 @@ public static class MusicBounce
         }
 
         AudioAnalyzer.RequestFrame(force: true);
-        dt = Math.Clamp(dt, 0.003f, 0.04f);
+        dt = Math.Clamp(dt, 0.003f, 0.035f);
         float bass = AudioAnalyzer.BassEnergy;
         float mid = AudioAnalyzer.MidEnergy;
         float high = AudioAnalyzer.HighEnergy;
@@ -2392,7 +2402,7 @@ public static class MusicBounce
 
         var bands = AudioAnalyzer.Bands;
         float decay = MathF.Exp(-dt * 13.5f);
-        float transDecay = MathF.Exp(-dt * 24.0f); // ultra-snappy per-bin transient pop for >3kHz squeaks & hats!
+        float transDecay = MathF.Exp(-dt * 24.0f);
         float bandAvgA = 1f - MathF.Exp(-dt * 5.5f);
         float maxE = Kick;
         float hiPeakRaw = 0f;
@@ -2411,97 +2421,104 @@ public static class MusicBounce
         }
         HighPeak = MathF.Max(HighPeak * MathF.Exp(-dt * 18f), hiPeakRaw);
 
-        // 3 independent Fourier water-wave phase velocities: slow deep bass swell, flowing mid wave, rapid >3kHz ripples!
-        _phase += dt * (10.5f + Kick * 17.5f);
-        _lowPhase += dt * (3.2f + Bass * 4.8f + Kick * 5.5f);
-        _midPhase += dt * (6.8f + Mid * 9.0f);
-        _highPhase += dt * (16.5f + High * 18.0f + HighPeak * 14.0f);
-        Active = maxE > 0.012f;
+        // Smoothly crossfade choreography weights (~0.35s) -> ZERO abrupt mode jumps!
+        int mode = AudioAnalyzer.PatternMode;
+        float blend = 1f - MathF.Exp(-dt * 4.2f);
+        _wPiston  += ((mode == 0 ? 1f : 0f) - _wPiston)  * blend;
+        _wSway    += ((mode == 1 ? 1f : 0f) - _wSway)    * blend;
+        _wCross   += ((mode == 2 ? 1f : 0f) - _wCross)   * blend;
+        _wBuildup += ((mode == 3 ? 1f : 0f) - _wBuildup) * blend;
+        _wDrop    += ((mode == 4 ? 1f : 0f) - _wDrop)    * blend;
+
+        // Inject crisp, physically-accurate velocity impulses ONLY on genuine beat onsets!
+        long beatStamp = AudioAnalyzer.BeatStamp;
+        float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.28f : 1.0f;
+        if (beatStamp != _lastImpulseBeat && beatStamp > 0)
+        {
+            _lastImpulseBeat = beatStamp;
+            _crossSign = -_crossSign;
+            float power = Math.Clamp((0.55f + AudioAnalyzer.BeatMotionStrength * 0.85f) * loud * drive, 0.15f, 1.85f);
+            float domAng = AudioAnalyzer.DominantAngle;
+            float pan = AudioAnalyzer.StereoPan;
+
+            // Piston Pump: pure vertical bass slam; Cross: smooth alternating diagonal arc; Drop: explosive 360° impact!
+            float impY = -(115f * _wPiston + 78f * _wSway + 95f * _wCross + 45f * _wBuildup + 165f * _wDrop) * power;
+            float impX = (_crossSign * 82f * _wCross
+                        + MathF.Cos(domAng) * 58f * (_wDrop + _wSway * 0.55f)
+                        + pan * 72f * (_wSway + _wDrop)) * power;
+            float impRot = (_crossSign * 0.42f * _wCross + pan * 0.35f + MathF.Sin(domAng) * 0.32f * _wDrop) * power;
+            float impSc = (0.38f * _wPiston + 0.28f * _wSway + 0.36f * _wCross + 0.68f * _wDrop) * power;
+
+            _velX = Math.Clamp(_velX + impX, -220f, 220f);
+            _velY = Math.Clamp(_velY + impY, -260f, 220f);
+            _velRot = Math.Clamp(_velRot + impRot, -1.6f, 1.6f);
+            _velSc = Math.Clamp(_velSc + impSc, -1.2f, 1.8f);
+        }
+
+        // Continuous forces: Stereo L/R pendulum sway + Buildup anti-gravity hover + Sub-bass weight
+        float buildup = AudioAnalyzer.BuildupLevel;
+        float targetX = AudioAnalyzer.StereoPan * (4.2f * _wSway + 3.2f * _wDrop) * loud;
+        float targetY = -buildup * 4.5f * _wBuildup - AudioAnalyzer.SubBass * 1.8f * loud;
+        float targetRot = AudioAnalyzer.StereoPan * 0.024f * (_wSway + _wDrop);
+        float targetSc = buildup * 0.022f * _wBuildup + AudioAnalyzer.DropImpact * 0.030f;
+
+        // 2-step semi-implicit Euler spring-damper integration (rock-solid stability at both 60fps & 240fps!)
+        float subDt = dt * 0.5f;
+        const float kPos = 215f, cPos = 22.5f;   // snappy elastic bounce (~115ms attack, zero jitter!)
+        const float kRot = 185f, cRot = 20.0f;
+        const float kSc  = 240f, cSc  = 25.0f;
+        for (int s = 0; s < 2; s++)
+        {
+            _velX += ((targetX - _sprX) * kPos - _velX * cPos) * subDt;
+            _velY += ((targetY - _sprY) * kPos - _velY * cPos) * subDt;
+            _sprX = Math.Clamp(_sprX + _velX * subDt, -11.5f, 11.5f);
+            _sprY = Math.Clamp(_sprY + _velY * subDt, -13.5f, 9.5f);
+
+            _velRot += ((targetRot - _sprRot) * kRot - _velRot * cRot) * subDt;
+            _sprRot = Math.Clamp(_sprRot + _velRot * subDt, -0.075f, 0.075f);
+
+            _velSc += ((targetSc - _sprSc) * kSc - _velSc * cSc) * subDt;
+            _sprSc = Math.Clamp(_sprSc + _velSc * subDt, -0.02f, 0.125f);
+        }
+
+        // 3 independent Fourier water-wave phase velocities
+        _phase += dt * (8.5f + Kick * 13.5f);
+        _lowPhase += dt * (3.2f + Bass * 4.8f + Kick * 5.2f);
+        _midPhase += dt * (6.6f + Mid * 8.4f);
+        _highPhase += dt * (15.5f + High * 16.5f + HighPeak * 12.0f);
+        Active = maxE > 0.012f || MathF.Abs(_sprX) > 0.08f || MathF.Abs(_sprY) > 0.08f;
         if (Active) UI.Animate();
     }
 
     public static float BandEnergy(int band) => Active ? _bandPulse[band & 31] : 0f;
 
     /// <summary>
-    /// Pushes an independent per-element GPU hop/scale/tilt transform centered on rect. Zero heap alloc.
-    /// Pass textSafe: true for text-bearing widgets (pure translation -> ZERO Direct2D glyph-atlas re-rasterization!).
+    /// Pro VJ spring-damper per-element choreography: rides the C1-smooth master gimbal + gentle per-band harmonic wave.
+    /// Zero teleports, zero frame-to-frame jerks, pure translation when textSafe=true (0 D2D glyph-atlas cost).
     /// </summary>
     public static Matrix3x2 Push(R rect, int band, float amp = 1.0f, float rotAmp = 1.0f, bool textSafe = true)
     {
         var prev = Gfx.DC.Transform;
         if (!Active) return prev;
         int b = band & 31;
-        float kickShare = b < 8 ? 0.52f : b < 18 ? 0.25f : 0.12f;
-        float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.32f : 1.0f;
-        float e = Math.Clamp(_bandPulse[b] * 0.78f + Kick * kickShare, 0f, 1.70f) * amp * drive;
-        if (e <= 0.008f) return prev;
+        float e = Math.Clamp(_bandPulse[b] * 0.72f + Kick * (b < 8 ? 0.48f : 0.20f), 0f, 1.55f);
 
-        // Spectral-Fingerprint 2D Vector Field + Musical Structure PatternMode (0=Piston, 1=Stereo Sway, 2=Diagonal Cross, 3=Buildup, 4=DROP!)
-        float pan = AudioAnalyzer.StereoPan;
-        float domAng = AudioAnalyzer.DominantAngle;
-        float cent = AudioAnalyzer.SpectralCentroid;
-        float sub = AudioAnalyzer.SubBass;
-        float punch = AudioAnalyzer.PunchBass;
-        float air = AudioAnalyzer.AirTreble;
-        int mode = AudioAnalyzer.PatternMode;
-        float buildup = AudioAnalyzer.BuildupLevel;
-        float drop = AudioAnalyzer.DropImpact;
-        int beatAlt = (AudioAnalyzer.BeatCount & 1) == 0 ? 1 : -1;
+        // Cohesive master spring motion + subtle organic per-band phase ripple (never teleports!)
+        float rippleY = (-0.50f + 0.50f * MathF.Cos(_lowPhase * 1.15f + b * 0.55f)) * e * 2.4f;
+        float rippleX = MathF.Sin(_midPhase * 0.65f + b * 0.72f) * e * (1.2f * _wSway + 0.5f);
+        float dx = Math.Clamp((_sprX * 0.88f + rippleX) * amp, -12.0f, 12.0f);
+        float dy = Math.Clamp((_sprY * 0.92f + rippleY) * amp, -14.0f, 9.5f);
 
-        float wave = MathF.Cos(_phase * 1.15f + b * 1.29f);
-        float dx, dy, modeScaleBoost = 0f, modeRotBoost = 0f;
-
-        if (mode == 4) // DROP DETONATION: explosive 360° slam + giant vertical impact!
-        {
-            float blast = 1.28f + drop * 0.45f;
-            float dirX = MathF.Cos(domAng + b * 0.28f) * (punch * 5.2f + Kick * 3.2f) + pan * 6.0f;
-            float dirY = MathF.Sin(domAng + b * 0.22f) * punch * 4.2f - (sub * 5.8f + Kick * 4.5f);
-            dx = Math.Clamp((MathF.Sin(_phase * 1.05f + b * 1.73f) * e * 2.6f + dirX) * amp * drive * blast, -12.0f, 12.0f);
-            dy = Math.Clamp(((-0.62f + 0.48f * wave) * e * 5.4f + dirY) * amp * drive * blast, -14.5f, 9.5f);
-            modeScaleBoost = drop * 0.055f;
-            modeRotBoost = MathF.Sin(_highPhase * 0.9f + b) * 0.032f;
-        }
-        else if (mode == 3) // BUILDUP TENSION (Разгон!): tightening rapid micro-tremor rising upward!
-        {
-            float tense = 0.65f + buildup * 0.95f;
-            float jitterX = MathF.Sin(_highPhase * 2.2f + b * 2.1f) * (1.2f + buildup * 2.4f) + pan * 2.8f;
-            float liftY = -buildup * 3.8f + MathF.Cos(_highPhase * 1.9f + b * 1.7f) * (1.0f + buildup * 2.1f);
-            dx = Math.Clamp(jitterX * amp * tense, -6.5f, 6.5f);
-            dy = Math.Clamp(liftY * amp * tense, -8.5f, 5.5f);
-            modeRotBoost = MathF.Sin(_highPhase * 2.4f + b) * buildup * 0.026f;
-        }
-        else if (mode == 0) // LOCKED VERTICAL PISTON PUMP (Повторяющийся ритм -> чёткая тряска вверх-вниз!)
-        {
-            float pump = (-0.72f + 0.45f * wave) * (e * 5.8f + sub * Kick * 4.6f);
-            dx = Math.Clamp((pan * 3.2f + MathF.Sin(_phase * 0.9f + b) * e * 0.9f) * amp * drive, -5.0f, 5.0f);
-            dy = Math.Clamp(pump * amp * drive, -13.0f, 8.5f);
-            modeScaleBoost = Kick * 0.025f;
-        }
-        else if (mode == 2) // DIAGONAL KINETIC CROSS (Alternating diagonal punch on every beat!)
-        {
-            float diag = (e * 4.4f + punch * Kick * 4.2f) * amp * drive;
-            dx = Math.Clamp((beatAlt * diag * 0.85f + pan * 4.5f), -10.5f, 10.5f);
-            dy = Math.Clamp((-MathF.Abs(diag) * 0.92f + MathF.Sin(domAng) * 2.2f), -12.0f, 7.5f);
-            modeRotBoost = beatAlt * Kick * 0.030f;
-        }
-        else // Mode 1: STEREO LIQUID SWAY (Melodic / freeform stereo flow!)
-        {
-            float dirX = MathF.Cos(domAng + b * 0.22f) * punch * 3.8f + pan * (3.2f + Mid * 4.8f);
-            float dirY = MathF.Sin(domAng + b * 0.18f) * punch * 3.0f - sub * Kick * 4.0f;
-            dx = Math.Clamp((MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 2.2f + dirX * amp * drive), -9.5f, 9.5f);
-            dy = Math.Clamp(((-0.55f + 0.45f * wave) * e * 4.4f + dirY * amp * drive), -11.0f, 7.5f);
-        }
+        if (MathF.Abs(dx) < 0.04f && MathF.Abs(dy) < 0.04f && textSafe) return prev;
 
         if (textSafe)
         {
-            // Pure translation preserves Direct2D's glyph atlas 100% (0 CPU re-rasterization at 144/240 FPS!)
             Gfx.DC.Transform = Matrix3x2.CreateTranslation(dx, dy) * prev;
             return prev;
         }
 
-        // Cover art / icons get full kinetic directional punch, scale shockwave & stereo/treble twist!
-        float sc = 1f + Math.Clamp((e * 0.044f + sub * Kick * 0.038f + modeScaleBoost) * amp, 0f, 0.145f);
-        float ang = Math.Clamp((MathF.Sin(_phase * 1.07f + b * 2.31f) * e * (0.024f + cent * 0.022f) + pan * 0.034f + MathF.Cos(_highPhase + b) * air * 0.028f + modeRotBoost) * rotAmp, -0.095f, 0.095f);
+        float sc = 1f + Math.Clamp((_sprSc + e * 0.022f) * amp, -0.02f, 0.135f);
+        float ang = Math.Clamp((_sprRot + MathF.Sin(_lowPhase + b * 0.45f) * e * 0.014f) * rotAmp, -0.082f, 0.082f);
 
         var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.5f);
         var local = Matrix3x2.CreateScale(sc, sc, center)
@@ -2621,5 +2638,33 @@ public static class MusicBounce
             Pop(prev);
         }
         return sum / 24f;
+    }
+
+    internal static float MeasureMaxSpringStep()
+    {
+        _sprX = _sprY = _velX = _velY = 0f;
+        float prevX = 0f, prevY = 0f, maxStep = 0f;
+        const float dt = 1f / 60f, kPos = 215f, cPos = 22.5f;
+        for (int f = 0; f < 40; f++)
+        {
+            if (f == 2 || f == 14 || f == 26)
+            {
+                _crossSign = -_crossSign;
+                _velX = Math.Clamp(_velX + _crossSign * 95f, -220f, 220f);
+                _velY = Math.Clamp(_velY - 140f, -260f, 220f);
+            }
+            for (int s = 0; s < 2; s++)
+            {
+                _velX += (-_sprX * kPos - _velX * cPos) * (dt * 0.5f);
+                _velY += (-_sprY * kPos - _velY * cPos) * (dt * 0.5f);
+                _sprX = Math.Clamp(_sprX + _velX * (dt * 0.5f), -11.5f, 11.5f);
+                _sprY = Math.Clamp(_sprY + _velY * (dt * 0.5f), -13.5f, 9.5f);
+            }
+            float step = MathF.Sqrt((_sprX - prevX) * (_sprX - prevX) + (_sprY - prevY) * (_sprY - prevY));
+            if (step > maxStep) maxStep = step;
+            prevX = _sprX; prevY = _sprY;
+        }
+        _sprX = _sprY = _velX = _velY = 0f;
+        return maxStep;
     }
 }

@@ -1750,7 +1750,9 @@ public static class Shell
     public static System.Numerics.Vector2 VideoBeatShift { get; private set; }
     public static float VideoBeatGlow { get; private set; }
     public static float VideoBeatPhase => _vbPhase;
-    private static float _vbBassAvg, _vbKick, _vbPhase;
+    private static float _vbBassAvg, _vbKick, _vbPhase, _vbX, _vbY, _vbVx, _vbVy;
+    private static long _vbLastBeat;
+    private static int _vbSign = 1;
 
     public static void ToggleVideoBeatShake()
     {
@@ -1775,13 +1777,12 @@ public static class Shell
         {
             VideoBeatShift = default;
             VideoBeatGlow = 0f;
-            _vbKick = 0f;
-            _vbBassAvg = 0f;
+            _vbKick = _vbBassAvg = _vbX = _vbY = _vbVx = _vbVy = 0f;
             return;
         }
 
         AudioAnalyzer.RequestFrame(force: true, visual: false);
-        float dt = (float)Math.Clamp(UI.Dt, 0.003, 0.04);
+        float dt = (float)Math.Clamp(UI.Dt, 0.003, 0.035);
         float bass = AudioAnalyzer.BassEnergy;
         float loudGain = AudioAnalyzer.LoudnessGain;
         float dyn = AudioAnalyzer.TrackDynamics;
@@ -1791,52 +1792,51 @@ public static class Shell
                       + AudioAnalyzer.BeatMotionStrength * 0.58f) * loudGain;
         _vbKick = MathF.Max(_vbKick * MathF.Exp(-dt * (13.0f + (1f - Math.Clamp(dyn - 0.6f, 0f, 1f)) * 4.5f)), Math.Clamp(kickRaw, 0f, 1.65f));
 
-        if (_vbKick <= 0.015f)
+        // Pro VJ 2D Spring-Damper for VideoBeatShake (C1-smooth elastic arcs, zero teleport/laggy jerks!)
+        int mode = AudioAnalyzer.PatternMode;
+        float domAng = AudioAnalyzer.DominantAngle;
+        float pan = AudioAnalyzer.StereoPan;
+        float buildup = AudioAnalyzer.BuildupLevel;
+        float drop = AudioAnalyzer.DropImpact;
+        long beatStamp = AudioAnalyzer.BeatStamp;
+        if (beatStamp != _vbLastBeat && beatStamp > 0)
+        {
+            _vbLastBeat = beatStamp;
+            _vbSign = -_vbSign;
+            float power = Math.Clamp((0.55f + AudioAnalyzer.BeatMotionStrength * 0.85f) * loudGain, 0.15f, 1.75f);
+            float impY = mode switch { 4 => -160f, 0 => -125f, 2 => -105f, 3 => -45f, _ => -85f } * power;
+            float impX = mode switch
+            {
+                2 => _vbSign * 85f * power,
+                4 => (MathF.Cos(domAng) * 75f + pan * 65f) * power,
+                1 => (MathF.Cos(domAng) * 42f + pan * 68f) * power,
+                _ => pan * 32f * power,
+            };
+            _vbVx = Math.Clamp(_vbVx + impX, -210f, 210f);
+            _vbVy = Math.Clamp(_vbVy + impY, -240f, 200f);
+        }
+
+        float tgtX = pan * (mode == 1 || mode == 4 ? 4.2f : 1.8f) * loudGain;
+        float tgtY = mode == 3 ? -buildup * 4.5f : -AudioAnalyzer.SubBass * 1.6f * loudGain;
+        float subDt = dt * 0.5f;
+        const float k = 215f, c = 22.5f;
+        for (int s = 0; s < 2; s++)
+        {
+            _vbVx += ((tgtX - _vbX) * k - _vbVx * c) * subDt;
+            _vbVy += ((tgtY - _vbY) * k - _vbVy * c) * subDt;
+            _vbX = Math.Clamp(_vbX + _vbVx * subDt, -11.5f, 11.5f);
+            _vbY = Math.Clamp(_vbY + _vbVy * subDt, -13.5f, 9.0f);
+        }
+
+        if (_vbKick <= 0.015f && MathF.Abs(_vbX) < 0.08f && MathF.Abs(_vbY) < 0.08f)
         {
             VideoBeatShift = default;
             VideoBeatGlow = 0f;
             return;
         }
 
-        _vbPhase += dt * (10.5f + _vbKick * 18.5f + AudioAnalyzer.HighEnergy * 6.0f);
-        // Musical Structure-Driven VideoBeatShake: Piston Pump (0), Stereo Sway (1), Diagonal Cross (2), Buildup Tension (3), DROP Detonation (4)!
-        float domAng = AudioAnalyzer.DominantAngle;
-        float pan = AudioAnalyzer.StereoPan;
-        float punch = AudioAnalyzer.PunchBass;
-        int mode = AudioAnalyzer.PatternMode;
-        float buildup = AudioAnalyzer.BuildupLevel;
-        float drop = AudioAnalyzer.DropImpact;
-        int beatAlt = (AudioAnalyzer.BeatCount & 1) == 0 ? 1 : -1;
-        float waveY = -0.55f + 0.45f * MathF.Cos(_vbPhase * 1.15f);
-        float waveX = MathF.Sin(_vbPhase * 0.94f);
-        float dx, dy;
-        if (mode == 4) // DROP DETONATION
-        {
-            float blast = 1.25f + drop * 0.42f;
-            dx = Gfx.Snap(Math.Clamp((waveX * _vbKick * 4.8f + MathF.Cos(domAng) * punch * _vbKick * 4.5f + pan * _vbKick * 5.2f) * blast, -12.0f, 12.0f));
-            dy = Gfx.Snap(Math.Clamp((waveY * _vbKick * 8.4f + MathF.Sin(domAng) * punch * _vbKick * 3.6f - AudioAnalyzer.SubBass * _vbKick * 4.5f) * blast, -14.0f, 9.0f));
-        }
-        else if (mode == 3) // BUILDUP TENSION (Разгон!)
-        {
-            dx = Gfx.Snap(Math.Clamp(MathF.Sin(_vbPhase * 2.8f) * (1.8f + buildup * 2.8f), -5.0f, 5.0f));
-            dy = Gfx.Snap(Math.Clamp(-buildup * 3.5f + MathF.Cos(_vbPhase * 2.4f) * (1.4f + buildup * 2.2f), -7.5f, 4.0f));
-        }
-        else if (mode == 0) // LOCKED VERTICAL PISTON PUMP (Вверх-Вниз!)
-        {
-            dx = Gfx.Snap(Math.Clamp(pan * _vbKick * 3.2f, -4.5f, 4.5f));
-            dy = Gfx.Snap(Math.Clamp((waveY * _vbKick * 8.6f - AudioAnalyzer.SubBass * _vbKick * 4.2f), -13.0f, 8.0f));
-        }
-        else if (mode == 2) // DIAGONAL KINETIC CROSS
-        {
-            dx = Gfx.Snap(Math.Clamp(beatAlt * _vbKick * 6.8f + pan * _vbKick * 3.6f, -10.5f, 10.5f));
-            dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 7.8f, -11.5f, 7.0f));
-        }
-        else // STEREO LIQUID SWAY
-        {
-            dx = Gfx.Snap(Math.Clamp(waveX * _vbKick * 4.0f + MathF.Cos(domAng) * punch * _vbKick * 3.6f + pan * _vbKick * 4.6f, -9.5f, 9.5f));
-            dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 7.2f + MathF.Sin(domAng) * punch * _vbKick * 3.0f - AudioAnalyzer.SubBass * _vbKick * 3.2f, -11.5f, 7.0f));
-        }
-        VideoBeatShift = new System.Numerics.Vector2(dx, dy);
+        _vbPhase += dt * (9.0f + _vbKick * 14.0f);
+        VideoBeatShift = new System.Numerics.Vector2(Gfx.Snap(_vbX), Gfx.Snap(_vbY));
         VideoBeatGlow = Math.Clamp(_vbKick * (mode == 4 ? 0.92f : 0.72f) + drop * 0.35f, 0f, 1.0f);
         UI.Animate();
     }
