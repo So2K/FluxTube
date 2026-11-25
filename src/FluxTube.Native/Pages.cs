@@ -976,6 +976,28 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 Cards.GridCard(new R(x, y, cardW, rowH - 10), thumbH, v, UI.Id(_scroll, i), _hover, Source);
                 if (v.PlaylistId == null && !v.IsChannel && _seen.Add(v.VideoId)) LogSeen(v);
             }
+        if (kind == "home")
+        {
+            // Start fetching the next few rows while they are still off screen.
+            // Include the scroll target so a fast wheel gesture does not outrun the queue.
+            var target = UI.ScrollTarget(_scroll);
+            int targetFirst = Math.Max(0, (int)(target / rowH));
+            int targetLast = Math.Min(rows - 1, (int)((target + view.H) / rowH));
+            int warmFirst = Math.Max(0, Math.Min(first, targetFirst) - 2);
+            int warmLast = Math.Min(rows - 1, Math.Max(last, targetLast) + 3);
+            for (int row = warmFirst; row <= warmLast; row++)
+            {
+                if (row >= first && row <= last) continue;
+                for (int col = 0; col < cols; col++)
+                {
+                    int i = row * cols + col;
+                    if (i >= _items.Count) break;
+                    var v = _items[i];
+                    if (v.VideoId.Length == 11) Images.Get(v.Thumb720, cardW, thumbH);
+                    if (v.AvatarUrl != null) Images.Get(v.AvatarUrl, 34, 34, round: true);
+                }
+            }
+        }
         if (_loadingMore) UI.Spinner(view.X + usable / 2, view.Y + rows * rowH - scroll + 26, 10, Th.Sub);
         UI.EndScroll();
 
