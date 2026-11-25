@@ -417,7 +417,30 @@ public static class QuickStream
         }
     }
 
-    private static async Task<StreamInfo?> FromResponse(Client c, string id, JsonNode n, int wantV, int wantA)
+    /// <summary>Lightweight 360p/480p video-only stream for fast hovered card previews (never wastes 4K bandwidth).</summary>
+    public static async Task<StreamInfo?> GetPreviewAsync(string videoId)
+    {
+        if (TryGet(videoId) is { } ready) return ready;
+        if (Resolver.Instance.TryGet(videoId) is { } resReady) return resReady;
+        if (IsBlocked) return null;
+        try
+        {
+            var visitor = await VisitorAsync();
+            if (visitor == null) return null;
+            foreach (var client in new[] { Vision, Quest })
+            {
+                JsonNode? n;
+                try { n = await PlayerAsync(client, videoId, visitor); } catch { continue; }
+                if (n == null || n.S("playabilityStatus", "status") != "OK") continue;
+                var s = await FromResponse(client, videoId, n, wantV: 0, wantA: 0, previewMaxHeight: 480);
+                if (s != null) return s;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static async Task<StreamInfo?> FromResponse(Client c, string id, JsonNode n, int wantV, int wantA, int previewMaxHeight = 0)
     {
         if (n.S("playabilityStatus", "status") != "OK")
         {
@@ -435,14 +458,25 @@ public static class QuickStream
             _specs[id] = spec;
         }
         Remember(c, id, n);
-        if (n.P("streamingData", "adaptiveFormats") is not JsonArray formats) return null;
         double.TryParse(n.S("videoDetails", "lengthSeconds"), out var dur);
         var title = n.S("videoDetails", "title");
         var headers = new Dictionary<string, string> { ["User-Agent"] = c.UA };
 
+        // LIVE streams & HLS-only broadcasts: hand the HLS manifest straight to mpv (libmpv demuxes HLS natively!).
+        bool isLive = n.P("videoDetails", "isLive") is JsonValue lv && lv.TryGetValue<bool>(out var lvb) && lvb;
+        var hlsUrl = n.S("streamingData", "hlsManifestUrl");
+        var adaptive = n.P("streamingData", "adaptiveFormats") as JsonArray;
+        if ((isLive || adaptive == null) && !string.IsNullOrEmpty(hlsUrl) && wantV == 0)
+        {
+            Paths.Log($"quick {id} {c.Name}: direct HLS stream{(isLive ? " (LIVE)" : "")}");
+            return new StreamInfo(id, hlsUrl, null, headers, title, dur, DateTime.UtcNow) { Vitag = 0, Aitag = 0, Preview = false };
+        }
+        if (adaptive == null) return null;
+
         var quality = AppSettings.Current.PlayerQuality;
-        var cap = int.TryParse(quality, out var q) ? q : 100000;
-        var usable = formats.Where(f => f.S("url") != null && Num(f, "contentLength") > 0 && f?["isDrc"] == null).ToList();
+        var cap = previewMaxHeight > 0 ? previewMaxHeight : (int.TryParse(quality, out var q) ? q : 100000);
+        // Do not drop formats missing contentLength (StreamProxy probes length via Range 0-0 when needed!)
+        var usable = adaptive.Where(f => f.S("url") != null && f?["isDrc"] == null).ToList();
         List<JsonNode?> videos, audios;
         if (wantV > 0)
         {
@@ -464,9 +498,18 @@ public static class QuickStream
         }
         else
         {
-            videos = usable.Where(f => !IsAudio(f) && Math.Min(Num(f, "height"), Num(f, "width")) <= cap && f.S("qualityLabel")?.Contains("HDR") != true)
-                .OrderByDescending(f => Num(f, "height")).ThenByDescending(f => Num(f, "fps")).ThenByDescending(CodecRank).ThenByDescending(f => Num(f, "bitrate"))
+            var allVideo = usable.Where(f => !IsAudio(f)).ToList();
+            videos = allVideo.Where(f => Math.Min(Num(f, "height"), Num(f, "width")) <= cap && f.S("qualityLabel")?.Contains("HDR") != true)
+                .OrderByDescending(f => Num(f, "height")).ThenByDescending(f => Num(f, "fps")).ThenByDescending(CodecRank).ThenByDescending(f => Num(f, "contentLength") > 0 ? 1 : 0).ThenByDescending(f => Num(f, "bitrate"))
                 .Take(3).ToList();
+            // Fallback 1: HDR-only videos (never reject a video just because all streams are HDR!)
+            if (videos.Count == 0 && allVideo.Count > 0)
+                videos = allVideo.Where(f => Math.Min(Num(f, "height"), Num(f, "width")) <= cap)
+                    .OrderByDescending(f => Num(f, "height")).ThenByDescending(CodecRank).Take(3).ToList();
+            // Fallback 2: smallest available resolution if cap was lower than any available stream
+            if (videos.Count == 0 && allVideo.Count > 0)
+                videos = allVideo.OrderBy(f => Num(f, "height")).ThenByDescending(CodecRank).Take(2).ToList();
+
             var prefLang = AppSettings.Current.AudioLanguage;
             var allAudio = usable.Where(IsAudio).ToList();
             List<JsonNode?> preferred = [];
@@ -484,12 +527,53 @@ public static class QuickStream
                 preferred = allAudio.Where(f => f?["audioTrack"] == null || (f.P("audioTrack", "audioIsDefault") is JsonValue dv && dv.TryGetValue<bool>(out var isDef) && isDef)).ToList();
             if (preferred.Count == 0) preferred = allAudio;
             audios = preferred
-                .OrderByDescending(f => Num(f, "itag") == 251 ? 2 : Num(f, "itag") == 140 ? 1 : 0).ThenByDescending(f => Num(f, "bitrate"))
+                .OrderByDescending(f => Num(f, "itag") == 251 ? 2 : Num(f, "itag") == 140 ? 1 : 0).ThenByDescending(f => Num(f, "contentLength") > 0 ? 1 : 0).ThenByDescending(f => Num(f, "bitrate"))
                 .Take(2).ToList();
-            if (quality == "audio") videos.Clear();
+            if (quality == "audio" && previewMaxHeight == 0) videos.Clear();
         }
+
+        // Preview-only fast path: we only need video (muted card hover!), zero audio download wasted!
+        if (previewMaxHeight > 0 && videos.Count > 0)
+        {
+            var pProxy = StreamProxy.Instance;
+            foreach (var f in videos)
+            {
+                var url = f.S("url")!;
+                var itag = (int)Num(f, "itag");
+                var local = c.WholeStream ? pProxy.Register(url, 0, headers, 256 * 1024, id, fragile: true, unproven: true) : pProxy.RegisterStarter(url, headers, 256 * 1024, id);
+                await pProxy.PrefillAsync(local);
+                if (pProxy.HeadReady(local)) { pProxy.Confirm(local); return new StreamInfo(id, local, null, headers, title, dur, DateTime.UtcNow) { Vitag = itag, Preview = true }; }
+            }
+            if (!string.IsNullOrEmpty(hlsUrl))
+                return new StreamInfo(id, hlsUrl, null, headers, title, dur, DateTime.UtcNow) { Preview = true };
+            return null;
+        }
+
         var audioOnly = videos.Count == 0;
-        if (audios.Count == 0 || (audioOnly && quality != "audio" && wantV == 0)) return null;
+        if (audios.Count == 0 || (audioOnly && quality != "audio" && wantV == 0))
+        {
+            // Fallback 3: try muxed streamingData.formats (itag 18/22) or HLS manifest before giving up!
+            if (wantV == 0 && n.P("streamingData", "formats") is JsonArray muxed)
+            {
+                var mf = muxed.Where(f => f.S("url") != null).OrderByDescending(f => Num(f, "height")).FirstOrDefault();
+                if (mf != null)
+                {
+                    var mUrl = mf.S("url")!;
+                    var mItag = (int)Num(mf, "itag");
+                    var mp = StreamProxy.Instance;
+                    var mLocal = mp.Register(mUrl, 0, headers, 512 * 1024, id, unproven: true);
+                    await mp.PrefillAsync(mLocal);
+                    if (mp.HeadReady(mLocal))
+                    {
+                        mp.Confirm(mLocal);
+                        return new StreamInfo(id, mLocal, null, headers, title, dur, DateTime.UtcNow) { Vitag = mItag, Aitag = 0, Preview = !c.WholeStream };
+                    }
+                }
+            }
+            if (wantV == 0 && !string.IsNullOrEmpty(hlsUrl))
+                return new StreamInfo(id, hlsUrl, null, headers, title, dur, DateTime.UtcNow);
+            return null;
+        }
 
         var proxy = StreamProxy.Instance;
         // the first candidate whose beginning YouTube actually lets through
@@ -499,8 +583,13 @@ public static class QuickStream
             {
                 var url = f.S("url")!;
                 var itag = (int)Num(f, "itag");
-                // a stream already known under this itag must be the same bytes, or the link cannot continue it
-                if (proxy.LengthOf(id, itag) is > 0 and var have && have != Num(f, "contentLength")) continue;
+                long clen = Num(f, "contentLength");
+                // If YouTube re-encoded this itag with a new byte length, drop stale cache cleanly instead of deadlocking playback!
+                if (clen > 0 && proxy.LengthOf(id, itag) is > 0 and var have && have != clen)
+                {
+                    if (wantV > 0) continue; // exact continuation must match bytes
+                    proxy.InvalidateItag(id, itag);
+                }
                 var local = c.WholeStream ? proxy.Register(url, 0, headers, head, id, unproven: true) : proxy.RegisterStarter(url, headers, head, id);
                 await proxy.PrefillAsync(local);
                 if (proxy.HeadReady(local)) { proxy.Confirm(local); return (local, itag); }
@@ -513,7 +602,12 @@ public static class QuickStream
         await Task.WhenAll(audioTask, videoTask);
         var a = audioTask.Result;
         var v = videoTask.Result;
-        if (a == null || (v == null && !audioOnly)) return null;
+        if (a == null || (v == null && !audioOnly))
+        {
+            if (wantV == 0 && !string.IsNullOrEmpty(hlsUrl))
+                return new StreamInfo(id, hlsUrl, null, headers, title, dur, DateTime.UtcNow);
+            return null;
+        }
 
         int vitag = v?.Itag ?? a.Value.Itag, aitag = v != null ? a.Value.Itag : 0;
         if (Db.CacheVideo(id) is not { } known || known.Vitag != vitag || known.Aitag != aitag) MediaCache.NoteSeen(id, quality, vitag, aitag);

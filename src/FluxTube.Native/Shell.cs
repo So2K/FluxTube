@@ -1014,16 +1014,24 @@ public static class Shell
         Sfx.Volume(videoVolPct);
     }
 
-    /// <summary>Smoothly adjusts the main player's volume (used by wheel over video/mini-player/PiP) with scaled volume SFX.</summary>
+    /// <summary>Smoothly adjusts the main player's volume (used by wheel over video/mini-player/PiP/music stage) with scaled volume SFX.</summary>
     public static void AdjustMainVolume(int delta)
     {
         if (!P.IsReady) return;
-        var nv = Math.Clamp((int)Math.Round(P.Volume) + delta, 0, 150);
+        SetMainVolume((int)Math.Round(P.Volume) + delta, instant: false);
+    }
+
+    /// <summary>Sets the main player's volume (0..150%), updates settings &amp; tab override, and plays scaled SFX.</summary>
+    public static void SetMainVolume(int vol, bool instant = true)
+    {
+        if (!P.IsReady) return;
+        var nv = Math.Clamp(vol, 0, 150);
         AppSettings.Current.Volume = nv;
         if (_tab >= 0 && _tab < _tabs.Count && _tabs[_tab].Key == _mainTabKey) _tabs[_tab].CustomVolume = -1;
         _volSaveDueAt = Environment.TickCount64 + 450;
         _suppressVolSfxUntil = Environment.TickCount64 + 260;
-        P.SetVolumeSmooth(nv);
+        if (P.Muted && nv > 0) P.Command("set", "mute", "no");
+        P.SetVolumeSmooth(nv, instant ? 0 : 120);
         PlayVolumeSfx(nv);
         App.Invalidate();
     }
@@ -1150,12 +1158,14 @@ public static class Shell
                 case "--test-shader": if (App.Test) AppSettings.Current.UiGlassShader = v; break;
                 case "--test-effect": if (App.Test) AppSettings.Current.SeasonalEffect = v; break;
                 case "--test-pattern": if (App.Test) AppSettings.Current.BgPattern = v; break;
+                case "--test-musicbg": if (App.Test) AppSettings.Current.MusicStageBg = v; break;
                 case "--test-menu": App.After(int.Parse(v), () => AccountMenu.Toggle(Gfx.W - 46 * 3 - 8, TopH - 2)); break;
                 case "--test-music" when App.Test:
                     AppSettings.Current.AudioOnlyMode = v == "1";
                     P.SetVideoEnabled(v != "1");
                     break;
                 case "--test-dsp": App.After(int.Parse(v), AudioStudioPanel.Show); break;
+                case "--test-dj": App.After(int.Parse(v), AudioStudioPanel.ShowDj); break;
                 case "--test-login": App.After(int.Parse(v), () => LoginModal.Show()); break;
                 case "--lang": AppSettings.Current.UiLanguage = v; OnLanguageChanged(); break;
                 case "--test-pip": App.After(int.Parse(v), Pip.Enter); break;
@@ -1812,10 +1822,11 @@ public static class Shell
             return;
         }
 
-        // Detect short musical transients; the window and all hit targets stay stationary.
-        if (AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test)
+        // Detect short musical transients + drive per-element FFT wave bounce (text, likes, waveform avatars, buttons!)
+        bool musicBounceOn = AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && _cur is not ShortsPage && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test;
+        MusicBounce.Update(musicBounceOn, (float)UI.Dt);
+        if (musicBounceOn)
         {
-            AudioAnalyzer.RequestFrame(force: true);
             _shakeBassAvg = AudioAnalyzer.BassEnergy;
             _shakeEnergy = AudioAnalyzer.BeatEnvelope;
             _shakePhase = AudioAnalyzer.BeatPhase;

@@ -676,6 +676,7 @@ public static unsafe class Gfx
         _imgBrush?.Dispose();
         _imgBrush = null;
         BgEngine.DisposeGpuResources();
+        MusicArt.OnDeviceLost();
         DisposeMotionBlurResources();
         DisposeGlassResources();
         foreach (var s in _radials) s.Dispose();
@@ -1586,6 +1587,59 @@ public static unsafe class Gfx
         b.Bitmap = null;
     }
 
+    /// <summary>Hardware anti-aliased rounded cover-crop image (fills dest completely preserving exact aspect ratio, optional zoom &amp; drift).</summary>
+    public static void ImageRoundedCover(ID2D1Bitmap bmp, R dest, float radius, float opacity = 1f, float zoom = 1f, float panX = 0f, float panY = 0f)
+    {
+        var sz = bmp.Size;
+        if (sz.Width <= 0 || sz.Height <= 0 || dest.W <= 0 || dest.H <= 0 || opacity <= 0.002f) return;
+        float sc = MathF.Max(dest.W / sz.Width, dest.H / sz.Height) * MathF.Max(1f, zoom);
+        float dw = sz.Width * sc, dh = sz.Height * sc;
+        float ox = dest.X + (dest.W - dw) * 0.5f + panX;
+        float oy = dest.Y + (dest.H - dh) * 0.5f + panY;
+        var b = _imgBrush ??= DC.CreateBitmapBrush(bmp, new BitmapBrushProperties(ExtendMode.Clamp, ExtendMode.Clamp, Vortice.Direct2D1.BitmapInterpolationMode.Linear));
+        b.Bitmap = bmp;
+        b.Transform = Matrix3x2.CreateScale(sc, sc) * Matrix3x2.CreateTranslation(ox, oy);
+        b.Opacity = opacity;
+        float cr = ClampRad(dest, radius);
+        if (cr > 0.5f) DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(dest), RadiusX = cr, RadiusY = cr }, b);
+        else DC.FillRectangle(Raw(dest), b);
+        b.Bitmap = null;
+    }
+
+    /// <summary>Draws a circular cover-cropped rotating album label (used for the spinning DJ vinyl turntable platter).</summary>
+    public static void ImageCircleRotated(ID2D1Bitmap bmp, float cx, float cy, float radius, float angleRad, float opacity = 1f)
+    {
+        var sz = bmp.Size;
+        if (sz.Width <= 0 || sz.Height <= 0 || radius <= 1f || opacity <= 0.002f) return;
+        float d = radius * 2f;
+        float sc = MathF.Max(d / sz.Width, d / sz.Height);
+        var b = _imgBrush ??= DC.CreateBitmapBrush(bmp, new BitmapBrushProperties(ExtendMode.Clamp, ExtendMode.Clamp, Vortice.Direct2D1.BitmapInterpolationMode.Linear));
+        b.Bitmap = bmp;
+        b.Transform = Matrix3x2.CreateTranslation(-sz.Width * 0.5f, -sz.Height * 0.5f)
+            * Matrix3x2.CreateScale(sc, sc)
+            * Matrix3x2.CreateRotation(angleRad)
+            * Matrix3x2.CreateTranslation(cx, cy);
+        b.Opacity = opacity;
+        DC.FillEllipse(new Ellipse(new Vector2(cx, cy), radius, radius), b);
+        b.Bitmap = null;
+    }
+
+    /// <summary>Vertical smooth scrim gradient (e.g. for cinematic full-bleed album art readability).</summary>
+    public static void FillVerticalFade(R r, uint rgbColor, float topAlpha, float midAlpha, float botAlpha, float midStop = 0.52f)
+    {
+        if (r.W <= 0 || r.H <= 0) return;
+        float rf = ((rgbColor >> 16) & 255) / 255f;
+        float gf = ((rgbColor >> 8) & 255) / 255f;
+        float bf = (rgbColor & 255) / 255f;
+        using var stops = DC.CreateGradientStopCollection([
+            new GradientStop(0f, new Color4(rf, gf, bf, topAlpha)),
+            new GradientStop(Math.Clamp(midStop, 0.1f, 0.9f), new Color4(rf, gf, bf, midAlpha)),
+            new GradientStop(1f, new Color4(rf, gf, bf, botAlpha)),
+        ]);
+        using var brush = DC.CreateLinearGradientBrush(new LinearGradientBrushProperties(new Vector2(r.X, r.Y), new Vector2(r.X, r.Bottom)), stops);
+        DC.FillRectangle(Raw(r), brush);
+    }
+
     public static void ImageRegion(ID2D1Bitmap bmp, R dest, R src, float opacity = 1)
         => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, (Vortice.RawRectF?)Raw(src), null);
 
@@ -1824,8 +1878,10 @@ public static class MusicBounce
 
         float avgAlpha = 1f - MathF.Exp(-dt * 6.5f);
         _bassAvg += (bass - _bassAvg) * avgAlpha;
-        float kickRaw = MathF.Max(0f, bass - _bassAvg * 0.84f) * 2.8f + MathF.Max(0f, bass - 0.26f) * 0.85f;
-        Kick = MathF.Max(Kick * MathF.Exp(-dt * 14.5f), Math.Clamp(kickRaw, 0f, 1.45f));
+        // Fuse Draka1337's 3ms sample-domain BassOnsetDetector (BeatMotionStrength) directly with FFT transients!
+        float onsetKick = AudioAnalyzer.BeatMotionStrength * 1.15f + AudioAnalyzer.BassPressure * 0.35f;
+        float kickRaw = MathF.Max(onsetKick, MathF.Max(0f, bass - _bassAvg * 0.84f) * 2.8f + MathF.Max(0f, bass - 0.26f) * 0.85f);
+        Kick = MathF.Max(Kick * MathF.Exp(-dt * 14.5f), Math.Clamp(kickRaw, 0f, 1.55f));
 
         var bands = AudioAnalyzer.Bands;
         float decay = MathF.Exp(-dt * 13.5f);

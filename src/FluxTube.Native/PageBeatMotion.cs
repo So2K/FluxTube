@@ -19,12 +19,13 @@ public sealed class PageBeatMotion : IDisposable
         _sourceY = video.Y + video.H / 2;
         _radius = MathF.Max(320, video.H * 0.8f);
         var player = FluxTube.Player.MpvPlayer.Instance;
-        _enabled = playingHere && player.HasMedia && !player.Paused && !player.Muted && player.Volume > 0 && (AppSettings.Current.AudioOnlyMode
-            ? AppSettings.Current.MusicBassShake : AppSettings.Current.VideoBeatShake);
+        // Keep v9.2.2's independent per-element MusicBounce pure in Audio-Only mode; use PageBeatMotion for Video Beat Shake.
+        _enabled = playingHere && player.HasMedia && !player.Paused && !player.Muted && player.Volume > 0
+            && !AppSettings.Current.AudioOnlyMode && AppSettings.Current.VideoBeatShake;
         if (UI.Pressed) { _heldEnergy = AudioAnalyzer.BeatMotionStrength; _heldPhase = AudioAnalyzer.BeatPhase; }
         _energy = UI.Down || UI.Released ? _heldEnergy : AudioAnalyzer.BeatMotionStrength;
         _phase = UI.Down || UI.Released ? _heldPhase : AudioAnalyzer.BeatPhase;
-        Active = true; Current = this;
+        Active = _enabled; Current = _enabled ? this : null;
     }
     public void At(float x, float y, bool move = true)
     {

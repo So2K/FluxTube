@@ -189,6 +189,7 @@ public sealed unsafe class Img
     public int State;           // 0 queued, 1 in the pack, 2 on GPU, 3 failed, 4 dropped from the queue, 5 warming
     public long WantedFrame;    // last frame something asked to draw it
     public long ReadyTick, FailedAt;
+    public int FailCount;
     public int Generation;
     public bool Warm;           // came from the pack: no fade-in
     public required Images.IKey Key;
@@ -232,11 +233,23 @@ public static class Images
     private static int _syncThisFrame;
     private static long _syncFrame;
     private static bool _bc1Works = true;
-    private static readonly HttpClient _http = MakeClient();
+    private static HttpClient _http = MakeClient();
+    private static string _httpProxy = AppSettings.Current.Proxy ?? "";
 
     static Images()
     {
         Gfx.DeviceLost += OnDeviceLost;
+    }
+
+    private static HttpClient Client()
+    {
+        var cur = AppSettings.Current.Proxy ?? "";
+        if (cur != _httpProxy)
+        {
+            _httpProxy = cur;
+            _http = MakeClient();
+        }
+        return _http;
     }
 
     public static unsafe void OnDeviceLost()
@@ -255,9 +268,22 @@ public static class Images
 
     private static HttpClient MakeClient()
     {
-        var h = new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, MaxConnectionsPerServer = 8, PooledConnectionLifetime = TimeSpan.FromMinutes(5) };
+        var h = new SocketsHttpHandler
+        {
+            AutomaticDecompression = DecompressionMethods.All,
+            MaxConnectionsPerServer = 12,
+            EnableMultipleHttp2Connections = true,
+            ConnectTimeout = TimeSpan.FromSeconds(5),
+            PooledConnectionLifetime = TimeSpan.FromMinutes(4),
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(45),
+        };
         if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy)) { h.Proxy = new WebProxy(AppSettings.Current.Proxy); h.UseProxy = true; }
-        var c = new HttpClient(h) { Timeout = TimeSpan.FromSeconds(15), DefaultRequestVersion = HttpVersion.Version20 };
+        var c = new HttpClient(h)
+        {
+            Timeout = TimeSpan.FromSeconds(12),
+            DefaultRequestVersion = HttpVersion.Version20,
+            DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+        };
         c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", InnerTube.UserAgent);
         c.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "image/jpeg,image/png,image/*;q=0.8");
         return c;
@@ -304,7 +330,7 @@ public static class Images
                 }
             }
             else if (st == 1) TryUploadNow(img);
-            else if (st == 4 || (st == 3 && UI.Now - img.FailedAt > 30_000))
+            else if (st == 4 || (st == 3 && UI.Now - img.FailedAt > (img.FailCount <= 1 ? 3_500L : img.FailCount == 2 ? 10_000L : 25_000L)))
             {
                 Volatile.Write(ref img.State, 0);
                 Enqueue(img);
@@ -407,6 +433,28 @@ public static class Images
         else Interlocked.Decrement(ref _running);
     }
 
+    private static List<string> BuildCandidates(string url)
+    {
+        var list = new List<string>(4) { url };
+        // Handle YouTube thumbnail fallback chain (including ?sqp=... query suffixes and vi_webp/*.webp!)
+        if (url.Contains("ytimg.com/", StringComparison.OrdinalIgnoreCase))
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(url, @"/vi(?:_webp)?/([A-Za-z0-9_-]{11})/([^/?]+)");
+            if (m.Success)
+            {
+                string id = m.Groups[1].Value;
+                string file = m.Groups[2].Value.ToLowerInvariant();
+                if (file != "hq720.jpg" && (file.Contains("maxres") || file.EndsWith(".webp")))
+                    list.Add($"https://i.ytimg.com/vi/{id}/hq720.jpg");
+                if (file != "hqdefault.jpg")
+                    list.Add($"https://i.ytimg.com/vi/{id}/hqdefault.jpg");
+                if (file != "mqdefault.jpg")
+                    list.Add($"https://i.ytimg.com/vi/{id}/mqdefault.jpg");
+            }
+        }
+        return list;
+    }
+
     private static async Task Worker()
     {
         try
@@ -417,27 +465,62 @@ public static class Images
                 if (Gfx.Frame - Volatile.Read(ref img.WantedFrame) > 40 && _queue.Count > 8) { Volatile.Write(ref img.State, 4); continue; }
                 try
                 {
-                    byte[] data;
                     if (img.Url.StartsWith("file:", StringComparison.Ordinal))
-                        data = await File.ReadAllBytesAsync(new Uri(img.Url).LocalPath);
+                    {
+                        var data = await File.ReadAllBytesAsync(new Uri(img.Url).LocalPath);
+                        Convert(data, img);
+                    }
                     else
                     {
-                        try { data = await _http.GetByteArrayAsync(img.Url); }
-                        catch when (img.Url.EndsWith("/hq720.jpg", StringComparison.Ordinal))
+                        var candidates = BuildCandidates(img.Url);
+                        Exception? lastErr = null;
+                        bool ok = false;
+                        var http = Client();
+                        for (int ci = 0; ci < candidates.Count && !ok; ci++)
                         {
-                            data = await _http.GetByteArrayAsync(img.Url.Replace("/hq720.jpg", "/hqdefault.jpg"));
+                            var u = candidates[ci];
+                            for (int attempt = 0; attempt < 2 && !ok; attempt++)
+                            {
+                                try
+                                {
+                                    using var resp = await http.GetAsync(u, HttpCompletionOption.ResponseContentRead);
+                                    if (!resp.IsSuccessStatusCode)
+                                    {
+                                        int code = (int)resp.StatusCode;
+                                        lastErr = new HttpRequestException($"HTTP {code}");
+                                        if (code is 404 or 410 or 403) break; // try next fallback URL immediately
+                                        if (attempt == 0) await Task.Delay(220);
+                                        continue;
+                                    }
+                                    var data = await resp.Content.ReadAsByteArrayAsync();
+                                    // Reject YouTube's tiny ~1097-byte grey 120x90 missing-thumb placeholder when a fallback exists
+                                    if (data.Length < 1400 && ci + 1 < candidates.Count && u.Contains("ytimg.com/", StringComparison.OrdinalIgnoreCase))
+                                        break;
+                                    Convert(data, img);
+                                    ok = true;
+                                }
+                                catch (Exception ex)
+                                {
+                                    lastErr = ex;
+                                    if (ex is not HttpRequestException and not TaskCanceledException and not IOException)
+                                        break; // decode error -> jump straight to next fallback URL (e.g. webp -> jpg)
+                                    if (attempt == 0) await Task.Delay(220);
+                                }
+                            }
                         }
+                        if (!ok) throw lastErr ?? new IOException("image fetch failed");
                     }
-                    Convert(data, img);
+                    img.FailCount = 0;
                     Volatile.Write(ref img.State, 1);
                     _ready.Enqueue(img);
                     App.WakeUi();
                 }
                 catch (Exception e)
                 {
+                    img.FailCount++;
                     img.FailedAt = Environment.TickCount64;
                     Volatile.Write(ref img.State, 3);
-                    Paths.Log($"image {img.Url}: {e.Message}");
+                    if (img.FailCount <= 2) Paths.Log($"image {img.Url}: {e.Message}");
                 }
             }
         }

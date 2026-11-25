@@ -161,6 +161,14 @@ public sealed class StreamProxy
             _entries.TryRemove(k, out _);
     }
 
+    /// <summary>Invalidates one stale itag entry (e.g. when YouTube re-encoded the stream with a new byte length).</summary>
+    public void InvalidateItag(string videoId, int itag)
+    {
+        if (itag <= 0) return;
+        if (_entries.TryRemove($"{videoId}.{itag}", out var e))
+            e.Cache?.Invalidate();
+    }
+
     /// <summary>Does this look like the start of an mp4 or a webm?</summary>
     private static bool PlausibleStart(ReadOnlySpan<byte> b)
         => b.Length >= 12 && ((b[4] == (byte)'f' && b[5] == (byte)'t' && b[6] == (byte)'y' && b[7] == (byte)'p')
@@ -288,7 +296,10 @@ public sealed class StreamProxy
         if (dot != 11 || DateTime.UtcNow - e.RefreshedAt < cooldown) return false;
         e.RefreshedAt = DateTime.UtcNow;
         var id = e.Key[..dot];
-        if (Db.CacheVideo(id) is not { } known) return false;
+        var known = Db.CacheVideo(id);
+        int vitag = known?.Vitag ?? (int.TryParse(e.Key[(dot + 1)..], out var parsedItag) ? parsedItag : 0);
+        int aitag = known?.Aitag ?? 0;
+        if (vitag <= 0) return false;
         var old = e.Url;
         try
         {
@@ -296,12 +307,12 @@ public sealed class StreamProxy
             StreamInfo? s = null;
             if (!preferResolver && e.AuthFails < 2)
             {
-                try { s = await QuickStream.GetExactAsync(id, known.Vitag, known.Aitag).WaitAsync(TimeSpan.FromSeconds(10)); }
+                try { s = await QuickStream.GetExactAsync(id, vitag, aitag).WaitAsync(TimeSpan.FromSeconds(10)); }
                 catch { }
             }
             if (s == null || e.Url == old)
             {
-                try { s = await Resolver.Instance.GetExactAsync(id, known.Vitag, known.Aitag).WaitAsync(TimeSpan.FromSeconds(18)); }
+                try { s = await Resolver.Instance.GetExactAsync(id, vitag, aitag).WaitAsync(TimeSpan.FromSeconds(18)); }
                 catch { }
             }
             bool got = s != null && e.Url != old;
@@ -497,10 +508,15 @@ public sealed class StreamProxy
                     upstreamErrors++;
                     stalls++;
                     if (stalls >= 2 && !e.Fragile)
-                        await RefreshLinkAsync(e, force: stalls >= 3);
-                    if (stalls > 6) throw new HttpRequestException("upstream gives no data after retries");
+                    {
+                        bool refreshed = await RefreshLinkAsync(e, force: stalls >= 3 || e.AuthFails >= 2, preferResolver: e.AuthFails >= 2);
+                        // Stop hammering a dead 401/403 link when refresh failed — let PlaybackTracker switch to full yt-dlp cleanly!
+                        if (!refreshed && e.AuthFails >= 3)
+                            throw new HttpRequestException("upstream auth failed after refresh");
+                    }
+                    if (stalls > 5) throw new HttpRequestException("upstream gives no data after retries");
                     if (upstreamFailed || stalls > 1)
-                        await Task.Delay(Math.Min(1500, 250 * stalls), cts.Token);
+                        await Task.Delay(Math.Min(1200, 250 * stalls), cts.Token);
                 }
             }
         }

@@ -285,6 +285,10 @@ public sealed class MpvPlayer : IDisposable
         CurrentVideoId = s.VideoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         if (keepPause) { Paused = true; Set("pause", "yes"); }
+        // Direct HLS manifests (live streams) bypass StreamProxy, so pass the user's proxy directly when non-loopback
+        bool directRemote = s.Video.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !s.Video.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)
+            || s.Video.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        Set("http-proxy", directRemote && !string.IsNullOrWhiteSpace(AppSettings.Current.Proxy) ? AppSettings.Current.Proxy! : "");
         // Keep vid strictly as a global property so loadfile never overrides SetVideoEnabled(true) into a black screen
         Set("vid", VideoEnabled ? "auto" : "no");
         var opts = new List<string> { "start=" + (startSeconds > 0.3 ? startSeconds.ToString("0.00", CultureInfo.InvariantCulture) : "0") };

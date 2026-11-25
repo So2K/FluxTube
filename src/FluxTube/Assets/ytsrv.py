@@ -61,7 +61,8 @@ def ydl_for(cookies, proxy, fmt, mark, fast):
         "format": fmt,
         "mark_watched": mark,
         "cachedir": CACHE,
-        "extractor_args": {"youtube": {"skip": ["hls", "translated_subs"], "player_skip": FAST_SKIP if fast else []}},
+        # Fast path skips HLS for low-latency VOD; full fallback keeps HLS enabled for LIVE streams & HLS-only videos!
+        "extractor_args": {"youtube": {"skip": ["hls", "translated_subs"] if fast else ["translated_subs"], "player_skip": FAST_SKIP if fast else []}},
     }
     if cookies:
         opts["cookiefile"] = cookies
@@ -83,8 +84,10 @@ def pick(info):
     return info, None
 
 
-def extract(job, fast):
-    ydl = ydl_for(job.get("cookies"), job.get("proxy"), job.get("format") or "bv*[height<=?1080]+ba/b", bool(job.get("mark")), fast)
+def extract(job, fast, fmt_override=None, no_cookies=False):
+    cookies = None if no_cookies else job.get("cookies")
+    fmt = fmt_override or job.get("format") or "bv*[height<=?1080]+ba/b"
+    ydl = ydl_for(cookies, job.get("proxy"), fmt, bool(job.get("mark")), fast)
     return ydl.extract_info(job["url"], download=False)
 
 
@@ -96,10 +99,21 @@ def work():
             try:
                 info = extract(job, True)
             except Exception as e:
+                err_l = str(e).lower()
                 # A full extraction cannot fix an account challenge; repeating it only delays the click.
-                if "sign in to confirm" in str(e).lower() or "not a bot" in str(e).lower():
+                if "sign in to confirm" in err_l or "not a bot" in err_l:
                     raise
-                info = extract(job, False)  # the short way was refused: do it the full way
+                try:
+                    info = extract(job, False)  # full extraction (includes HLS for live / SABR-only videos!)
+                except Exception as e2:
+                    err2_l = str(e2).lower()
+                    if "requested format is not available" in err2_l or "no video formats" in err2_l:
+                        info = extract(job, False, fmt_override="bv*+ba/b")
+                    elif job.get("cookies") and "private" not in err2_l and "members" not in err2_l and "age" not in err2_l:
+                        # Retry once anonymously if stale/soft-flagged cookies caused the refusal
+                        info = extract(job, False, fmt_override="bv*+ba/b", no_cookies=True)
+                    else:
+                        raise
             v, a = pick(info)
             emit({
                 "id": job["id"], "ok": True,

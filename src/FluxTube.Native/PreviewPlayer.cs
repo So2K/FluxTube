@@ -100,6 +100,8 @@ public static class PreviewPlayer
                     mpv_set_option_string(ctx, "input-vo-keyboard", "no");
                     mpv_set_option_string(ctx, "gpu-shader-cache", "yes");
                     mpv_set_option_string(ctx, "gpu-shader-cache-dir", Path.Combine(Paths.Data, "mpv-shaders").Replace('\\', '/'));
+                    if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy))
+                        mpv_set_option_string(ctx, "http-proxy", AppSettings.Current.Proxy);
 
                     if (mpv_initialize(ctx) < 0)
                     {
@@ -150,7 +152,7 @@ public static class PreviewPlayer
                 if (ef.reason == 4)
                 {
                     var gen = Volatile.Read(ref _reqGen);
-                    App.Post(() => { if (gen == Volatile.Read(ref _reqGen)) { _readyId = null; App.Invalidate(); } });
+                    App.Post(() => { if (gen == Volatile.Read(ref _reqGen)) { _readyId = null; _activeId = null; App.Invalidate(); } });
                 }
             }
         }
@@ -197,7 +199,8 @@ public static class PreviewPlayer
                 {
                     EnsureMpv();
                     if (gen != Volatile.Read(ref _reqGen) || Volatile.Read(ref _ctx) == IntPtr.Zero) return;
-                    var stream = QuickStream.TryGet(videoId) ?? await QuickStream.GetAsync(videoId);
+                    // Use fast lightweight 360p/480p preview stream first (never stalls hovering on a 4K stream!)
+                    var stream = await QuickStream.GetPreviewAsync(videoId) ?? await QuickStream.GetAsync(videoId);
                     if (gen != Volatile.Read(ref _reqGen) || stream == null || string.IsNullOrEmpty(stream.Video)) return;
                     Cmd("loadfile", stream.Video, "replace", "-1", "start=0");
                     Cmd("set", "pause", "no");

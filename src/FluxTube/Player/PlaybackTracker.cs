@@ -70,6 +70,7 @@ public sealed class PlaybackTracker
     private long _retriedAt;
     private int _retryCount;
     private int _bufGen;
+    private string _lastPlayVia = "";
 
     /// <summary>Watchdog: if mpv gets stuck in paused-for-cache for >10s while playing, seamlessly refresh links and resume at the exact second.</summary>
     private void OnBufferingChanged(bool buffering)
@@ -104,10 +105,12 @@ public sealed class PlaybackTracker
         var id = v.VideoId;
         Paths.Log($"load failed {id}: {msg}");
         var now = Environment.TickCount64;
+        bool escalateToResolver = _lastPlayVia == "quick" || _retryCount >= 1;
         if (_retried == id)
         {
-            // Allow up to 3 automatic recoveries per video (spaced >= 18s apart) before giving up
-            if (now - _retriedAt < 18_000 || _retryCount >= 3) { Retrying = false; return; }
+            // Allow immediate escalation from QuickStream -> full yt-dlp Resolver; throttle later repeats cleanly.
+            long minGap = (_retryCount == 1 && _lastPlayVia == "quick") ? 1_200 : 12_000;
+            if (now - _retriedAt < minGap || _retryCount >= 3) { Retrying = false; return; }
             _retryCount++;
         }
         else
@@ -129,13 +132,13 @@ public sealed class PlaybackTracker
             UiThread.Post(() =>
             {
                 if (gen != _gen) return;
-                Paths.Log($"retrying {id} with fresh links at {resumeAt ?? 0:0.0}s (attempt {_retryCount})");
-                Play(v, src, resumeAt);
+                Paths.Log($"retrying {id} with fresh links at {resumeAt ?? 0:0.0}s (attempt {_retryCount}{(escalateToResolver ? ", full yt-dlp" : "")})");
+                Play(v, src, resumeAt, bypassQuickStream: escalateToResolver);
             });
         });
     }
 
-    public void Play(VideoItem v, string source, double? startOverride = null, bool startPaused = false)
+    public void Play(VideoItem v, string source, double? startOverride = null, bool startPaused = false, bool bypassQuickStream = false)
     {
         Flush();
         var gen = ++_gen;
@@ -167,17 +170,19 @@ public sealed class PlaybackTracker
             var quality = AppSettings.Current.PlayerQuality;
             MediaCache.Pinned = id;
             IsPreview = false;
-            var ready = Resolver.Instance.TryGet(id);
-            var cached = ready == null ? MediaCache.Find(id, quality) : null;
+            var ready = bypassQuickStream ? null : Resolver.Instance.TryGet(id);
+            var cached = (ready == null && !bypassQuickStream) ? MediaCache.Find(id, quality) : null;
             if (ready != null)
             {
                 // 1. the link was resolved ahead of the click (hover, visible card, related list)
+                _lastPlayVia = "resolver";
                 LoadFull(ready, v.Title, start, startPaused);
                 Paths.Log($"play {id}: prefetched");
             }
             else if (cached != null)
             {
                 // 2. played before: start from disk right now; a fresh link is only needed for parts not on disk
+                _lastPlayVia = "cache";
                 var proxy = StreamProxy.Instance;
                 var s = new StreamInfo(id, proxy.RegisterCached(cached.Video), cached.Audio != null ? proxy.RegisterCached(cached.Audio) : null,
                     new Dictionary<string, string>(), v.Title, 0, DateTime.UtcNow) { Vitag = cached.Video.Itag, Aitag = cached.Audio?.Itag ?? 0 };
@@ -216,13 +221,14 @@ public sealed class PlaybackTracker
                 _ = Task.Run(async () =>
                 {
                     StreamInfo? q = null;
-                    if (AppSettings.Current.QuickStart)
+                    if (!bypassQuickStream && AppSettings.Current.QuickStart)
                         try { q = await QuickStream.GetAsync(id); } catch { }
                     if (q != null)
                     {
                         UiThread.Post(() =>
                         {
                             if (gen != _gen) return;
+                            _lastPlayVia = "quick";
                             IsPreview = q.Preview;
                             LoadFull(q, v.Title, start, startPaused);
                             Paths.Log($"play {id}: started after {Elapsed():0} ms ({(q.Preview ? "beginning only, proper link follows" : "direct link")})");
@@ -254,6 +260,7 @@ public sealed class PlaybackTracker
                         UiThread.Post(() =>
                         {
                             if (gen != _gen) return;
+                            _lastPlayVia = "resolver";
                             if (s != null) LoadFull(s, v.Title, start, startPaused);
                             else
                             {

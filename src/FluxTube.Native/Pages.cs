@@ -1087,9 +1087,9 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
 
 public sealed class WatchPage : IPage
 {
-    private bool _musicVolumeDrag, _musicSeekDrag;
+    private bool _musicVolumeDrag, _musicLoop;
     private int _musicVolumeTarget;
-    private double _musicSeekTarget;
+    private float _commentsSectionY;
     public VideoItem Video { get; private set; }
     public string Title => _info?.Title ?? Video.Title;
     private readonly string _source;
@@ -1524,6 +1524,7 @@ public sealed class WatchPage : IPage
     /// <summary>The comment list under the description + composer box to post comments on videos.</summary>
     private float DrawComments(float x0, float y, float w, R view)
     {
+        _commentsSectionY = y + UI.ScrollTarget(_infoScroll) - view.Y;
         if (_info == null) { _commentEdit?.Hide(); return y; }
         var count = _commentCount ?? _info.CommentsCount;
         if (_info.CommentsToken == null)
@@ -1666,6 +1667,64 @@ public sealed class WatchPage : IPage
 
     private float _actionExtraH;
 
+    private static void DrawWaveText(string text, float x, float y, float size, uint color, int weight, float maxW, int maxLines = 2, bool shadow = false)
+    {
+        if (string.IsNullOrEmpty(text) || maxW <= 20) return;
+        if (!MusicBounce.Active)
+        {
+            if (shadow) Gfx.Draw(text, x + 1f, y + 1.5f, size, Gfx.Fade(0xFF000000, 0.58f), weight, maxW, maxLines);
+            Gfx.Draw(text, x, y, size, color, weight, maxW, maxLines);
+            return;
+        }
+
+        // Per-word frequency wave bounce so title words dance & ripple along the beat without overlapping!
+        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length <= 1 || words.Length > 18)
+        {
+            var run = Gfx.Text(text, size, weight, maxW, maxLines);
+            var tf = MusicBounce.Push(new R(x, y, MathF.Min(maxW, run.W), run.H), 2, amp: 1.15f, rotAmp: 0.55f);
+            if (shadow) Gfx.Draw(run, x + 1f, y + 1.5f, Gfx.Fade(0xFF000000, 0.58f));
+            Gfx.Draw(run, x, y, color);
+            MusicBounce.Pop(tf);
+            return;
+        }
+
+        float spW = Gfx.Text(" ", size, weight).W;
+        if (spW < 3f) spW = size * 0.28f;
+        float lineH = Gfx.LineHeight(size);
+        float cx = x, cy = y;
+        int line = 0;
+        for (int i = 0; i < words.Length; i++)
+        {
+            var wStr = words[i];
+            var wr = Gfx.Text(wStr, size, weight);
+            if (cx > x && cx + wr.W > x + maxW)
+            {
+                line++;
+                if (line >= maxLines) break;
+                cx = x;
+                cy += lineH;
+            }
+            float avail = MathF.Max(24, x + maxW - cx);
+            bool truncated = wr.W > avail;
+            var drawRun = truncated ? Gfx.Text(wStr, size, weight, avail, 1) : wr;
+            var wRect = new R(cx, cy, MathF.Min(avail, drawRun.W), drawRun.H);
+            int band = (i * 3 + 1) & 31;
+            var tf = MusicBounce.Push(wRect, band, amp: 1.18f, rotAmp: 0.70f);
+            if (shadow) Gfx.Draw(drawRun, cx + 1f, cy + 1.5f, Gfx.Fade(0xFF000000, 0.58f));
+            Gfx.Draw(drawRun, cx, cy, color);
+            MusicBounce.Pop(tf);
+            cx += drawRun.W + spW;
+            if (truncated)
+            {
+                line++;
+                if (line >= maxLines) break;
+                cx = x;
+                cy += lineH;
+            }
+        }
+    }
+
     private void DrawLikeDislikePill(float x, float y, float h, out float width)
     {
         var lr = Gfx.Text(_likes, 13.5f, 600);
@@ -1681,6 +1740,7 @@ public sealed class WatchPage : IPage
         bool overL = UI.Hover(likeR), overD = UI.Hover(disR);
         bool isLike = _rating == "LIKE", isDis = _rating == "DISLIKE";
 
+        var tfPill = MusicBounce.Push(pill, 3, amp: 1.22f, rotAmp: 0.85f);
         float rad = h / 2;
         Gfx.Fill(pill, Th.Card, rad);
 
@@ -1702,11 +1762,18 @@ public sealed class WatchPage : IPage
 
         uint likeC = isLike || overL ? Th.Brand : Th.Text;
         uint disC = isDis || overD ? Th.Brand : Th.Text;
-        Gfx.Icon(Th.Like, Shell.MusicAccent(new R(likeR.X + 14, y, 18, h)), 15.5f, likeC);
+        var lIconR = new R(likeR.X + 14, y, 18, h);
+        var tfLi = MusicBounce.Push(lIconR, 0, amp: 1.15f, rotAmp: 1.1f);
+        Gfx.Icon(Th.Like, MusicBounce.Active ? lIconR : Shell.MusicAccent(lIconR), 15.5f, likeC);
+        MusicBounce.Pop(tfLi);
         Gfx.Draw(lr, likeR.X + 39, y + (h - lr.H) / 2, likeC);
         Gfx.Fill(new R(x + leftW, y + 9, 1, h - 18), Th.Line);
-        Gfx.Icon(Th.Dislike, Shell.MusicAccent(new R(disR.X + 12, y, 18, h), 0.5f), 15.5f, disC);
+        var dIconR = new R(disR.X + 12, y, 18, h);
+        var tfDi = MusicBounce.Push(dIconR, 6, amp: 1.0f, rotAmp: 1.0f);
+        Gfx.Icon(Th.Dislike, MusicBounce.Active ? dIconR : Shell.MusicAccent(dIconR, 0.5f), 15.5f, disC);
+        MusicBounce.Pop(tfDi);
         Gfx.Draw(dr, disR.X + 37, y + (h - dr.H) / 2, disC);
+        MusicBounce.Pop(tfPill);
 
         if (UI.Click(likeId, likeR, playSfx: false)) Rate(true);
         if (UI.Click(disId, disR, playSfx: false)) Rate(false);
@@ -1723,7 +1790,7 @@ public sealed class WatchPage : IPage
         float videoW = Gfx.Snap(MathF.Min(mainW, maxVideoH * 16 / 9));
         float videoH = MathF.Round(videoW * 9 / 16);
         if (AppSettings.Current.AudioOnlyMode && !Pip.Active && PlaybackTracker.Instance.Current?.VideoId == Video.VideoId)
-            videoH = MathF.Max(videoH, 400);
+            videoH = MathF.Max(videoH, MathF.Min(MathF.Max(460, r.H - 92), 620));
         float videoX = Gfx.Snap(x0 + (mainW - videoW) / 2);
         var id = Video.VideoId;
 
@@ -1786,135 +1853,353 @@ public sealed class WatchPage : IPage
         {
             var mpv = MpvPlayer.Instance;
             var sOpt = AppSettings.Current;
-            Gfx.PushClip(video);
-            Gfx.FillFrosted(video, Th.Panel, 12, opacity: 0.92f, border: true);
+            float stageRad = Gfx.Corner(14);
+            bool fullArtMode = string.Equals(sOpt.MusicStageBg, "full", StringComparison.OrdinalIgnoreCase);
 
-            // Soft bass-reactive studio light bloom behind cover art
+            Gfx.PushClip(video);
+            Gfx.Fill(video, 0xFF07070B, stageRad);
+
             AudioAnalyzer.RequestFrame();
             float bass = AudioAnalyzer.BassEnergy;
+            float kick = MusicBounce.Kick;
             MusicStageEffects.Update(sOpt.MusicImpactEffects && mpv.HasMedia && !mpv.Paused && !mpv.Muted && mpv.Volume > 0 && !App.Test);
             float impact = MusicStageEffects.Intensity;
-            float br = ((Th.Brand >> 16) & 255) / 255f;
-            float bg = ((Th.Brand >> 8) & 255) / 255f;
-            float bb = (Th.Brand & 255) / 255f;
-            Gfx.RadialGlow(video.X + video.W * 0.5f, video.Y + video.H * 0.42f,
-                video.W * (0.34f + bass * 0.12f), video.H * (0.42f + bass * 0.14f),
-                br, bg, bb, (Th.Light ? 0.12f : 0.22f) + bass * 0.18f, slot: 4);
 
-            // Live real-time audio waves & spectrum across the stage
-            float spectrumH = Math.Clamp(video.H * 0.23f, 78, 200);
-            var vizR = new R(video.X + 32, video.Bottom - 166 - spectrumH, video.W - 64, spectrumH);
-            AudioAnalyzer.DrawStageVisualizer(vizR, sOpt.VisualizerStyle == "off" ? "bars_wave" : sOpt.VisualizerStyle, opacity: 0.92f, gain: 1f + AudioAnalyzer.BassPressure * 0.25f + impact * 0.2f + (sOpt.MusicImpactEffects ? AudioAnalyzer.BeatMotionStrength * 0.55f : 0));
+            // 1. Full-Bleed Living Album-Art Backdrop (auto-cropped cover, GPU blur+saturation OR full crisp artwork!)
+            var art = MusicArt.Get(id);
+            float zoom = 1.03f + (sOpt.MusicBassShake ? bass * 0.045f + kick * 0.025f : 0f);
+            float zW = video.W * zoom, zH = video.H * zoom;
+            var bgArtR = new R(video.X - (zW - video.W) * 0.5f, video.Y - (zH - video.H) * 0.5f, zW, zH);
 
-            // Top-right quick buttons: Bass Shake + EQ Studio + Return Video (laid out first so left badge never overlaps!)
+            if (art != null)
+            {
+                float fadeA = MusicArt.Alpha(art);
+                if (fullArtMode && art.SharpBmp != null)
+                {
+                    Gfx.ImageRoundedCover(art.SharpBmp, bgArtR, stageRad, 0.96f * fadeA);
+                    // Cinema legibility gradient scrim (top subtle vignette + bottom dark dock fade)
+                    Gfx.FillVerticalFade(new R(video.X, video.Y, video.W, 96), 0x040407, 0.62f, 0.24f, 0.0f);
+                    Gfx.FillVerticalFade(new R(video.X, video.Bottom - 295, video.W, 295), 0x040407, 0.0f, 0.52f, 0.92f);
+                }
+                else if (art.BlurBmp != null)
+                {
+                    Gfx.ImageRoundedCover(art.BlurBmp, bgArtR, stageRad, (Th.Light ? 0.68f : 0.86f) * fadeA);
+                    Gfx.FillVerticalFade(video, 0x050509, 0.28f, 0.52f, 0.88f);
+                }
+                else if (art.SharpBmp != null)
+                {
+                    Gfx.ImageRoundedCover(art.SharpBmp, bgArtR, stageRad, 0.36f * fadeA);
+                    Gfx.FillVerticalFade(video, 0x050509, 0.42f, 0.66f, 0.92f);
+                }
+            }
+            else
+            {
+                Gfx.FillFrosted(video, Th.Panel, stageRad, opacity: 0.92f, border: false);
+            }
+
+            // Dominant-color studio blooms reacting to bass
+            uint dom1 = art?.Dom1 ?? Th.Brand;
+            uint dom2 = art?.Dom2 ?? (Th.Brand2 != 0 ? Th.Brand2 : Th.Brand);
+            float d1r = ((dom1 >> 16) & 255) / 255f, d1g = ((dom1 >> 8) & 255) / 255f, d1b = (dom1 & 255) / 255f;
+            float d2r = ((dom2 >> 16) & 255) / 255f, d2g = ((dom2 >> 8) & 255) / 255f, d2b = (dom2 & 255) / 255f;
+            if (!fullArtMode)
+            {
+                Gfx.RadialGlow(video.X + video.W * 0.24f, video.Y + video.H * 0.36f,
+                    video.W * (0.42f + bass * 0.14f), video.H * (0.50f + bass * 0.16f),
+                    d1r, d1g, d1b, 0.26f + bass * 0.22f, slot: 4);
+                Gfx.RadialGlow(video.X + video.W * 0.78f, video.Y + video.H * 0.48f,
+                    video.W * (0.38f + kick * 0.10f), video.H * (0.44f + kick * 0.12f),
+                    d2r, d2g, d2b, 0.18f + kick * 0.18f, slot: 5);
+            }
+            else
+            {
+                Gfx.RadialGlow(video.X + video.W * 0.5f, video.Bottom - 110,
+                    video.W * 0.52f, 170f + bass * 50f, d1r, d1g, d1b, 0.18f + bass * 0.16f, slot: 4);
+            }
+
+            // 2. Live Audio Spectrum Visualizer above the SoundCloud waveform
+            float scHeight = 104f;
+            float dockH = 42f;
+            float dockY = video.Bottom - dockH - 12f;
+            float scY = dockY - scHeight - 8f;
+            float spectrumH = Math.Clamp(video.H * (fullArtMode ? 0.18f : 0.22f), 64, 150);
+            var vizR = new R(video.X + 20, scY - spectrumH + 14, video.W - 40, spectrumH);
+            AudioAnalyzer.DrawStageVisualizer(vizR, sOpt.VisualizerStyle == "off" ? "bars_wave" : sOpt.VisualizerStyle,
+                opacity: fullArtMode ? 0.58f : 0.84f,
+                gain: 1f + AudioAnalyzer.BassPressure * 0.25f + impact * 0.2f + (sOpt.MusicImpactEffects ? AudioAnalyzer.BeatMotionStrength * 0.55f : 0));
+
+            // 3. Top Controls Row (dark frosted pills laid right-to-left, zero overlap!)
             float topRx = video.Right - 16;
+            float topY = video.Y + 12;
+            uint darkPill = Gfx.Fade(0xFF101018, 0.72f);
+
             var showVidLbl = L.T("Показать видео", "Show video");
             var showVidW = UI.PillWidth(Th.Play, showVidLbl);
             topRx -= showVidW;
-            var tfVid = MusicBounce.Push(new R(topRx, video.Y + 12, showVidW, 30), 21, amp: 0.85f);
-            if (UI.Pill(UI.Id("ms:vid", _infoScroll), topRx, video.Y + 12, 30, Th.Play, showVidLbl, out _))
+            var tfVid = MusicBounce.Push(new R(topRx, topY, showVidW, 30), 26, amp: 0.85f);
+            if (UI.Pill(UI.Id("ms:vid", _infoScroll), topRx, topY, 30, Th.Play, showVidLbl, out _, darkPill, 0xFFFFFFFF))
                 App.Post(Shell.ToggleAudioOnlyMode);
             MusicBounce.Pop(tfVid);
-            topRx -= 8;
+            topRx -= 7;
+
             var eqW = UI.PillWidth(Th.Headphones, "EQ / FX");
             topRx -= eqW;
-            var tfEq = MusicBounce.Push(new R(topRx, video.Y + 12, eqW, 30), 13, amp: 0.90f);
-            if (UI.Pill(UI.Id("ms:eq", _infoScroll), topRx, video.Y + 12, 30, Th.Headphones, "EQ / FX", out _, accent: sOpt.AudioFxEnabled))
+            var tfEq = MusicBounce.Push(new R(topRx, topY, eqW, 30), 21, amp: 0.90f);
+            if (UI.Pill(UI.Id("ms:eq", _infoScroll), topRx, topY, 30, Th.Headphones, "EQ / FX", out _,
+                sOpt.AudioFxEnabled ? Th.Brand : darkPill, sOpt.AudioFxEnabled ? Th.OnBrand : 0xFFFFFFFF))
                 App.Post(AudioStudioPanel.Toggle);
             MusicBounce.Pop(tfEq);
-            topRx -= 8;
+            topRx -= 7;
+
+            bool djOn = AudioStudioPanel.IsDjFxActive(sOpt);
+            var djLbl = "DJ";
+            var djW = UI.PillWidth("\uE958", djLbl);
+            topRx -= djW;
+            var tfDj = MusicBounce.Push(new R(topRx, topY, djW, 30), 16, amp: 0.95f);
+            if (UI.Pill(UI.Id("ms:dj", _infoScroll), topRx, topY, 30, "\uE958", djLbl, out _,
+                djOn ? Th.Brand : darkPill, djOn ? Th.OnBrand : 0xFFFFFFFF))
+                App.Post(AudioStudioPanel.ShowDj);
+            MusicBounce.Pop(tfDj);
+            topRx -= 7;
+
             var shLbl = L.T("Тряска", "Shake");
             var shW = UI.PillWidth(null, shLbl);
             topRx -= shW;
-            var tfSh = MusicBounce.Push(new R(topRx, video.Y + 12, shW, 30), 4, amp: 0.95f);
-            if (UI.Pill(UI.Id("ms:shake", _infoScroll), topRx, video.Y + 12, 30, null, shLbl, out _, accent: sOpt.MusicBassShake))
+            var tfSh = MusicBounce.Push(new R(topRx, topY, shW, 30), 11, amp: 0.95f);
+            if (UI.Pill(UI.Id("ms:shake", _infoScroll), topRx, topY, 30, null, shLbl, out _,
+                sOpt.MusicBassShake ? Th.Brand : darkPill, sOpt.MusicBassShake ? Th.OnBrand : 0xFFFFFFFF))
             {
                 sOpt.MusicBassShake = !sOpt.MusicBassShake;
                 sOpt.Save();
                 App.Invalidate();
             }
             MusicBounce.Pop(tfSh);
+            topRx -= 7;
 
-            topRx -= 8 + UI.PillWidth(null, L.T("Драйв", "Impact"));
-            if (UI.Pill(UI.Id("ms:impact", _infoScroll), topRx, video.Y + 12, 30, null, L.T("Драйв", "Impact"), out _, accent: sOpt.MusicImpactEffects))
+            var impLbl = L.T("Драйв", "Impact");
+            var impW = UI.PillWidth(null, impLbl);
+            topRx -= impW;
+            var tfImp = MusicBounce.Push(new R(topRx, topY, impW, 30), 7, amp: 0.90f);
+            if (UI.Pill(UI.Id("ms:impact", _infoScroll), topRx, topY, 30, null, impLbl, out _,
+                sOpt.MusicImpactEffects ? Th.Brand : darkPill, sOpt.MusicImpactEffects ? Th.OnBrand : 0xFFFFFFFF))
             {
                 sOpt.MusicImpactEffects = !sOpt.MusicImpactEffects;
                 sOpt.Save();
             }
+            MusicBounce.Pop(tfImp);
+            topRx -= 7;
+
+            var bgLbl = fullArtMode ? L.T("Карточка", "Card") : L.T("На весь фон", "Full Art");
+            var bgW = UI.PillWidth(null, bgLbl);
+            topRx -= bgW;
+            var tfBg = MusicBounce.Push(new R(topRx, topY, bgW, 30), 3, amp: 0.85f);
+            if (UI.Pill(UI.Id("ms:bgmode", _infoScroll), topRx, topY, 30, null, bgLbl, out _,
+                fullArtMode ? Th.Brand : darkPill, fullArtMode ? Th.OnBrand : 0xFFFFFFFF))
+            {
+                sOpt.MusicStageBg = fullArtMode ? "hero" : "full";
+                sOpt.Save();
+                App.Invalidate();
+            }
+            MusicBounce.Pop(tfBg);
 
             float maxChipW = topRx - (video.X + 26);
-            if (maxChipW > 80)
+            if (maxChipW > 90)
             {
-                var chipTxt = sOpt.AudioFxEnabled ? L.T($"Только звук · FX: {AudioDsp.DisplayPresetName(sOpt)}", $"Audio only · FX: {AudioDsp.DisplayPresetName(sOpt)}") : L.T("Только звук · Видео отключено", "Audio only · Video disabled");
+                var chipTxt = sOpt.AudioFxEnabled
+                    ? L.T($"Только звук · FX: {AudioDsp.DisplayPresetName(sOpt)}", $"Audio only · FX: {AudioDsp.DisplayPresetName(sOpt)}")
+                    : L.T("Только звук · Видео отключено", "Audio only · Video disabled");
                 var chip = Gfx.Text(chipTxt, 11.5f, 600, maxChipW - 22);
                 var cb = new R(video.X + 16, video.Y + 14, MathF.Min(maxChipW, chip.W + 22), 26);
-                Gfx.FillFrosted(cb, Th.Card, 13, opacity: 0.78f, border: true);
-                Gfx.Draw(chip, cb.X + 11, cb.Y + (cb.H - chip.H) / 2, Th.Text);
+                Gfx.Fill(cb, darkPill, 13);
+                Gfx.Stroke(cb, Gfx.Fade(0xFFFFFFFF, 0.14f), 13, 1f);
+                Gfx.Draw(chip, cb.X + 11, cb.Y + (cb.H - chip.H) / 2, 0xFFF2F2F7);
             }
 
-            // Centered cover art card with dramatic bass-beat pulse + expanding shockwave ring
-            float baseArtW = MathF.Min(MathF.Min(380, video.W * 0.33f), MathF.Max(80, (video.H - spectrumH - 280) * 16f / 9f));
+            // 4. Middle Hero Section (Huge Auto-Cropped Cover + SoundCloud Play Circle + Wave-Bouncing Title!)
+            float heroTop = video.Y + 56f;
+            float heroBot = scY - 12f;
+            float heroH = MathF.Max(110f, heroBot - heroTop);
             float pressure = AudioAnalyzer.BassPressure;
-            float pulse = 1f + (sOpt.MusicBassShake ? pressure * 0.045f + AudioAnalyzer.BeatMotionStrength * (sOpt.MusicImpactEffects ? 0.16f : 0.10f) : 0);
-            float artW = baseArtW * pulse, artH = artW * 9f / 16f;
-            float artAreaTop = video.Y + 64;
-            float artCenterY = (artAreaTop + vizR.Y) * 0.5f;
-            var artR = new R(Gfx.Snap(video.X + (video.W - artW) / 2), Gfx.Snap(artCenterY - artH * 0.5f), artW, artH);
-            if (sOpt.MusicBassShake) artR = Shell.MusicAccent(artR, 1.4f);
-            var coverTransform = Gfx.DC.Transform;
-            if (sOpt.MusicImpactEffects && sOpt.MusicBassShake)
-                Gfx.DC.Transform = System.Numerics.Matrix3x2.CreateRotation(
-                    MathF.Sin(AudioAnalyzer.BeatPhase) * AudioAnalyzer.BeatMotionStrength * 0.022f,
-                    new System.Numerics.Vector2(artR.X + artR.W / 2, artR.Y + artR.H / 2)) * coverTransform;
-            MusicStageEffects.Draw(new R(video.X + 12, video.Y + 54, video.W - 24, video.H - 220), artR);
-            AudioAnalyzer.DrawCoverSpectrum(artR);
-            Gfx.Fill(artR.Inset(-3), Gfx.Fade(0xFF000000, 0.34f), Gfx.Corner(14));
-            var img = Images.Get(Video.Thumb720, 640, 360);
-            if (img != null) Gfx.ImageRounded(img.Bmp!, artR, Gfx.Corner(12), Images.Alpha(img));
-            else Gfx.Fill(artR, Th.Card, Gfx.Corner(12));
-            Gfx.Stroke(artR, Gfx.Fade(Th.Brand, 0.30f + bass * 0.55f), Gfx.Corner(12), 1.6f);
-            PeakStarBurst.Draw(video, artR, id, mpv.CurrentAudioUrl, mpv.TimePos, mpv.Duration,
-                sOpt.MusicImpactEffects && mpv.CurrentVideoId == id && !mpv.Paused && !mpv.Muted && mpv.Volume > 0);
+            float pulse = 1f + (sOpt.MusicBassShake ? pressure * 0.045f + kick * (sOpt.MusicImpactEffects ? 0.09f : 0.055f) : 0f);
+            var chText = _info?.Channel ?? Video.Channel;
 
-            Gfx.DC.Transform = coverTransform;
-
-            // SoundCloud waveform seekbar with timed comments right inside the Music Stage!
-            if (sOpt.SoundCloudWave)
+            if (!fullArtMode)
             {
-                if (!_commentsStarted && _info?.CommentsToken != null) LoadComments();
-                var scR = new R(video.X + 16, video.Bottom - 158, video.W - 32, 94);
-                bool isThisPlaying = mpv.CurrentVideoId == id;
-                SoundCloudBar.Draw(scR, id, isThisPlaying ? mpv.TimePos : 0, isThisPlaying ? mpv.Duration : 0,
-                    isThisPlaying ? mpv.CurrentAudioUrl : null,
-                    GetSoundCloudMarkers(isThisPlaying ? mpv.Duration : 0),
-                    _info?.Chapters ?? [], compact: true);
+                // Apple Music / Tidal / SoundCloud Pro Split: Huge crisp auto-cropped album art on left + Hero Play & Title on right!
+                float aspect = art?.Aspect ?? (16f / 9f);
+                float maxArtH = Math.Clamp(heroH - 18f, 128f, 236f);
+                float maxArtW = MathF.Min(video.W * 0.38f, maxArtH * Math.Clamp(aspect, 0.85f, 1.78f));
+                float baseH = MathF.Min(maxArtH, maxArtW / Math.Clamp(aspect, 0.85f, 1.78f));
+                float baseW = baseH * Math.Clamp(aspect, 0.85f, 1.78f);
+                float artW = baseW * pulse, artH = baseH * pulse;
+                float artX = Gfx.Snap(video.X + 28f - (artW - baseW) * 0.5f);
+                float artY = Gfx.Snap(heroTop + (heroH - artH) * 0.5f);
+                var artR = new R(artX, artY, artW, artH);
+
+                var coverTf = Gfx.DC.Transform;
+                if (sOpt.MusicBassShake)
+                {
+                    float tilt = MathF.Sin(AudioAnalyzer.BeatPhase) * (sOpt.MusicImpactEffects ? 0.022f : 0.012f) * MathF.Max(AudioAnalyzer.BeatMotionStrength, kick * 0.6f);
+                    Gfx.DC.Transform = System.Numerics.Matrix3x2.CreateRotation(tilt, new System.Numerics.Vector2(artR.X + artR.W / 2, artR.Y + artR.H / 2)) * coverTf;
+                }
+                MusicStageEffects.Draw(new R(video.X + 12, video.Y + 52, video.W - 24, heroH + 20), artR);
+                AudioAnalyzer.DrawCoverSpectrum(artR);
+
+                // Soft deep album shadow + dominant-color rim
+                Gfx.Fill(artR.Inset(-5), Gfx.Fade(0xFF000000, 0.45f), Gfx.Corner(16));
+                if (art?.SharpBmp != null) Gfx.ImageRoundedCover(art.SharpBmp, artR, Gfx.Corner(14), MusicArt.Alpha(art));
+                else
+                {
+                    var fb = Images.Get(Video.Thumb720, 640, 360);
+                    if (fb != null) Gfx.ImageRoundedCover(fb.Bmp!, artR, Gfx.Corner(14), Images.Alpha(fb));
+                    else Gfx.Fill(artR, Th.Card, Gfx.Corner(14));
+                }
+                Gfx.Stroke(artR, Gfx.Fade(Gfx.Mix(dom1, 0xFFFFFFFF, 0.35f), 0.38f + bass * 0.52f), Gfx.Corner(14), 1.6f);
+                PeakStarBurst.Draw(video, artR, id, mpv.CurrentAudioUrl, mpv.TimePos, mpv.Duration,
+                    sOpt.MusicImpactEffects && mpv.CurrentVideoId == id && !mpv.Paused && !mpv.Muted && mpv.Volume > 0);
+                Gfx.DC.Transform = coverTf;
+
+                // Right of Cover Art: Big SoundCloud circular Play/Pause + Wave-Bouncing Bold Title + Channel & HD badge!
+                float infoX = video.X + 28f + baseW + 26f;
+                float infoW = MathF.Max(140f, video.Right - 28f - infoX);
+                float midHeroY = heroTop + heroH * 0.48f;
+
+                float playSz = 58f;
+                var playR = new R(Gfx.Snap(infoX), Gfx.Snap(midHeroY - playSz * 0.5f), playSz, playSz);
+                var tfPlay = MusicBounce.Push(playR, 0, amp: 1.30f, rotAmp: 0.7f);
+                bool overPlay = UI.Hover(playR);
+                Gfx.Circle(playR.X + playSz * 0.5f, playR.Y + playSz * 0.5f, playSz * 0.5f + 3f, Gfx.Fade(dom1, 0.24f + kick * 0.22f));
+                Gfx.Circle(playR.X + playSz * 0.5f, playR.Y + playSz * 0.5f, playSz * 0.5f, overPlay ? Gfx.Mix(0xFFFFFFFF, Th.Brand, 0.18f) : 0xFFFFFFFF);
+                Gfx.Icon(mpv.Paused ? Th.Play : Th.Pause, new R(playR.X + (mpv.Paused ? 2f : 0f), playR.Y, playSz, playSz), 22f, 0xFF08080E);
+                if (UI.Click(UI.Id("ms:bigplay", _infoScroll), playR)) mpv.TogglePause();
+                MusicBounce.Pop(tfPlay);
+
+                float txtX = playR.Right + 18f;
+                float txtW = MathF.Max(100f, infoX + infoW - txtX);
+                float titleSize = video.W > 960 ? 25f : 21f;
+                var titleMeas = Gfx.Text(Title, titleSize, 700, txtW, 2);
+                float titleY = Gfx.Snap(midHeroY - titleMeas.H * 0.5f - 10f);
+                DrawWaveText(Title, txtX, titleY, titleSize, 0xFFFFFFFF, 700, txtW, maxLines: 2, shadow: true);
+
+                // Channel subtitle + crisp HD / FX pill under title
+                float subY = titleY + titleMeas.H + 8f;
+                var chRun = Gfx.Text(chText, 13.5f, 500, txtW - 60f);
+                var tfCh = MusicBounce.Push(new R(txtX, subY, chRun.W, chRun.H), 8, amp: 0.90f, rotAmp: 0.4f);
+                Gfx.Draw(chRun, txtX + 1, subY + 1, Gfx.Fade(0xFF000000, 0.5f));
+                Gfx.Draw(chRun, txtX, subY, Gfx.Fade(0xFFFFFFFF, 0.80f));
+                MusicBounce.Pop(tfCh);
+
+                var badgeTxt = sOpt.AudioFxEnabled ? AudioDsp.DisplayPresetName(sOpt) : "HD";
+                var bdRun = Gfx.Text(badgeTxt, 10.5f, 700);
+                var bdR = new R(txtX + chRun.W + 10f, subY + 1f, bdRun.W + 12f, 19f);
+                if (bdR.Right <= video.Right - 20f)
+                {
+                    Gfx.Fill(bdR, Gfx.Fade(0xFFFFFFFF, 0.16f), 4f);
+                    Gfx.Stroke(bdR, Gfx.Fade(0xFFFFFFFF, 0.22f), 4f, 1f);
+                    Gfx.Draw(bdRun, bdR.X + 6f, bdR.Y + (bdR.H - bdRun.H) * 0.5f, 0xFFFFFFFF);
+                }
+            }
+            else
+            {
+                // Full-Bleed Cinema Artwork Mode: shockwaves & golden peak burst centered in upper stage + Play & Wave Title cleanly anchored above waveform
+                var centerArt = new R(video.X + video.W * 0.38f, heroTop + heroH * 0.25f, video.W * 0.24f, heroH * 0.45f);
+                MusicStageEffects.Draw(new R(video.X + 12, video.Y + 52, video.W - 24, heroH + 20), centerArt);
+                PeakStarBurst.Draw(video, centerArt, id, mpv.CurrentAudioUrl, mpv.TimePos, mpv.Duration,
+                    sOpt.MusicImpactEffects && mpv.CurrentVideoId == id && !mpv.Paused && !mpv.Muted && mpv.Volume > 0);
+
+                float playSz = 56f;
+                float rowY = scY - playSz - 16f;
+                var playR = new R(Gfx.Snap(video.X + 24f), Gfx.Snap(rowY), playSz, playSz);
+                var tfPlay = MusicBounce.Push(playR, 0, amp: 1.30f, rotAmp: 0.7f);
+                bool overPlay = UI.Hover(playR);
+                Gfx.Circle(playR.X + playSz * 0.5f, playR.Y + playSz * 0.5f, playSz * 0.5f + 3f, Gfx.Fade(0xFF000000, 0.42f));
+                Gfx.Circle(playR.X + playSz * 0.5f, playR.Y + playSz * 0.5f, playSz * 0.5f, overPlay ? Gfx.Mix(0xFFFFFFFF, Th.Brand, 0.18f) : 0xFFFFFFFF);
+                Gfx.Icon(mpv.Paused ? Th.Play : Th.Pause, new R(playR.X + (mpv.Paused ? 2f : 0f), playR.Y, playSz, playSz), 22f, 0xFF08080E);
+                if (UI.Click(UI.Id("ms:bigplay", _infoScroll), playR)) mpv.TogglePause();
+                MusicBounce.Pop(tfPlay);
+
+                float txtX = playR.Right + 16f;
+                float txtW = MathF.Max(140f, video.Right - 28f - txtX);
+                float titleSize = video.W > 960 ? 26f : 22f;
+                var titleMeas = Gfx.Text(Title, titleSize, 700, txtW, 1);
+                DrawWaveText(Title, txtX, rowY + 2f, titleSize, 0xFFFFFFFF, 700, txtW, maxLines: 1, shadow: true);
+                Gfx.Draw(chText, txtX + 1, rowY + titleMeas.H + 5f, 13.5f, Gfx.Fade(0xFF000000, 0.65f), 500, txtW);
+                Gfx.Draw(chText, txtX, rowY + titleMeas.H + 4f, 13.5f, Gfx.Fade(0xFFFFFFFF, 0.85f), 500, txtW);
             }
 
-            // Clean bottom transport strip right inside the Music Stage
-            var barR = new R(video.X + 16, video.Bottom - 52, video.W - 32, 40);
-            Gfx.FillFrosted(barR, Th.Menu, Gfx.Corner(12), opacity: 0.86f, border: true);
-            float cx = barR.X + 8;
-            var rPlay = new R(cx, barR.Y + 2, 36, 36); var tfP = MusicBounce.Push(rPlay, 2, amp: 1.15f);
-            if (UI.IconButton(UI.Id("ms:play", _infoScroll), rPlay, mpv.Paused ? Th.Play : Th.Pause, 15, Th.Brand)) mpv.TogglePause();
-            MusicBounce.Pop(tfP);
-            cx += 38;
-            var rRew = new R(cx, barR.Y + 2, 32, 36); var tfRw = MusicBounce.Push(rRew, 10, amp: 0.95f);
-            if (UI.IconButton(UI.Id("ms:rew", _infoScroll), rRew, Th.Rewind, 13)) mpv.Command("seek", "-10");
-            MusicBounce.Pop(tfRw);
-            cx += 34;
-            var rFwd = new R(cx, barR.Y + 2, 32, 36); var tfFw = MusicBounce.Push(rFwd, 18, amp: 0.95f);
-            if (UI.IconButton(UI.Id("ms:fwd", _infoScroll), rFwd, Th.Forward, 13)) mpv.Command("seek", "10");
-            MusicBounce.Pop(tfFw);
-            cx += 40;
+            // 5. Tall Full-Width SoundCloud Pro Waveform (THE ONLY SEEKBAR — no redundant bottom progress bar!)
+            if (!_commentsStarted && _info?.CommentsToken != null) LoadComments();
+            var scR = new R(video.X + 18, scY, video.W - 36, scHeight);
+            bool isThisPlaying = mpv.CurrentVideoId == id;
+            SoundCloudBar.Draw(scR, id, isThisPlaying ? mpv.TimePos : 0, isThisPlaying ? mpv.Duration : 0,
+                isThisPlaying ? mpv.CurrentAudioUrl : null,
+                GetSoundCloudMarkers(isThisPlaying ? mpv.Duration : 0),
+                _info?.Chapters ?? [], compact: true, musicStage: true);
 
-            // Dedicated volume controls remain available even when the waveform is off.
-            float volumeWidth = barR.W < 520 ? 110 : 150;
-            float volumeX = barR.Right - volumeWidth - 8;
+            // 6. SoundCloud Pro Bottom Action Dock: [♥ Likes] [Avatar · Комментарий на X:XX] [🔊 ━━●━━ 100%] [↺ ↻ 🔁 🔗 ↑]
+            var barR = new R(video.X + 18, dockY, video.W - 36, dockH);
+            float lx = barR.X;
+            float btnH = 38f;
+            float btnY = barR.Y + (barR.H - btnH) * 0.5f;
+
+            // Left: Bouncing Heart Like Pill
+            bool isLiked = _rating == "LIKE";
+            var likeTxt = _likes == "—" ? L.T("Нравится", "Like") : _likes;
+            var likeRun = Gfx.Text(likeTxt, 13f, 600);
+            float likeW = MathF.Max(74f, 14f + 16f + 7f + likeRun.W + 14f);
+            var likePill = new R(lx, btnY, likeW, btnH);
+            var tfLike = MusicBounce.Push(likePill, 2, amp: 1.32f, rotAmp: 0.90f);
+            bool overLike = UI.Hover(likePill);
+            Gfx.Fill(likePill, isLiked ? Gfx.Fade(Th.Brand, 0.28f) : Gfx.Fade(0xFF0E0E14, overLike ? 0.86f : 0.72f), btnH * 0.5f);
+            Gfx.Stroke(likePill, isLiked ? Gfx.Fade(Th.Brand, 0.78f) : Gfx.Fade(0xFFFFFFFF, 0.16f), btnH * 0.5f, 1f);
+            Gfx.Icon(isLiked ? "\uEB52" : "\uEB51", new R(likePill.X + 12f, likePill.Y, 18f, btnH), 14.5f, isLiked ? Th.Brand : 0xFFFFFFFF);
+            Gfx.Draw(likeRun, likePill.X + 35f, likePill.Y + (btnH - likeRun.H) * 0.5f, isLiked ? Th.Brand : 0xFFFFFFFF);
+            if (UI.Click(UI.Id("ms:like", _infoScroll), likePill, playSfx: false)) Rate(true);
+            MusicBounce.Pop(tfLike);
+            lx += likeW + 10f;
+
+            // Right: 5 Circular Action Buttons (Rewind, Forward, Loop, Copy Timestamp Link, Share)
+            float rx = barR.Right;
+            bool CircleBtn(string cid, string icon, int band, bool active, string? tip, Action click)
+            {
+                rx -= btnH;
+                var cr = new R(rx, btnY, btnH, btnH);
+                var tf = MusicBounce.Push(cr, band, amp: 1.0f, rotAmp: 0.8f);
+                bool ov = UI.Hover(cr);
+                Gfx.Circle(cr.X + btnH * 0.5f, cr.Y + btnH * 0.5f, btnH * 0.5f,
+                    active ? Gfx.Fade(Th.Brand, 0.30f) : Gfx.Fade(0xFF0E0E14, ov ? 0.88f : 0.72f));
+                Gfx.Stroke(cr, active ? Gfx.Fade(Th.Brand, 0.75f) : Gfx.Fade(0xFFFFFFFF, 0.16f), btnH * 0.5f, 1f);
+                Gfx.Icon(icon, cr, 14f, active ? Th.Brand : 0xFFFFFFFF);
+                if (UI.Click(UI.Id(cid, _infoScroll), cr)) { click(); MusicBounce.Pop(tf); rx -= 7f; return true; }
+                MusicBounce.Pop(tf);
+                rx -= 7f;
+                return false;
+            }
+
+            CircleBtn("ms:share", Th.Share, 28, false, null, OpenShare);
+            CircleBtn("ms:link", Th.Link, 24, false, null, () => Cards.CopyText(PageLink(true), L.T("Ссылка с таймкодом скопирована", "Timestamp link copied")));
+            CircleBtn("ms:loop", "\uE8EE", 20, _musicLoop, null, () =>
+            {
+                _musicLoop = !_musicLoop;
+                mpv.Command("set", "loop-file", _musicLoop ? "inf" : "no");
+                Shell.Toast(_musicLoop ? L.T("Повтор трека включён", "Track repeat ON") : L.T("Повтор трека выключен", "Track repeat OFF"), _musicLoop ? Th.Good : Th.Sub, 1400);
+            });
+            CircleBtn("ms:fwd", Th.Forward, 15, false, null, () => mpv.Command("seek", "10"));
+            CircleBtn("ms:rew", Th.Rewind, 11, false, null, () => mpv.Command("seek", "-10"));
+
+            // Middle-Right: Interactive Volume Capsule (Mute + 0..150% Slider + Wheel!)
+            float volPillW = barR.W < 700 ? 128f : 162f;
+            rx -= volPillW;
+            var volPill = new R(rx, btnY, volPillW, btnH);
+            Gfx.Fill(volPill, Gfx.Fade(0xFF0E0E14, 0.74f), btnH * 0.5f);
+            Gfx.Stroke(volPill, Gfx.Fade(0xFFFFFFFF, 0.16f), btnH * 0.5f, 1f);
             int volume = mpv.Muted ? 0 : (int)Math.Round(mpv.Volume);
-            if (UI.IconButton(UI.Id("ms:mute", _infoScroll), new R(volumeX, barR.Y + 2, 30, 36),
-                mpv.Muted || volume == 0 ? Th.Mute : Th.Volume, 14, Th.Text)) mpv.Command("cycle", "mute");
-            float vx = volumeX + 34, vw = volumeWidth - 70;
-            var volumeHit = new R(vx - 4, barR.Y + 4, vw + 8, 32);
+            if (UI.IconButton(UI.Id("ms:mute", _infoScroll), new R(volPill.X + 4f, volPill.Y + 1f, 30f, btnH - 2f),
+                mpv.Muted || volume == 0 ? Th.Mute : Th.Volume, 14f, 0xFFFFFFFF))
+                mpv.Command("cycle", "mute");
+            float vx = volPill.X + 36f;
+            float vw = volPillW - 76f;
+            var volumeHit = new R(vx - 4f, volPill.Y + 2f, vw + 8f, btnH - 4f);
             if (UI.Pressed && UI.Hover(volumeHit))
             {
                 _musicVolumeDrag = true;
@@ -1924,7 +2209,7 @@ public sealed class WatchPage : IPage
             {
                 if (UI.Down || UI.Released)
                 {
-                    int target = (int)MathF.Round(Math.Clamp((UI.MX - vx) / vw, 0, 1) * 150);
+                    int target = (int)MathF.Round(Math.Clamp((UI.MX - vx) / MathF.Max(1f, vw), 0f, 1f) * 150f);
                     if (target != _musicVolumeTarget) { _musicVolumeTarget = target; Shell.SetMusicVolume(target); }
                     volume = _musicVolumeTarget;
                     UI.Animate();
@@ -1937,38 +2222,52 @@ public sealed class WatchPage : IPage
                 Shell.SetMusicVolume(volume + (UI.Wheel > 0 ? 5 : -5));
                 UI.Wheel = 0;
             }
-            UI.Progress(new R(vx, barR.Y + 18, vw, 4), Math.Clamp(volume / 150.0, 0, 1), Th.A(0.22f), Th.Brand);
-            Gfx.Circle(vx + vw * Math.Clamp(volume / 150f, 0, 1), barR.Y + 20, 4, Th.Text);
-            Gfx.Draw($"{volume}%", vx + vw + 7, barR.Y + 13, 10, Th.Sub);
+            float volFrac = Math.Clamp(volume / 150f, 0f, 1f);
+            UI.Progress(new R(vx, volPill.Y + btnH * 0.5f - 2f, vw, 4f), volFrac, Gfx.Fade(0xFFFFFFFF, 0.24f), Th.Brand);
+            Gfx.Circle(vx + vw * volFrac, volPill.Y + btnH * 0.5f, _musicVolumeDrag || UI.Hover(volumeHit) ? 5.5f : 4.2f, 0xFFFFFFFF);
+            var vPct = Gfx.Text($"{volume}%", 10.5f, 600);
+            Gfx.Draw(vPct, volPill.Right - vPct.W - 9f, volPill.Y + (btnH - vPct.H) * 0.5f, Gfx.Fade(0xFFFFFFFF, 0.78f));
+            rx -= 10f;
 
-            var dur = mpv.Duration;
-            var timeStr = $"{Fmt.Time(_musicSeekDrag ? _musicSeekTarget : mpv.TimePos)} / {Fmt.Time(dur)}";
-            var tr = Gfx.Text(timeStr, 11.5f, 500);
-            Gfx.Draw(tr, volumeX - tr.W - 14, barR.Y + (barR.H - tr.H) / 2, Th.Sub);
-
-            float sw = volumeX - tr.W - 28 - cx;
-            if (sw > 60)
+            // Middle-Left: SoundCloud Comment Pill "[Avatar] Комментарий на 0:14  ➤"
+            float cmtW = rx - lx;
+            if (cmtW > 130f)
             {
-                var sHit = new R(cx, barR.Y + 5, sw, 30);
-                bool sHot = dur > 0 && (UI.Hover(sHit) || _musicSeekDrag);
-                if (dur > 0 && UI.Pressed && UI.Hover(sHit)) _musicSeekDrag = true;
-                bool seekWasDragging = _musicSeekDrag;
-                if (_musicSeekDrag)
+                var cmtR = new R(lx, btnY, cmtW, btnH);
+                bool overCmt = UI.Hover(cmtR);
+                Gfx.Fill(cmtR, Gfx.Fade(0xFF0E0E14, overCmt ? 0.86f : 0.72f), btnH * 0.5f);
+                Gfx.Stroke(cmtR, overCmt ? Gfx.Fade(Th.Brand, 0.55f) : Gfx.Fade(0xFFFFFFFF, 0.16f), btnH * 0.5f, 1f);
+                var acc = AccountMenu.Current;
+                Cards.Avatar(cmtR.X + 7f, cmtR.Y + (btnH - 24f) * 0.5f, 24f, acc?.Photo, acc?.Name is { Length: > 0 } nm ? nm : "?");
+                string tcStr = Fmt.Time(mpv.TimePos);
+                string cmtTxt = L.T($"Комментарий на {tcStr}", $"Comment at {tcStr}");
+                var cRun = Gfx.Text(cmtTxt, 12.5f, 500, MathF.Max(40f, cmtW - 76f));
+                Gfx.Draw(cRun, cmtR.X + 39f, cmtR.Y + (btnH - cRun.H) * 0.5f, Gfx.Fade(0xFFFFFFFF, overCmt ? 0.95f : 0.72f));
+                Gfx.Icon("\uE724", new R(cmtR.Right - 34f, cmtR.Y, 26f, btnH), 13.5f, overCmt ? Th.Brand : Gfx.Fade(0xFFFFFFFF, 0.60f));
+                if (UI.Click(UI.Id("ms:comment", _infoScroll), cmtR))
                 {
-                    if (UI.Down || UI.Released) _musicSeekTarget = dur * Math.Clamp((UI.MX - cx) / sw, 0, 1);
-                    if (!UI.Down)
+                    if (!CookieStore.IsLoggedIn) App.Post(LoginModal.Show);
+                    else
                     {
-                        if (UI.Released && dur > 0) mpv.SeekAbsolute(_musicSeekTarget);
-                        _musicSeekDrag = false;
+                        float jumpTo = _commentsSectionY > 40f ? _commentsSectionY - 30f : videoH + 260f;
+                        UI.ScrollBy(_infoScroll, jumpTo - UI.ScrollTarget(_infoScroll));
+                        App.Post(() =>
+                        {
+                            if (_commentEdit == null)
+                            {
+                                _commentEdit = new Edit(L.T("Введите комментарий…", "Add a comment…")) { Bg = () => Th.Field };
+                                _commentEdit.Enter = SubmitComment;
+                            }
+                            if (string.IsNullOrWhiteSpace(_commentEdit.Text))
+                                _commentEdit.Text = tcStr + " ";
+                            _commentEdit.Focus();
+                        });
                     }
-                    UI.Animate();
                 }
-                if (sHot) UI.Hand();
-                double frac = dur > 0 ? Math.Clamp((_musicSeekDrag || (seekWasDragging && UI.Released) ? _musicSeekTarget : mpv.TimePos) / dur, 0, 1) : 0;
-                UI.Progress(new R(cx, barR.Y + 18, sw, sHot ? 6f : 4f), frac, Th.A(0.22f), Th.Brand);
-                Gfx.Circle(cx + (float)(sw * frac), barR.Y + 20, sHot ? 6f : 4.5f, 0xFFFFFFFF);
             }
 
+            // Crisp stage border
+            Gfx.Stroke(video, Gfx.Fade(0xFFFFFFFF, 0.10f), stageRad, 1f);
             Gfx.PopClip();
         }
 
@@ -2014,7 +2313,12 @@ public sealed class WatchPage : IPage
         }
 
         pageBeat.At(pageCenterX, y);
-        if (Title.Length > 0) Sel.Text(UI.Id(_infoScroll, 8001), Title, x0, y, 20, Th.Text, 600, mainW, 3);
+        if (Title.Length > 0)
+        {
+            var tfTitle = MusicBounce.Push(new R(x0, y, MathF.Min(mainW, titleRun.W), titleRun.H), 1, amp: 1.05f, rotAmp: 0.45f);
+            Sel.Text(UI.Id(_infoScroll, 8001), Title, x0, y, 20, Th.Text, 600, mainW, 3);
+            MusicBounce.Pop(tfTitle);
+        }
         Cards.CopyMenu(new R(x0, y, titleRun.W, titleRun.H), Title, L.T("Копировать название", "Copy title"));
         y += titleRun.H + 14;
 
@@ -2041,23 +2345,29 @@ public sealed class WatchPage : IPage
         if (UI.IconButton(UI.Id("more", _infoScroll), rMr, Th.More)) MoreMenu();
         MusicBounce.Pop(tfA4);
         var s = AppSettings.Current;
-        var beatLabel = L.T("Видео в бит", "Video beat");
-        bx -= UI.PillWidth(null, beatLabel) + 8;
-        if (UI.Pill(UI.Id("videobeat", _infoScroll), bx, by, ph, null, beatLabel, out _, accent: s.VideoBeatShake))
-            Shell.ToggleVideoBeatShake();
-        var scLbl = s.AudioOnlyMode ? L.T("Волна", "Wave") : L.T("Кругляшки", "Comments");
-        var scIcon = s.AudioOnlyMode ? null : "\uE8BD";
-        var scW = UI.PillWidth(scIcon, scLbl);
-        bx -= scW + 8;
-        var tfSc = MusicBounce.Push(new R(bx, by, scW, ph), 16, amp: 1.05f);
-        if (UI.Pill(UI.Id("scwave", _infoScroll), bx, by, ph, scIcon, scLbl, out _, accent: s.SoundCloudWave))
+        if (!s.AudioOnlyMode)
         {
-            s.SoundCloudWave = !s.SoundCloudWave;
-            s.Save();
-            Shell.PushPlayerState();
-            App.Invalidate();
+            var beatLabel = L.T("Видео в бит", "Video beat");
+            var beatW = UI.PillWidth(null, beatLabel);
+            bx -= beatW + 8;
+            var tfVb = MusicBounce.Push(new R(bx, by, beatW, ph), 17, amp: 1.0f);
+            if (UI.Pill(UI.Id("videobeat", _infoScroll), bx, by, ph, null, beatLabel, out _, accent: s.VideoBeatShake))
+                Shell.ToggleVideoBeatShake();
+            MusicBounce.Pop(tfVb);
+
+            var scLbl = L.T("Кругляшки", "Comments");
+            var scW = UI.PillWidth("\uE8BD", scLbl);
+            bx -= scW + 8;
+            var tfSc = MusicBounce.Push(new R(bx, by, scW, ph), 15, amp: 1.05f);
+            if (UI.Pill(UI.Id("scwave", _infoScroll), bx, by, ph, "\uE8BD", scLbl, out _, accent: s.SoundCloudWave))
+            {
+                s.SoundCloudWave = !s.SoundCloudWave;
+                s.Save();
+                Shell.PushPlayerState();
+                App.Invalidate();
+            }
+            MusicBounce.Pop(tfSc);
         }
-        MusicBounce.Pop(tfSc);
         var eqLbl = s.AudioFxEnabled ? AudioDsp.DisplayPresetName(s) : "EQ";
         var eqW = UI.PillWidth(null, eqLbl);
         bx -= eqW + 8;
@@ -2104,11 +2414,16 @@ public sealed class WatchPage : IPage
         }
 
         var chMaxW = MathF.Max(70, MathF.Min(260, leftEdge - (x0 + 54) - 14));
-        var authorArt = Shell.MusicAccent(new R(x0, y + 1, 42, 42));
+        var chAvR = new R(x0, y + 1, 42, 42);
+        var tfChAv = MusicBounce.Push(chAvR, 0, amp: 1.15f);
+        var authorArt = MusicBounce.Active ? chAvR : Shell.MusicAccent(chAvR);
         Cards.Avatar(authorArt.X, authorArt.Y, authorArt.W, _info?.ChannelAvatar, chName);
+        MusicBounce.Pop(tfChAv);
         var nameRun = Gfx.Text(chName, 15, 600, chMaxW);
         var nameRect = new R(x0 + 54, y + 2, nameRun.W, nameRun.H);
+        var tfChNm = MusicBounce.Push(nameRect, 4, amp: 0.90f, rotAmp: 0.4f);
         Gfx.Draw(nameRun, nameRect.X, nameRect.Y, UI.Hover(nameRect) && (_info?.ChannelId ?? Video.ChannelId) != null ? Th.Brand : Th.Text);
+        MusicBounce.Pop(tfChNm);
         Cards.CopyMenu(nameRect, chName, L.T("Копировать название канала", "Copy channel name"));
         if (subText.Length > 0) Gfx.Draw(subText, x0 + 54, y + 24, 12, Th.Sub, 400, chMaxW);
         var chId = _info?.ChannelId ?? Video.ChannelId;

@@ -255,12 +255,12 @@ public static partial class SoundCloudBar
         if (duration <= 5) return list;
 
         var usedBuckets = new HashSet<int>();
-        const int buckets = 34;
+        const int buckets = 44;
 
         // 1. Real timestamped YouTube comments first (exact SoundCloud experience!)
         foreach (var c in comments)
         {
-            if (list.Count >= 28) break;
+            if (list.Count >= 30) break;
             var m = TimestampRx().Match(c.Text);
             if (!m.Success) continue;
             int hrs = m.Groups[1].Success ? int.Parse(m.Groups[1].Value) : 0;
@@ -276,12 +276,12 @@ public static partial class SoundCloudBar
         }
 
         // 2. If few timestamped comments exist, distribute top popular comments gently along the track (SoundCloud vibe on every song!)
-        if (list.Count < 8 && comments.Count > 0)
+        if (list.Count < 10 && comments.Count > 0)
         {
             int idx = 0;
             foreach (var c in comments)
             {
-                if (list.Count >= 18) break;
+                if (list.Count >= 22) break;
                 var cleanTxt = c.Text.Replace('\r', ' ').Replace('\n', ' ').Trim();
                 if (cleanTxt.Length > 110) cleanTxt = cleanTxt[..107] + "…";
                 var prefix = cleanTxt.Length > 20 ? cleanTxt[..20] : cleanTxt;
@@ -513,24 +513,25 @@ public static partial class SoundCloudBar
 
     /// <summary>Draws the full SoundCloud waveform deck with interactive scrubbing, midline time badges, and timed comment avatars.</summary>
     public static void Draw(R rect, string videoId, double pos, double duration, string? audioUrl,
-        IReadOnlyList<TimedMarker> markers, IReadOnlyList<(double Start, string Title)> chapters, bool compact = false)
+        IReadOnlyList<TimedMarker> markers, IReadOnlyList<(double Start, string Title)> chapters, bool compact = false, bool musicStage = false)
     {
         var mpv = MpvPlayer.Instance;
         var entry = GetOrStart(videoId, audioUrl);
         float[] peaks = entry.Peaks;
 
         float cr = Gfx.Corner(12);
-        if (!compact) Gfx.FillFrosted(rect, Th.Card, cr, opacity: 0.52f, border: true);
+        if (!compact && !musicStage) Gfx.FillFrosted(rect, Th.Card, cr, opacity: 0.52f, border: true);
 
-        float padX = compact ? 14 : 20;
+        float padX = musicStage ? 8 : (compact ? 14 : 20);
+        float timeColW = musicStage ? 58f : 0f;
         float barAreaX = rect.X + padX;
-        float barAreaW = MathF.Max(1, rect.W - padX * 2);
-        float topPad = 24;
-        float botPad = 26;
-        float waveH = MathF.Max(28, rect.H - topPad - botPad);
-        float midY = Gfx.Snap(rect.Y + topPad + waveH * 0.60f);
-        float maxUp = waveH * 0.56f;
-        float maxDn = waveH * 0.30f;
+        float barAreaW = MathF.Max(1, rect.W - padX * 2 - timeColW);
+        float topPad = musicStage ? 10f : 24f;
+        float botPad = musicStage ? 8f : 26f;
+        float waveH = MathF.Max(32, rect.H - topPad - botPad);
+        float midY = Gfx.Snap(rect.Y + topPad + waveH * (musicStage ? 0.65f : 0.60f));
+        float maxUp = waveH * (musicStage ? 0.62f : 0.56f);
+        float maxDn = waveH * (musicStage ? 0.31f : 0.30f);
 
         var hitR = new R(barAreaX, rect.Y + 2, barAreaW, rect.H - 4);
         bool overWave = UI.Hover(hitR);
@@ -549,19 +550,23 @@ public static partial class SoundCloudBar
         float hoverFrac = Math.Clamp((UI.MX - barAreaX) / barAreaW, 0f, 1f);
         if (overWave && duration > 0) UI.Hand();
 
+        bool playing = mpv.HasMedia && !mpv.Paused && mpv.CurrentVideoId == videoId;
+        bool waveBounce = MusicBounce.Active;
+        float waveTime = UI.Now * 0.0105f;
+
         // Check if hovering an avatar marker first (so clicking an avatar seeks right to its comment timestamp!)
         TimedMarker? hoveredMarker = null;
         float hoveredMarkerX = 0;
-        const float avSize = 19f;
-        float avY = rect.Bottom - 23;
+        float avSize = musicStage ? 23f : 19f;
+        float avBaseY = musicStage ? (midY + 3f) : (rect.Bottom - 23f);
 
         if (duration > 1 && markers.Count > 0)
         {
             for (int i = markers.Count - 1; i >= 0; i--)
             {
                 var mk = markers[i];
-                float mx = barAreaX + (float)Math.Clamp(mk.Seconds / duration, 0.03, 0.97) * barAreaW;
-                var avHit = new R(mx - avSize * 0.5f, avY, avSize, avSize);
+                float mx = barAreaX + (float)Math.Clamp(mk.Seconds / duration, 0.025, 0.975) * barAreaW;
+                var avHit = new R(mx - avSize * 0.55f, avBaseY - 4f, avSize * 1.1f, avSize + 8f);
                 if (UI.Hover(avHit))
                 {
                     hoveredMarker = mk;
@@ -593,23 +598,27 @@ public static partial class SoundCloudBar
         double effPos = _scrubbing ? _scrubTarget : pos;
         float playFrac = duration > 0 ? (float)Math.Clamp(effPos / duration, 0, 1) : 0f;
 
-        // Distribute rounded bars across the exact seek range (no dead margins).
-        int cols = Math.Clamp((int)(barAreaW / 5f), 1, 360);
+        // Distribute crisp SoundCloud vertical bars across the full seek range
+        float targetStep = musicStage ? 3.5f : 5.0f;
+        int cols = Math.Clamp((int)(barAreaW / targetStep), 24, musicStage ? 360 : 320);
         float stride = barAreaW / cols;
-        float barW = MathF.Max(1, stride * 0.58f);
+        float barW = MathF.Max(1.4f, stride * (musicStage ? 0.62f : 0.58f));
         float totalBarsW = barAreaW;
         float startX = barAreaX;
 
-        bool playing = mpv.HasMedia && !mpv.Paused && mpv.CurrentVideoId == videoId;
-        float beatPulse = playing ? (1f + AudioAnalyzer.BassEnergy * 0.14f) : 1f;
+        float beatPulse = playing ? (1f + AudioAnalyzer.BassEnergy * 0.16f + MusicBounce.Kick * 0.12f) : 1f;
         if (playing) AudioAnalyzer.RequestFrame();
 
-        uint playedTop = Th.Brand;
-        uint playedBot = Gfx.Fade(Th.Brand, 0.44f);
-        uint unplayedTop = Th.Light ? Gfx.Fade(Th.Text, 0.34f) : Gfx.Fade(Th.Text, 0.30f);
-        uint unplayedBot = Th.Light ? Gfx.Fade(Th.Text, 0.14f) : Gfx.Fade(Th.Text, 0.10f);
-        uint scrubTop = Gfx.Mix(Th.Brand, Th.Light ? Th.Text : 0xFFFFFFFF, 0.38f);
-        uint scrubBot = Gfx.Fade(scrubTop, 0.38f);
+        uint playedTop = musicStage ? Gfx.Mix(0xFFFFFFFF, Th.Brand, 0.35f) : Th.Brand;
+        uint playedBot = musicStage ? Gfx.Fade(Th.Brand, 0.50f) : Gfx.Fade(Th.Brand, 0.44f);
+        uint unplayedTop = musicStage
+            ? Gfx.Fade(0xFFFFFFFF, 0.72f)
+            : (Th.Light ? Gfx.Fade(Th.Text, 0.34f) : Gfx.Fade(Th.Text, 0.30f));
+        uint unplayedBot = musicStage
+            ? Gfx.Fade(0xFFFFFFFF, 0.24f)
+            : (Th.Light ? Gfx.Fade(Th.Text, 0.14f) : Gfx.Fade(Th.Text, 0.10f));
+        uint scrubTop = Gfx.Mix(Th.Brand, 0xFFFFFFFF, 0.42f);
+        uint scrubBot = Gfx.Fade(scrubTop, 0.40f);
 
         for (int i = 0; i < cols; i++)
         {
@@ -621,37 +630,48 @@ public static partial class SoundCloudBar
 
             bool isPlayed = frac <= playFrac;
             bool inHoverRange = overWave && hoveredMarker == null && ((frac > playFrac && frac <= hoverFrac) || (frac < playFrac && frac >= hoverFrac));
-            bool atHead = MathF.Abs(frac - playFrac) < (1.5f / cols);
+            float distHead = MathF.Abs(frac - playFrac);
+            bool atHead = distHead < (2.0f / cols);
 
             float hScale = atHead ? beatPulse : 1f;
-            float upH = MathF.Max(2f, amp * maxUp * hScale);
-            float dnH = MathF.Max(1.5f, amp * maxDn * hScale);
+            if (waveBounce && (isPlayed || distHead < 0.08f))
+            {
+                int bIdx = (int)(frac * 28f) & 31;
+                float ripple = 0.5f + 0.5f * MathF.Sin(waveTime - frac * 18f);
+                float nearBoost = distHead < 0.08f ? (1f - distHead / 0.08f) * 0.22f : 0f;
+                hScale += (MusicBounce.BandEnergy(bIdx) * 0.14f + nearBoost * MusicBounce.Kick) * (0.45f + 0.55f * ripple);
+            }
+
+            float upH = MathF.Max(2f, MathF.Min(maxUp * 1.06f, amp * maxUp * hScale));
+            float dnH = MathF.Max(1.5f, MathF.Min(maxDn * 1.05f, amp * maxDn * hScale));
             float bx = startX + i * stride + (stride - barW) * 0.5f;
 
             uint cTop = isPlayed ? playedTop : inHoverRange ? scrubTop : unplayedTop;
             uint cBot = isPlayed ? playedBot : inHoverRange ? scrubBot : unplayedBot;
 
-            Gfx.Fill(new R(bx, midY - upH, barW, upH), cTop, barW * 0.5f);
-            Gfx.Fill(new R(bx, midY + 1.5f, barW, dnH), cBot, barW * 0.5f);
+            float br = musicStage ? MathF.Min(1.0f, barW * 0.4f) : barW * 0.5f;
+            Gfx.Fill(new R(bx, midY - upH, barW, upH), cTop, br);
+            Gfx.Fill(new R(bx, midY + 1.5f, barW, dnH), cBot, br);
         }
 
         // Crisp SoundCloud horizontal midline divider
-        Gfx.Fill(new R(barAreaX, midY, barAreaW, 1f), Gfx.Fade(Th.Bg, 0.65f));
+        Gfx.Fill(new R(barAreaX, midY, barAreaW, 1f), musicStage ? Gfx.Fade(0xFF000000, 0.55f) : Gfx.Fade(Th.Bg, 0.65f));
 
-        // Playhead hairline glow
+        // Playhead hairline glow (SoundCloud Pro crisp white needle in musicStage!)
         if (duration > 0)
         {
             float headX = Gfx.Snap(startX + playFrac * totalBarsW);
-            Gfx.Fill(new R(headX - 0.75f, midY - maxUp - 2, 1.5f, maxUp + maxDn + 4), Gfx.Fade(Th.Brand, 0.95f));
-            if (AppSettings.Current.UiNeonGlow)
-                Gfx.Fill(new R(headX - 3f, midY - maxUp, 6f, maxUp + maxDn), Gfx.Fade(Th.Brand, 0.20f));
+            uint needleCol = musicStage ? 0xFFFFFFFF : Gfx.Fade(Th.Brand, 0.95f);
+            Gfx.Fill(new R(headX - (musicStage ? 1f : 0.75f), midY - maxUp - 4, musicStage ? 2f : 1.5f, maxUp + maxDn + 8), needleCol, 1f);
+            if (musicStage || AppSettings.Current.UiNeonGlow)
+                Gfx.Fill(new R(headX - 3.5f, midY - maxUp - 2, 7f, maxUp + maxDn + 4), Gfx.Fade(Th.Brand, musicStage ? 0.28f : 0.20f));
         }
 
         // Same full-track RMS timestamp that triggers the one-off star burst.
         if (duration > 0 && PeakStarBurst.GetPeakTime(videoId, audioUrl, duration) is { } peakTime)
         {
             float peakX = barAreaX + (float)Math.Clamp(peakTime / duration, 0, 1) * barAreaW;
-            float peakY = rect.Y + 11;
+            float peakY = rect.Y + 10;
             uint starColor = 0xFFFFD477;
             Gfx.Line(peakX, peakY + 8, peakX, midY + maxDn, Gfx.Fade(starColor, 0.45f), 1);
             float px = 0, py = 0;
@@ -673,7 +693,7 @@ public static partial class SoundCloudBar
             }
         }
 
-        // Timed comment avatars pinned right along the SoundCloud midline (draw hovered avatar LAST so it sits on top!)
+        // Timed comment avatars pinned right along the SoundCloud midline — hop & ripple along the sound wave during MusicBounce!
         TimedMarker? activeAutoMarker = null;
         float activeAutoX = 0;
         if (duration > 1 && markers.Count > 0)
@@ -681,12 +701,25 @@ public static partial class SoundCloudBar
             for (int i = 0; i < markers.Count; i++)
             {
                 var mk = markers[i];
-                float mx = barAreaX + (float)Math.Clamp(mk.Seconds / duration, 0.03, 0.97) * barAreaW;
+                float fracM = (float)Math.Clamp(mk.Seconds / duration, 0.025, 0.975);
+                float mx = barAreaX + fracM * barAreaW;
                 if (!ReferenceEquals(mk, hoveredMarker))
                 {
-                    float ax = mx - avSize * 0.5f;
-                    Gfx.Circle(mx, avY + avSize * 0.5f, avSize * 0.5f + 1.2f, Gfx.Fade(Th.Bg, 0.92f));
-                    Pages.Cards.Avatar(ax, avY, avSize, mk.Avatar, mk.Author.TrimStart('@'));
+                    float hopY = 0f, hopScale = 1f;
+                    bool nearHead = MathF.Abs(fracM - playFrac) < 0.045f;
+                    if (waveBounce)
+                    {
+                        int bIdx = (i * 3 + 2) & 31;
+                        float wave = 0.5f + 0.5f * MathF.Sin(waveTime * 1.15f - fracM * 14f + i * 0.65f);
+                        float energy = MusicBounce.BandEnergy(bIdx) * 0.78f + MusicBounce.Kick * (nearHead ? 0.85f : 0.36f);
+                        hopY = -Math.Clamp(energy * (5.2f + 4.4f * wave), 0f, nearHead ? 11.5f : 7.5f);
+                        hopScale = 1f + Math.Clamp(energy * (nearHead ? 0.14f : 0.07f), 0f, 0.18f);
+                    }
+                    float sz = avSize * hopScale;
+                    float ax = mx - sz * 0.5f;
+                    float ay = avBaseY + hopY - (sz - avSize) * 0.5f;
+                    Gfx.Circle(mx, ay + sz * 0.5f, sz * 0.5f + 1.3f, nearHead && waveBounce ? Gfx.Fade(Th.Brand, 0.85f) : Gfx.Fade(0xFF06060A, 0.92f));
+                    Pages.Cards.Avatar(ax, ay, sz, mk.Avatar, mk.Author.TrimStart('@'));
                 }
                 if (hoveredMarker == null && mk.HasRealTimestamp && playing && Math.Abs(pos - mk.Seconds) < 1.8)
                 {
@@ -698,27 +731,36 @@ public static partial class SoundCloudBar
             }
             if (hoveredMarker != null)
             {
-                float sz = avSize + 4f;
-                float ax = hoveredMarkerX - sz * 0.5f, ay = avY - 2f;
-                Gfx.Circle(hoveredMarkerX, ay + sz * 0.5f, sz * 0.5f + 1.4f, Th.Brand);
+                float sz = avSize + 5f;
+                float ax = hoveredMarkerX - sz * 0.5f, ay = avBaseY - 3f;
+                Gfx.Circle(hoveredMarkerX, ay + sz * 0.5f, sz * 0.5f + 1.6f, Th.Brand);
                 Pages.Cards.Avatar(ax, ay, sz, hoveredMarker.Avatar, hoveredMarker.Author.TrimStart('@'));
             }
         }
 
-        // Left & Right SoundCloud time badges right on the midline ("0:07" ... "7:51")
+        // Time badges: SoundCloud Pro right-side vertical stack in musicStage, or left/right top corners in compact mode
         if (duration > 0)
         {
             var curTxt = Fmt.Time(effPos);
-            var curRun = Gfx.Text(curTxt, 10.5f, 600);
-            var curBox = new R(barAreaX, rect.Y + 2, curRun.W + 8, curRun.H + 3);
-
-            Gfx.Draw(curRun, curBox.X + 4, curBox.Y + 1, Th.Brand);
-
             var durTxt = Fmt.Time(duration);
-            var durRun = Gfx.Text(durTxt, 10.5f, 600);
-            var durBox = new R(barAreaX + barAreaW - durRun.W - 8, rect.Y + 2, durRun.W + 8, durRun.H + 3);
+            if (musicStage)
+            {
+                float txRight = rect.Right - padX;
+                var curRun = Gfx.Text(curTxt, 11.5f, 700);
+                var durRun = Gfx.Text(durTxt, 10.5f, 500);
+                Gfx.Draw(curRun, txRight - curRun.W, midY - curRun.H - 4f, 0xFFFFFFFF);
+                Gfx.Draw(durRun, txRight - durRun.W, midY + 5f, Gfx.Fade(0xFFFFFFFF, 0.65f));
+            }
+            else
+            {
+                var curRun = Gfx.Text(curTxt, 10.5f, 600);
+                var curBox = new R(barAreaX, rect.Y + 2, curRun.W + 8, curRun.H + 3);
+                Gfx.Draw(curRun, curBox.X + 4, curBox.Y + 1, Th.Brand);
 
-            Gfx.Draw(durRun, durBox.X + 4, durBox.Y + 1, Th.Sub);
+                var durRun = Gfx.Text(durTxt, 10.5f, 600);
+                var durBox = new R(barAreaX + barAreaW - durRun.W - 8, rect.Y + 2, durRun.W + 8, durRun.H + 3);
+                Gfx.Draw(durRun, durBox.X + 4, durBox.Y + 1, Th.Sub);
+            }
         }
 
         // Floating SoundCloud Comment Preview Bubble (on avatar hover OR brief auto-show during playback)
@@ -752,7 +794,7 @@ public static partial class SoundCloudBar
             var tipRun = Gfx.Text(tip, 11f, 600, 260);
             float tw = MathF.Min(barAreaW, tipRun.W + 14), th = tipRun.H + 6;
             float tx = Math.Clamp(UI.MX - tw * 0.5f, barAreaX, barAreaX + barAreaW - tw);
-            var tb = new R(Gfx.Snap(tx), midY - maxUp - th - 2, tw, th);
+            var tb = new R(Gfx.Snap(tx), MathF.Max(rect.Y + 2, midY - maxUp - th - 2), tw, th);
             Gfx.Fill(tb, 0xE6101016, 5);
             Gfx.Stroke(tb, Gfx.Fade(Th.Brand, 0.5f), 5, 1f);
             Gfx.Draw(tipRun, tb.X + 7, tb.Y + 3, 0xFFFFFFFF);

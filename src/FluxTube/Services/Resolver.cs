@@ -340,7 +340,7 @@ public sealed class Resolver
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8,
         };
-        foreach (var a in new[] { "--no-warnings", "--no-playlist", "-f", Format, "--extractor-args", "youtube:skip=hls,translated_subs",
+        foreach (var a in new[] { "--no-warnings", "--no-playlist", "-f", Format + "/b", "--extractor-args", "youtube:skip=translated_subs",
                      "--cache-dir", Paths.YtCache, "-j" }) psi.ArgumentList.Add(a);
         foreach (var a in YtDlp.CommonArgs(forPlayer: false).Where(a => a != "--impersonate" && a != "chrome")) psi.ArgumentList.Add(a);
         psi.ArgumentList.Add("https://www.youtube.com/watch?v=" + id);
@@ -397,16 +397,23 @@ public sealed class Resolver
             foreach (var kv in h) if (kv.Value is JsonValue v && v.TryGetValue<string>(out var s)) headers[kv.Key] = s;
         double dur = 0;
         try { dur = n["duration"]?.GetValue<double>() ?? 0; } catch { }
+        var audio = n.S("audio");
+        // HLS manifests (live streams & HLS-only videos) must go straight to mpv — StreamProxy only proxies byte-range VOD streams!
+        bool isHls = video.Contains("hls_playlist", StringComparison.OrdinalIgnoreCase)
+            || video.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
+            || video.Contains("/manifest/", StringComparison.OrdinalIgnoreCase);
+        if (isHls)
+            return new StreamInfo(id, video, audio, headers, n.S("title"), dur, DateTime.UtcNow) { Vitag = 0, Aitag = 0 };
+
         // mpv talks to our local proxy, which handles available_at and bounded ranges (see StreamProxy)
         var proxy = Player.StreamProxy.Instance;
-        var audio = n.S("audio");
         int vitag = Player.StreamProxy.ItagOf(video), aitag = audio != null ? Player.StreamProxy.ItagOf(audio) : 0;
         static long Clen(string url) => long.TryParse(System.Web.HttpUtility.ParseQueryString(new Uri(url).Query)["clen"], out var l) ? l : 0;
-        // same itag but another length means another encode: it cannot continue the file that is already playing or cached
+        // If YouTube re-encoded this itag with a different byte length, drop stale cache cleanly instead of failing playback!
         if (proxy.LengthOf(id, vitag) is > 0 and var have && Clen(video) is > 0 and var got && have != got)
         {
-            Paths.Log($"resolve {id}: itag {vitag} length changed ({have} -> {got})");
-            return null;
+            Paths.Log($"resolve {id}: itag {vitag} length changed ({have} -> {got}), invalidating stale cache");
+            proxy.InvalidateItag(id, vitag);
         }
         // the cache index knows the video before any of its bytes land on disk (zero plays: cleaned up first)
         if (Db.CacheVideo(id) is not { } known || known.Vitag != vitag || known.Aitag != aitag)

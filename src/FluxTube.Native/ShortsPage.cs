@@ -1102,6 +1102,7 @@ public sealed class ShortsPage : IPage
             if (UI.Hover(video))
             {
                 if (W.KeyDown(W.VK_SHIFT) && AppSettings.Current.ShiftWheelFrameStep) Shell.StepVideoFrame(UI.Wheel);
+                else if (AppSettings.Current.WheelVolumeOnVideo) AdjustVolume(UI.Wheel > 0 ? 5 : -5);
                 else Step(UI.Wheel > 0 ? -1 : 1);
                 UI.Wheel = 0;
             }

@@ -121,8 +121,26 @@ public sealed class AppSettings
     public float FxPitchSemitones { get; set; } = 0f;
     /// <summary>Transparent master bus limiter to keep heavy bass & exciter punchy with zero clipping.</summary>
     public bool FxLimiter { get; set; } = true;
+    /// <summary>Optional custom `.wav` Impulse Response file path for convolution reverb (REAPER ReaVerb / Bricasti / Lexicon IRs).</summary>
+    public string CustomIrPath { get; set; } = "";
+    /// <summary>Bi-polar Pioneer-style DJ Color Filter (-100 = resonant LPF club muffle, 0 = bypass, +100 = resonant HPF drop riser).</summary>
+    public float FxDjFilter { get; set; } = 0f;
+    /// <summary>PS1 / SP-1200 Lo-Fi Bitcrusher &amp; Sample-Rate Decimator (0..100).</summary>
+    public float FxCrush { get; set; } = 0f;
+    /// <summary>Analog tube/tape saturation drive + subtle vinyl warmth (0..100).</summary>
+    public float FxDrive { get; set; } = 0f;
+    /// <summary>DJ Jet Flanger / Stereo Chorus swirl modulation (0..100).</summary>
+    public float FxMod { get; set; } = 0f;
+    /// <summary>3-band DJ mixer isolator kill switches (instant Bass / Mid / High drop kills).</summary>
+    public bool FxKillLow { get; set; } = false;
+    public bool FxKillMid { get; set; } = false;
+    public bool FxKillHigh { get; set; } = false;
+    /// <summary>Bauer binaural headphone soundstage crossfeed (bs2b).</summary>
+    public bool FxHeadphone3D { get; set; } = false;
     /// <summary>Audio-only music stage on WatchPage: suspends mpv video decoding (0% GPU) and shows live audio waves.</summary>
     public bool AudioOnlyMode { get; set; } = false;
+    /// <summary>Music Mode stage art composition ("hero" = large album cover + full-bleed blurred canvas, "full" = full-screen crisp artwork stage).</summary>
+    public string MusicStageBg { get; set; } = "hero";
     /// <summary>Automatically suspends mpv video decoding (vid=no) whenever FluxTube is minimized or viewing another tab.</summary>
     public bool AutoSuspendVideoWhenHidden { get; set; } = false;
     /// <summary>Live audio visualizer style ("bars_wave", "ribbon", "bars", "off").</summary>
@@ -236,4 +254,9 @@ public sealed class SavedAudioPreset
     public float PitchSemi { get; set; }
     public bool Space8D { get; set; }
     public bool Limiter { get; set; } = true;
+    public float DjFilter { get; set; }
+    public float Crush { get; set; }
+    public float Drive { get; set; }
+    public float Mod { get; set; }
+    public bool Headphone3D { get; set; }
 }

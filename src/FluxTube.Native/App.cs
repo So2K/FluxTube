@@ -439,10 +439,13 @@ public static unsafe class App
                         Shell.StepVideoFrame(delta);
                         return 0;
                     }
-                    if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp && Shell.OverVideo(UI.MX, UI.MY))
+                    if (Shell.OverVideo(UI.MX, UI.MY) && AppSettings.Current.WheelVolumeOnVideo && !Shell.AnyModalOpen)
+                    {
+                        if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage spVol) spVol.AdjustVolume(delta > 0 ? 5 : -5);
+                        else Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
+                    }
+                    else if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp && Shell.OverVideo(UI.MX, UI.MY))
                         sp.Step(delta > 0 ? -1 : 1);
-                    else if (Shell.OverVideo(UI.MX, UI.MY) && AppSettings.Current.WheelVolumeOnVideo && !Shell.AnyModalOpen)
-                        Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
                     else { UI.Wheel += delta; Invalidate(); }
                     return 0;
                 }
@@ -707,17 +710,20 @@ internal static unsafe class VideoHost
                     Shell.StepVideoFrame(delta);
                     return 0;
                 }
-                // In Shorts, mouse wheel over the vertical video ALWAYS flips Shorts!
+                // Respect WheelVolumeOnVideo consistently across BOTH horizontal videos AND vertical Shorts!
+                // Scrolling outside the vertical Shorts video (left/right stage margins) still flips Shorts.
+                if (AppSettings.Current.WheelVolumeOnVideo)
+                {
+                    if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage spVol) spVol.AdjustVolume(delta > 0 ? 5 : -5);
+                    else Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
+                    return 0;
+                }
                 if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp)
                 {
                     sp.Step(delta > 0 ? -1 : 1);
                     return 0;
                 }
-                if (AppSettings.Current.WheelVolumeOnVideo)
-                {
-                    Shell.AdjustMainVolume(delta > 0 ? 5 : -5);
-                }
-                else if (!Pip.Active && !Shell.IsFullscreen)
+                if (!Pip.Active && !Shell.IsFullscreen)
                 {
                     UI.Wheel += delta;
                     App.Invalidate();
