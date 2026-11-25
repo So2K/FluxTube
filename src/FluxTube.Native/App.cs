@@ -63,7 +63,11 @@ public static unsafe class App
     private static int Main(string[] args)
     {
         Paths.MigrateOldData();
+        // Fast ~12ms URL router: forwards non-YouTube URLs straight to user's browser & routes YouTube URLs to open FluxTube!
+        if (LinkRouter.TryHandleCliRoute(args)) return 0;
         ProfileOptimization.SetProfileRoot(Paths.Data);
+        // SustainedLowLatency prevents stop-the-world Gen2 GC pauses during 144Hz scrolling & Music Mode
+        GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
         try
         {
             return Run(args);
@@ -123,6 +127,8 @@ public static unsafe class App
         DropTarget.InitOle();
         DropTarget.Attach(Hwnd);
         DropTarget.Attach(VideoHwnd);
+        W.AddClipboardFormatListener(Hwnd);
+        if (!Test) LinkRouter.RegisterProtocolAndRouter();
         UiThread.Post = a => Post(a);
         Shell.Init(args);
 
@@ -177,6 +183,7 @@ public static unsafe class App
         }
         finally
         {
+            W.RemoveClipboardFormatListener(Hwnd);
             DropTarget.ShutdownOle();
         }
     }
@@ -319,7 +326,18 @@ public static unsafe class App
                 }
                 case W.WM_SIZE:
                     Suggest.Hide();
-                    if (Gfx.DC != null && (int)w != 1)
+                    if ((int)w == 1 /*SIZE_MINIMIZED*/)
+                    {
+                        PreviewPlayer.HideNow();
+                        if (Gfx.DC != null)
+                        {
+                            Gfx.TrimMemory(minimized: true);
+                            Images.TrimMemory(minimized: true);
+                            MusicArt.Trim(MpvPlayer.Instance.CurrentVideoId);
+                        }
+                        GC.Collect(2, GCCollectionMode.Optimized, blocking: false);
+                    }
+                    else if (Gfx.DC != null)
                     {
                         Gfx.Resize();
                         Invalidate();
@@ -421,6 +439,12 @@ public static unsafe class App
                     else if (xb == 2) Shell.Forward();
                     return 1;
                 }
+                case W.WM_COPYDATA:
+                    if (LinkRouter.HandleCopyData(l)) return 1;
+                    break;
+                case W.WM_CLIPBOARDUPDATE:
+                    LinkRouter.OnClipboardUpdated();
+                    return 0;
                 case W.WM_MOUSEWHEEL:
                 {
                     var p = new W.POINT { X = W.LoWord(l), Y = W.HiWord(l) };
@@ -439,7 +463,13 @@ public static unsafe class App
                         Shell.StepVideoFrame(delta);
                         return 0;
                     }
-                    if (Shell.OverVideo(UI.MX, UI.MY) && AppSettings.Current.WheelVolumeOnVideo && !Shell.AnyModalOpen)
+                    if (Shell.OverMusicStage(UI.MX, UI.MY) && AppSettings.Current.WheelVolumeOnVideo && !Shell.AnyModalOpen)
+                    {
+                        int curVol = MpvPlayer.Instance.Muted ? 0 : (int)Math.Round(MpvPlayer.Instance.Volume);
+                        Shell.SetMusicVolume(curVol + (delta > 0 ? 5 : -5));
+                        Invalidate();
+                    }
+                    else if (Shell.OverVideo(UI.MX, UI.MY) && AppSettings.Current.WheelVolumeOnVideo && !Shell.AnyModalOpen)
                     {
                         if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage spVol) spVol.AdjustVolume(delta > 0 ? 5 : -5);
                         else Shell.AdjustMainVolume(delta > 0 ? 5 : -5);

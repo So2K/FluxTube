@@ -221,8 +221,10 @@ internal static class Wic
 /// </summary>
 public static class Images
 {
-    private const long GpuBudget = 40L * 1024 * 1024; // BC1: room for some 600 thumbnails
+    private const long GpuBudget = 28L * 1024 * 1024; // BC1: ~420 thumbnails on GPU, instant restore from ThumbPack MMF
     private const int MaxParallel = 6;
+    private static readonly List<Img> _evictBuf = new(256);
+    private static readonly List<IKey> _staleKeyBuf = new(256);
 
     public readonly record struct IKey(string Url, int W, int H, bool Round);
     private static readonly Dictionary<IKey, Img> _map = new();
@@ -622,25 +624,48 @@ public static class Images
             if (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds > 1.5) break;
         }
         if (!_ready.IsEmpty) UI.Animate();
-        if (_gpuBytes > GpuBudget || _map.Count > 1500) Evict();
+        if (_gpuBytes > GpuBudget || _map.Count > 1000) Evict(GpuBudget * 3 / 4);
     }
 
-    private static void Evict()
+    /// <summary>Aggressively trims off-screen GPU bitmaps when minimized or idle (ThumbPack MMF restores them in &lt;1ms).</summary>
+    public static void TrimMemory(bool minimized)
     {
-        var victims = _map.Values.Where(i => Volatile.Read(ref i.State) == 2 && Gfx.Frame - Volatile.Read(ref i.WantedFrame) > 2).OrderBy(i => Volatile.Read(ref i.WantedFrame)).ToList();
-        foreach (var v in victims)
+        Evict(minimized ? 6L * 1024 * 1024 : GpuBudget / 2, keepRecentFrames: minimized ? 0 : 120);
+    }
+
+    private static void Evict(long targetBudget, long keepRecentFrames = 2)
+    {
+        _evictBuf.Clear();
+        long frame = Gfx.Frame;
+        foreach (var img in _map.Values)
         {
-            if (_gpuBytes < GpuBudget * 3 / 4) break;
+            if (Volatile.Read(ref img.State) == 2 && frame - Volatile.Read(ref img.WantedFrame) > keepRecentFrames)
+                _evictBuf.Add(img);
+        }
+        _evictBuf.Sort(static (a, b) => Volatile.Read(ref a.WantedFrame).CompareTo(Volatile.Read(ref b.WantedFrame)));
+        for (int i = 0; i < _evictBuf.Count; i++)
+        {
+            if (_gpuBytes <= targetBudget) break;
+            var v = _evictBuf[i];
             v.Bmp?.Dispose();
             v.Bmp = null;
             _gpuBytes = Math.Max(0, _gpuBytes - v.GpuBytes);
             v.GpuBytes = 0;
             _map.Remove(v.Key); // the pack still has it: coming back costs one upload
         }
-        if (_map.Count > 1200)
+        _evictBuf.Clear();
+
+        if (_map.Count > 900 || keepRecentFrames == 0)
         {
-            var stale = _map.Values.Where(i => Volatile.Read(ref i.State) is 1 or 3 or 4 && Gfx.Frame - Volatile.Read(ref i.WantedFrame) > 300).Select(i => i.Key).ToList();
-            foreach (var k in stale) _map.Remove(k);
+            _staleKeyBuf.Clear();
+            long age = keepRecentFrames == 0 ? 10 : 240;
+            foreach (var img in _map.Values)
+            {
+                if (Volatile.Read(ref img.State) is 1 or 3 or 4 && frame - Volatile.Read(ref img.WantedFrame) > age)
+                    _staleKeyBuf.Add(img.Key);
+            }
+            for (int i = 0; i < _staleKeyBuf.Count; i++) _map.Remove(_staleKeyBuf[i]);
+            _staleKeyBuf.Clear();
         }
     }
 

@@ -563,18 +563,23 @@ public static unsafe class AudioAnalyzer
                             try
                             {
                                 long packetStart = Environment.TickCount64 - (long)(frames * 1000.0 / sampleRate);
+                                bool beatHit = false;
+                                float bestStrength = 0f;
+                                long bestBeatAt = 0;
                                 void DetectBass(float sample, uint frame)
                                 {
                                     float strength = bassDetector.Process(sample);
                                     if (strength <= 0) return;
-                                    lock (_dataLock)
+                                    if (strength >= bestStrength)
                                     {
-                                        _capturedBeatStrength = strength;
-                                        _capturedBeatAt = packetStart + (long)(frame * 1000.0 / sampleRate);
+                                        bestStrength = strength;
+                                        bestBeatAt = packetStart + (long)(frame * 1000.0 / sampleRate);
+                                        beatHit = true;
                                     }
-                                    App.WakeUi();
                                 }
                                 bool silent = (flags & 0x2) != 0 || data == null;
+                                // Compensate player volume so WASAPI loopback spectrum & bass shake stay equally punchy at 20-40% volume!
+                                float volGain = Math.Clamp(100f / MathF.Max(14f, (float)MpvPlayer.Instance.Volume), 0.72f, 4.2f);
                                 if (silent)
                                 {
                                     for (uint f = 0; f < frames; f++) { ring[ringPos] = 0f; DetectBass(0, f); ringPos = (ringPos + 1) & (FftSize - 1); }
@@ -583,14 +588,15 @@ public static unsafe class AudioAnalyzer
                                 else if (isFloat && bits == 32)
                                 {
                                     var fp = (float*)data;
-                                    float invCh = 1f / channels;
+                                    float invCh = volGain / channels;
                                     for (uint f = 0; f < frames; f++)
                                     {
                                         float sum = 0f;
                                         int baseIdx = (int)(f * channels);
                                         for (int c = 0; c < channels; c++) sum += fp[baseIdx + c];
-                                        ring[ringPos] = sum * invCh;
-                                        DetectBass(ring[ringPos], f);
+                                        float sample = Math.Clamp(sum * invCh, -1.6f, 1.6f);
+                                        ring[ringPos] = sample;
+                                        DetectBass(sample, f);
                                         ringPos = (ringPos + 1) & (FftSize - 1);
                                     }
                                     gotSamples = true;
@@ -598,17 +604,27 @@ public static unsafe class AudioAnalyzer
                                 else if (bits == 16)
                                 {
                                     var sp = (short*)data;
-                                    float scale = 1f / (32768f * channels);
+                                    float scale = volGain / (32768f * channels);
                                     for (uint f = 0; f < frames; f++)
                                     {
                                         float sum = 0f;
                                         int baseIdx = (int)(f * channels);
                                         for (int c = 0; c < channels; c++) sum += sp[baseIdx + c];
-                                        ring[ringPos] = sum * scale;
-                                        DetectBass(ring[ringPos], f);
+                                        float sample = Math.Clamp(sum * scale, -1.6f, 1.6f);
+                                        ring[ringPos] = sample;
+                                        DetectBass(sample, f);
                                         ringPos = (ringPos + 1) & (FftSize - 1);
                                     }
                                     gotSamples = true;
+                                }
+                                if (beatHit)
+                                {
+                                    lock (_dataLock)
+                                    {
+                                        _capturedBeatStrength = bestStrength;
+                                        _capturedBeatAt = bestBeatAt;
+                                    }
+                                    App.WakeUi();
                                 }
                             }
                             finally
@@ -629,7 +645,7 @@ public static unsafe class AudioAnalyzer
                                 Array.Copy(waveScratch, _targetWave, WavePoints);
                             }
                         }
-                        Thread.Sleep(2);
+                        Thread.Sleep(7);
                     }
 
                 Reopen:;
@@ -742,7 +758,7 @@ public static unsafe class AudioAnalyzer
         float cx = art.X + art.W / 2, cy = art.Y + art.H / 2;
         float rx = art.W * 0.66f, ry = art.H * 0.75f;
         uint ice = Gfx.Mix(Th.Brand, 0xFF73D8EB, 0.48f);
-        const int rays = 64;
+        const int rays = 48;
         for (int i = 0; i < rays; i++)
         {
             float angle = i * MathF.Tau / rays;
@@ -754,16 +770,16 @@ public static unsafe class AudioAnalyzer
             float length = 3 + v * MathF.Min(24, art.H * 0.19f);
             float x = cx + dx * rx, y = cy + dy * ry;
             uint color = Gfx.Mix(Th.Brand, ice, MathF.Abs(dy));
-            if (v > 0.12f)
-                Gfx.Line(x, y, x + dx * length, y + dy * length, Gfx.Fade(color, v * 0.06f * opacity), 7f);
+            if (v > 0.15f)
+                Gfx.Line(x, y, x + dx * length, y + dy * length, Gfx.Fade(color, v * 0.08f * opacity), 6.5f);
             Gfx.Line(x, y, x + dx * length, y + dy * length,
-                Gfx.Fade(color, (0.06f + v * 0.38f) * opacity), 2f);
+                Gfx.Fade(color, (0.06f + v * 0.40f) * opacity), 2f);
             if (v > 0.35f)
                 Gfx.Circle(x + dx * length, y + dy * length, 1.4f, Gfx.Fade(Th.Text, v * 0.8f * opacity));
         }
     }
 
-    /// <summary>Mirrored spectrum with floating peaks, a fading reflection and an audio-driven ribbon.</summary>
+    /// <summary>Mirrored spectrum with floating peaks, a fading reflection and an audio-driven ribbon (4.5x fewer GPU draw calls).</summary>
     public static void DrawStageVisualizer(R r, string style, float opacity = 1f, float gain = 1f)
     {
         if (style == "off" || r.W < 40 || r.H < 24 || opacity <= 0.01f) return;
@@ -777,9 +793,10 @@ public static unsafe class AudioAnalyzer
         float maxH = r.H * 0.62f;
         if (bars)
         {
-            // Smooth frequency terrain: bass in the center, treble fading toward the edges.
-            const int count = 160;
-            float px = r.X, py = baseline, previousHeight = 0;
+            // Smooth frequency terrain: bass in the center, treble fading toward the edges (~270 draw calls vs 1,285!)
+            const int count = 90;
+            float colW = MathF.Max(1.8f, r.W / count * 0.66f);
+            float px = r.X, py = baseline;
             for (int i = 0; i <= count; i++)
             {
                 float u = i / (float)count;
@@ -793,27 +810,21 @@ public static unsafe class AudioAnalyzer
                 float height = v * maxH * edge;
                 float x = r.X + u * r.W, y = baseline - height;
                 uint color = Gfx.Mix(Th.Brand, ice, MathF.Abs(u * 2 - 1));
-                // Fine scan lines build a translucent body rather than chunky columns.
-                for (int j = 0; j < 5; j++)
-                {
-                    float h0 = height * j / 5, h1 = height * (j + 1) / 5;
-                    Gfx.Line(x, baseline - h0, x, baseline - h1,
-                        Gfx.Fade(color, (0.008f + j * 0.014f) * v * opacity), 1.2f);
-                }
+                if (height > 1.2f)
+                    Gfx.Fill(new R(x - colW * 0.5f, y, colW, height), Gfx.Fade(color, (0.04f + 0.14f * v) * opacity));
                 if (i > 0)
                 {
-                    Gfx.Line(px, py, x, y, Gfx.Fade(color, 0.045f * v * opacity), 9);
-                    Gfx.Line(px, py, x, y, Gfx.Fade(color, 0.14f * v * opacity), 3);
-                    Gfx.Line(px, py, x, y, Gfx.Fade(highlight, (0.15f + v * 0.65f) * opacity), 1.5f);
+                    Gfx.Line(px, py, x, y, Gfx.Fade(color, 0.10f * v * opacity), 6.5f);
+                    Gfx.Line(px, py, x, y, Gfx.Fade(highlight, (0.16f + v * 0.68f) * opacity), 1.6f);
                 }
-                px = x; py = y; previousHeight = height;
+                px = x; py = y;
             }
         }
         if (waves)
         {
             float mid = bars ? baseline : r.Y + r.H * 0.5f;
             float amp = r.H * (bars ? 0.17f : 0.4f);
-            for (int layer = 0; layer < 3; layer++)
+            for (int layer = 0; layer < 2; layer++)
             {
                 float px = r.X, py = mid;
                 for (int i = 0; i < WavePoints; i++)
@@ -823,8 +834,8 @@ public static unsafe class AudioAnalyzer
                     float x = r.X + u * r.W;
                     float y = mid + _smoothWave[i] * amp * envelope;
                     uint color = Gfx.Mix(Th.Brand, ice, u);
-                    float alpha = layer == 0 ? 0.08f : layer == 1 ? 0.18f : 0.7f;
-                    if (i > 0) Gfx.Line(px, py, x, y, Gfx.Fade(color, alpha * opacity), layer == 0 ? 10 : layer == 1 ? 5 : 1.4f);
+                    float alpha = layer == 0 ? 0.16f : 0.75f;
+                    if (i > 0) Gfx.Line(px, py, x, y, Gfx.Fade(color, alpha * opacity), layer == 0 ? 7f : 1.5f);
                     px = x; py = y;
                 }
             }

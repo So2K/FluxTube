@@ -940,12 +940,28 @@ public sealed class SettingsPage : IPage
             v => { if (s.VideoBeatShake != v) Shell.ToggleVideoBeatShake(); },
             L.T("Лёгкий толчок изображения на ударах баса. Отключается и кнопкой «Видео в бит» под плеером.",
                 "Bass hits move the video image. Also toggle with Video beat below the player."));
-        ToggleRow("bassshake", L.T("Акценты в такт басу в режиме «Только звук»", "Bass-reactive accents in Audio-Only mode"), s.MusicBassShake, v => s.MusicBassShake = v,
-            L.T("Содержимое страницы реагирует на бас; дальше от плеера движение слабее. Панели приложения неподвижны.", "Page content reacts to bass with less motion farther from the player. App navigation stays still."));
-        ToggleRow("wheelvol", L.T("Колёсико мыши меняет громкость на видео", "Mouse wheel adjusts volume over video"), s.WheelVolumeOnVideo, v => s.WheelVolumeOnVideo = v,
-            L.T("Выключено: прокрутка колёсика над видео просто скроллит страницу (а в Shorts листает ленту)", "Off: wheel over video scrolls the page normally (and switches Shorts in Shorts feed)"));
+        ToggleRow("bassshake", L.T("Тряска под бас в режиме «Только звук»", "Bass-reactive shake in Audio-Only mode"), s.MusicBassShake, v => s.MusicBassShake = v,
+            L.T("Обложка, буквы заголовка, лайки, кругляшки на волне и кнопки независимо прыгают в такт музыке.", "Cover art, title letters, likes, waveform avatars and buttons bounce independently to the beat."));
+        ToggleRow("wheelvol", L.T("Колёсико мыши меняет громкость на видео и в музыке", "Mouse wheel adjusts volume over video & music"), s.WheelVolumeOnVideo, v => s.WheelVolumeOnVideo = v,
+            L.T("Работает над обычным видео, Shorts и сценой «Только звук». Выключено: колесо скроллит страницу (в Shorts листает ленту).", "Works over regular video, Shorts, and Audio-Only stage. Off: wheel scrolls the page (and flips Shorts)."));
         ToggleRow("shiftframe", L.T("Shift + колёсико: покадровая прокрутка видео", "Shift + wheel: frame-by-frame scrubbing"), s.ShiftWheelFrameStep, v => s.ShiftWheelFrameStep = v,
             L.T("Зажмите Shift и крутите колёсико над плеером, чтобы точно листать видео по одному кадру (счётчик кадров и мс)", "Hold Shift and scroll over the player to step frame by frame with frame counter & exact timestamp"));
+
+        bool routerOn = LinkRouter.IsSystemRouterActive();
+        var fbName = LinkRouter.FriendlyBrowserName(s.FallbackBrowserCmd);
+        var linkHint = routerOn
+            ? L.T($"Активно · ссылки YouTube из Telegram/Discord летят в FluxTube, остальные сайты → {fbName}", $"Active · YouTube links open in FluxTube, other sites → {fbName}")
+            : L.T($"Выберите FluxTube в браузерах по умолчанию — YouTube из Telegram/Discord откроется сразу здесь, а остальные сайты → {fbName}", $"Set FluxTube as default browser — YouTube links from Telegram/Discord open here, all other sites → {fbName}");
+        var linkRow = Row(L.T("Открывать ссылки YouTube из Telegram и Windows", "Open YouTube links from Telegram & Windows"), linkHint, 62, 240);
+        if (Visible(linkRow.Y, linkRow.H))
+        {
+            var lLbl = routerOn ? L.T("Настройки Windows…", "Windows settings…") : L.T("Включить перехват…", "Enable router…");
+            var lw = UI.PillWidth(Th.Link, lLbl);
+            if (UI.Pill(UI.Id("set:linkrouter"), linkRow.Right - lw - 14, linkRow.Y + 14, 34, Th.Link, lLbl, out _, accent: !routerOn))
+                LinkRouter.OpenDefaultAppsForFluxTube();
+        }
+        ToggleRow("clipyt", L.T("Автооткрытие скопированных ссылок YouTube", "Auto-open copied YouTube links"), s.AutoOpenCopiedYouTubeLinks, v => s.AutoOpenCopiedYouTubeLinks = v,
+            L.T("Работает без смены браузера: скопируйте ссылку YouTube в Telegram/Discord (ПКМ → Копировать ссылку) — FluxTube откроет её сразу", "Works without changing default browser: copy any YouTube link in Telegram/Discord and FluxTube opens it immediately"));
 
         var sbAdsHint = ShortsAdBlocker.BlockedSessionCount > 0
             ? L.T($"Рекламные слоты, платные промо, erid/«Реклама», SponsorBlock и казино/промокоды · Скрыто за сессию: {ShortsAdBlocker.BlockedSessionCount}",

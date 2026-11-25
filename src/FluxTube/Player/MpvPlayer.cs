@@ -93,8 +93,8 @@ public sealed class MpvPlayer : IDisposable
             Opt(ctx, "background-color", "#000000");
             Opt(ctx, "osd-font", "Segoe UI");
             Opt(ctx, "osd-font-size", "28");
-            Opt(ctx, "demuxer-max-bytes", "32MiB");
-            Opt(ctx, "demuxer-max-back-bytes", "16MiB");
+            Opt(ctx, "demuxer-max-bytes", "16MiB");
+            Opt(ctx, "demuxer-max-back-bytes", "6MiB");
             Opt(ctx, "hr-seek-framedrop", "no");
             Opt(ctx, "cache", "yes");
             Opt(ctx, "demuxer-seekable-cache", "no");

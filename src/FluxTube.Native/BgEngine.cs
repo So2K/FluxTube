@@ -179,7 +179,7 @@ public static unsafe class BgEngine
 
         float op = Math.Clamp(s.BgImageOpacity, 0.08f, 0.95f);
         dc.DrawBitmap(drawBmp, new Vortice.RawRectF(0, 0, w, h), op,
-            Vortice.Direct2D1.InterpolationMode.HighQualityCubic,
+            Vortice.Direct2D1.InterpolationMode.Linear,
             new Vortice.RawRectF(sx, sy, sx + sw, sy + sh), null);
     }
 

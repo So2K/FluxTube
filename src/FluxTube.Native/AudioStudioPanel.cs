@@ -36,16 +36,19 @@ public static class AudioStudioPanel
     private static long _lastFrameMs;
     private static bool _scratching;
     private static float _scratchLastAngle;
+    private static float _scratchVel;
+    private static float _scratchBaseSpeed = 1f;
     private static double _scratchPos;
-    private static long _lastScratchSeekMs;
+    private static long _lastScratchCmdMs;
     private static bool _scratchWasPlaying;
 
-    // SL-1200 Vinyl Brake smooth speed ramp
-    private static int _brakeState; // 0 = off, 1 = braking down, 2 = braked (paused), 3 = spinning back up
+    // SL-1200 Vinyl Brake & Backspin smooth speed ramp
+    private static int _brakeState; // 0 = off, 1 = braking down, 2 = braked (paused), 3 = spinning back up, 4 = backspin zip
     private static long _brakeStartMs;
     private static float _brakeStartSpeed = 1f;
     private static float _brakeTargetSpeed = 1f;
     private static long _lastBrakeCmdMs;
+    private static bool _backspinJumped;
 
     // Hold 2x / 0.5x momentary pitch-speed pads
     private static int _holdMode; // 0 = none, 1 = 2x, -1 = 0.5x
@@ -177,11 +180,27 @@ public static class AudioStudioPanel
 
     private static string FormatLoopLen(double len) => len switch
     {
+        <= 0.16 => "1/8s",
         <= 0.30 => "1/4s",
         <= 0.60 => "1/2s",
         <= 1.10 => "1s",
         _ => "2s"
     };
+
+    private static void TriggerBackspin(MpvPlayer mpv, AppSettings s)
+    {
+        if (!mpv.IsReady || !mpv.HasMedia) return;
+        _brakeStartSpeed = (float)Math.Clamp(mpv.Speed, 0.4, 2.0);
+        _brakeTargetSpeed = s.AudioFxEnabled ? Math.Clamp(s.FxSpeed, 0.5f, 1.6f) : 1.0f;
+        _brakeStartMs = UI.Now;
+        _lastBrakeCmdMs = 0;
+        _backspinJumped = false;
+        _brakeState = 4;
+        if (mpv.Paused) mpv.SetPause(false);
+        mpv.Command("set", "audio-pitch-correction", "no");
+        mpv.SetSpeed(2.45); // instant vinyl whip-up!
+        Sfx.Tab();
+    }
 
     private static void TriggerVinylBrake(MpvPlayer mpv, AppSettings s)
     {
@@ -264,6 +283,38 @@ public static class AudioStudioPanel
                 mpv.Command("set", "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
             }
         }
+        else if (_brakeState == 4)
+        {
+            // Signature DJ Vinyl Backspin: rapid pitch whip down -> jump back 1.8s -> crisp spin up!
+            float t = Math.Clamp((now - _brakeStartMs) / 560f, 0f, 1f);
+            if (t < 0.48f)
+            {
+                float k = t / 0.48f;
+                float sp = 2.45f - 2.15f * k; // 2.45x -> 0.30x audible vinyl whip!
+                _platterAngle = (_platterAngle - 0.52f) % MathF.Tau;
+                if (now - _lastBrakeCmdMs >= 28) { _lastBrakeCmdMs = now; mpv.SetSpeed(sp); }
+            }
+            else
+            {
+                if (!_backspinJumped)
+                {
+                    _backspinJumped = true;
+                    double backTo = Math.Max(0, mpv.TimePos - 1.8);
+                    mpv.Command("seek", backTo.ToString("0.###", CultureInfo.InvariantCulture), "absolute+exact");
+                }
+                float k = (t - 0.48f) / 0.52f;
+                float ease = 1f - (1f - k) * (1f - k);
+                float sp = 0.30f + (_brakeTargetSpeed - 0.30f) * ease;
+                if (now - _lastBrakeCmdMs >= 28 || t >= 1f) { _lastBrakeCmdMs = now; mpv.SetSpeed(sp); }
+            }
+            UI.Animate();
+            if (t >= 1f)
+            {
+                _brakeState = 0;
+                mpv.SetSpeed(_brakeTargetSpeed);
+                mpv.Command("set", "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
+            }
+        }
     }
 
     private static void ReleaseHoldIfNeeded()
@@ -283,11 +334,14 @@ public static class AudioStudioPanel
     {
         if (!_scratching) return;
         _scratching = false;
+        _scratchVel = 0f;
         var mpv = MpvPlayer.Instance;
+        var s = AppSettings.Current;
         if (mpv.IsReady && mpv.HasMedia)
         {
-            mpv.Command("seek", Math.Max(0, _scratchPos).ToString("0.###", CultureInfo.InvariantCulture), "absolute+exact");
-            if (_scratchWasPlaying) mpv.SetPause(false);
+            mpv.SetSpeed(_scratchBaseSpeed);
+            mpv.Command("set", "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
+            if (!_scratchWasPlaying) mpv.SetPause(true);
         }
     }
 
@@ -909,8 +963,8 @@ public static class AudioStudioPanel
         }
         fyCur += 51f;
 
-        s.FxBass = DrawFxSlider(s, "bass", L.T("Бас / Суб-удар", "Sub-Bass Punch"), s.FxBass, 0, 100, 0, $"{s.FxBass:0}%", fx, fw, ref fyCur, rowStride);
-        s.FxExciter = DrawFxSlider(s, "exc", L.T("Воздух / Яркость + Компрессор", "Air / Brilliance + Glue"), s.FxExciter, 0, 100, 0, $"{s.FxExciter:0}%", fx, fw, ref fyCur, rowStride);
+        s.FxBass = DrawFxSlider(s, "bass", L.T("Суб-Бас (MaxxBass Гармоники)", "Sub-Bass (MaxxBass Harmonics)"), s.FxBass, 0, 100, 0, $"{s.FxBass:0}%", fx, fw, ref fyCur, rowStride);
+        s.FxExciter = DrawFxSlider(s, "exc", L.T("Воздух · Exciter + OTT (50%+)", "Air · Exciter + OTT (50%+)"), s.FxExciter, 0, 100, 0, $"{s.FxExciter:0}%", fx, fw, ref fyCur, rowStride);
         s.FxStereo = DrawFxSlider(s, "st", L.T("Сцена / 3D Stereo", "3D Stereo Width"), s.FxStereo, 0, 100, 0, $"{s.FxStereo:0}%", fx, fw, ref fyCur, rowStride);
         s.FxSpeed = DrawFxSlider(s, "spd", L.T("Скорость (Nightcore / Slowed)", "Speed (Nightcore / Slowed)"), s.FxSpeed, 0.50f, 1.60f, 1.0f, $"{s.FxSpeed:0.00}×", fx, fw, ref fyCur, rowStride, enabled: true, affectsSpeed: true);
         var stUnit = L.T(" пт", " st");
@@ -1018,9 +1072,14 @@ public static class AudioStudioPanel
             _scratching = true;
             _scratchLastAngle = MathF.Atan2(dyM, dxM);
             _scratchPos = mpv.TimePos;
+            _scratchVel = 0f;
+            _scratchBaseSpeed = s.AudioFxEnabled ? Math.Clamp(s.FxSpeed, 0.5f, 1.6f) : 1.0f;
             _scratchWasPlaying = !mpv.Paused;
-            _lastScratchSeekMs = now;
-            if (_scratchWasPlaying) mpv.SetPause(true);
+            _lastScratchCmdMs = 0;
+            // Live audible vinyl touch! Keep playback running with vinyl pitch unlocked (Technics SL-1200 / CDJ jog wheel!)
+            mpv.Command("set", "audio-pitch-correction", "no");
+            if (mpv.Paused) mpv.SetPause(false);
+            mpv.SetSpeed(0.28); // audible hand-on-vinyl drag slowdown immediately!
             Sfx.Tick();
         }
         if (_scratching && UI.Down && mpv.HasMedia)
@@ -1031,13 +1090,30 @@ public static class AudioStudioPanel
             while (dAng < -MathF.PI) dAng += MathF.PI * 2f;
             _scratchLastAngle = ang;
             _platterAngle = (_platterAngle + dAng) % (MathF.PI * 2f);
-            // 1.8s per full turntable revolution — snappy DJ jog/scratch feel!
-            double dSec = (dAng / (MathF.PI * 2f)) * 1.8;
-            _scratchPos = Math.Clamp(_scratchPos + dSec, 0, Math.Max(0, mpv.Duration - 0.1));
-            if (Math.Abs(dAng) > 0.015f && now - _lastScratchSeekMs >= 42)
+
+            // Angular velocity (rad/s) -> live audible vinyl speed & pitch warp!
+            float instVel = dAng / MathF.Max(0.008f, dt);
+            _scratchVel += (instVel - _scratchVel) * 0.42f;
+            _scratchPos = mpv.TimePos;
+
+            if (now - _lastScratchCmdMs >= 32)
             {
-                _lastScratchSeekMs = now;
-                mpv.Command("seek", _scratchPos.ToString("0.###", CultureInfo.InvariantCulture), "absolute+exact");
+                _lastScratchCmdMs = now;
+                if (_scratchVel < -1.1f)
+                {
+                    // Counter-clockwise flick -> audible vinyl back-scratch zip + crisp step back!
+                    double stepBack = Math.Clamp(-_scratchVel * 0.055, 0.08, 0.42);
+                    double target = Math.Max(0, mpv.TimePos - stepBack);
+                    mpv.SetSpeed(Math.Clamp(0.45f + MathF.Min(1.6f, -_scratchVel * 0.14f), 0.45f, 2.1f));
+                    mpv.Command("seek", target.ToString("0.###", CultureInfo.InvariantCulture), "absolute+exact");
+                    _scratchPos = target;
+                }
+                else
+                {
+                    // Holding still = deep 0.22x drag; clockwise spin = live pitch-up 0.30x..2.50x!
+                    float sp = Math.Clamp(0.22f + MathF.Max(0f, _scratchVel) * 0.34f, 0.22f, 2.50f);
+                    mpv.SetSpeed(sp);
+                }
             }
             UI.Hand();
         }
@@ -1109,8 +1185,8 @@ public static class AudioStudioPanel
 
         // Hint line below platter
         var hintTxt = _scratching
-            ? L.T("Скрэтч: ", "Scratch: ") + Fmt.Time(_scratchPos)
-            : L.T("Тяни диск — скрэтч · колесо — темп", "Drag platter to scratch · wheel = tempo");
+            ? (_scratchVel < -1.1f ? L.T("⏪ Скрэтч назад · ", "⏪ Back-scratch · ") : L.T("Винил-джог · ", "Vinyl jog · ")) + $"{liveSpd:0.00}×"
+            : L.T("Крути винил — живой скрэтч · колесо — темп", "Spin vinyl = live pitch/scratch · wheel = tempo");
         var hintRun = Gfx.Text(hintTxt, 10.5f, 500, deckBox.W - 20f);
         Gfx.Draw(hintRun, deckBox.X + (deckBox.W - hintRun.W) * 0.5f, cy + rad + 12f, _scratching ? 0xFFFFB830 : Th.Sub);
 
@@ -1135,15 +1211,20 @@ public static class AudioStudioPanel
             else if (UI.Click(UI.Id(pid), pr)) onClick();
         }
 
-        // Row A: VINYL BRAKE | PLAY/PAUSE
-        bool braked = _brakeState != 0;
-        DjPad("dj:brake", new R(deckBox.X + 12f, padRowY, halfW, 32f),
-            braked ? L.T("⚡ РАЗГОН", "⚡ SPIN UP") : L.T("⚡ BRAKE", "⚡ BRAKE"),
+        // Row A: PLAY/PAUSE | VINYL BRAKE | BACKSPIN (3 crisp tactile DJ pads!)
+        float triW = (deckBox.W - 24f - padGap * 2f) / 3f;
+        DjPad("dj:play", new R(deckBox.X + 12f, padRowY, triW, 32f),
+            mpv.Paused ? "▶ PLAY" : "⏸ PAUSE",
+            playing, 0xFF39E68B, () => { _brakeState = 0; mpv.TogglePause(); });
+
+        bool braked = _brakeState is 1 or 2 or 3;
+        DjPad("dj:brake", new R(deckBox.X + 12f + triW + padGap, padRowY, triW, 32f),
+            braked ? L.T("⚡ РАЗГОН", "⚡ UP") : "⚡ BRAKE",
             braked, 0xFFFF4D94, () => TriggerVinylBrake(mpv, s));
 
-        DjPad("dj:play", new R(deckBox.X + 12f + halfW + padGap, padRowY, halfW, 32f),
-            mpv.Paused ? L.T("▶ ИГРАТЬ", "▶ PLAY") : L.T("⏸ ПАУЗА", "⏸ PAUSE"),
-            playing, 0xFF39E68B, () => { _brakeState = 0; mpv.TogglePause(); });
+        DjPad("dj:spin", new R(deckBox.X + 12f + (triW + padGap) * 2f, padRowY, triW, 32f),
+            "⏪ SPIN",
+            _brakeState == 4, 0xFF9B6BFF, () => TriggerBackspin(mpv, s));
 
         // Row B: HOLD 2× | HOLD 0.5× (momentary DJ spin/drop pads!)
         float padRow2Y = padRowY + 38f;
@@ -1235,8 +1316,8 @@ public static class AudioStudioPanel
         KillSwitch(1, "MID", s.FxKillMid, () => s.FxKillMid = !s.FxKillMid);
         KillSwitch(2, "HIGH", s.FxKillHigh, () => s.FxKillHigh = !s.FxKillHigh);
 
-        double[] loopLens = [0.25, 0.5, 1.0, 2.0];
-        string[] loopLbls = ["1/4", "1/2", "1s", "2s", "EXIT"];
+        double[] loopLens = [0.125, 0.25, 0.5, 1.0];
+        string[] loopLbls = ["1/8", "1/4", "1/2", "1s", "EXIT"];
         float lpW = (loopBoxW - 16f) / 5f;
         for (int i = 0; i < 5; i++)
         {
@@ -1277,7 +1358,7 @@ public static class AudioStudioPanel
         s.FxDrive = DrawFxSlider(s, "djdr", L.T("Тёплый перегруз (Tape / Tube Drive)", "Analog Tape / Tube Drive"),
             s.FxDrive, 0f, 100f, 0f, $"{s.FxDrive:0}%", mx, mw, ref my, stride);
 
-        s.FxMod = DrawFxSlider(s, "djmd", L.T("DJ Джет-Флэнжер (Jet Flanger)", "DJ Jet Flanger"),
+        s.FxMod = DrawFxSlider(s, "djmd", L.T("DJ Джет-Фейзер + Флэнжер", "DJ Jet Phaser + Flanger"),
             s.FxMod, 0f, 100f, 0f, $"{s.FxMod:0}%", mx, mw, ref my, stride);
 
         s.FxSpeed = DrawFxSlider(s, "djsp", L.T("Темп / Питч-фейдер (ПКМ = 1.00×)", "Tempo / Pitch Fader (right-click = 1.00×)"),

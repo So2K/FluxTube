@@ -10,7 +10,7 @@ internal static unsafe partial class W
         WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105, WM_COMMAND = 0x0111, WM_TIMER = 0x0113, WM_CTLCOLOREDIT = 0x0133, WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201,
         WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203, WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205, WM_MBUTTONDOWN = 0x0207, WM_MBUTTONUP = 0x0208, WM_MOUSEWHEEL = 0x020A,
         WM_XBUTTONUP = 0x020C, WM_CAPTURECHANGED = 0x0215, WM_MOUSELEAVE = 0x02A3, WM_DPICHANGED = 0x02E0, WM_MOVE = 0x0003, WM_ACTIVATE = 0x0006, WM_APP = 0x8000,
-        WM_MOUSEACTIVATE = 0x0021, WM_NCCALCSIZE = 0x0083, WM_NCHITTEST = 0x0084, WM_GETTEXTLENGTH = 0x000E, WM_ENTERSIZEMOVE = 0x0231, WM_EXITSIZEMOVE = 0x0232;
+        WM_MOUSEACTIVATE = 0x0021, WM_COPYDATA = 0x004A, WM_NCCALCSIZE = 0x0083, WM_NCHITTEST = 0x0084, WM_GETTEXTLENGTH = 0x000E, WM_ENTERSIZEMOVE = 0x0231, WM_EXITSIZEMOVE = 0x0232, WM_CLIPBOARDUPDATE = 0x031D;
 
     public const uint WS_OVERLAPPEDWINDOW = 0x00CF0000, WS_VISIBLE = 0x10000000, WS_CHILD = 0x40000000, WS_CLIPCHILDREN = 0x02000000,
         WS_CLIPSIBLINGS = 0x04000000, WS_POPUP = 0x80000000, WS_VSCROLL = 0x00200000,
@@ -42,6 +42,7 @@ internal static unsafe partial class W
     [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public uint cbSize; public RECT rcMonitor, rcWork; public uint dwFlags; }
     [StructLayout(LayoutKind.Sequential)] public struct WINDOWPLACEMENT { public uint length, flags, showCmd; public POINT ptMin, ptMax; public RECT rcNormal; }
     [StructLayout(LayoutKind.Sequential)] public struct PAINTSTRUCT { public nint hdc; public int fErase; public RECT rcPaint; public int fRestore, fIncUpdate; public fixed byte rgbReserved[32]; }
+    [StructLayout(LayoutKind.Sequential)] public struct COPYDATASTRUCT { public nuint dwData; public uint cbData; public nint lpData; }
 
     [LibraryImport("user32.dll")] public static partial ushort RegisterClassExW(WNDCLASSEXW* wc);
     [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)]
@@ -96,6 +97,10 @@ internal static unsafe partial class W
     [LibraryImport("user32.dll")] public static partial int TrackPopupMenu(nint menu, uint flags, int x, int y, int reserved, nint h, nint rect);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool DestroyMenu(nint menu);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool SetForegroundWindow(nint h);
+    [LibraryImport("user32.dll")] public static partial nint GetForegroundWindow();
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)] public static partial nint FindWindowW(string? cls, string? title);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool AddClipboardFormatListener(nint h);
+    [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool RemoveClipboardFormatListener(nint h);
     [LibraryImport("user32.dll")] public static partial nint BeginPaint(nint h, PAINTSTRUCT* ps);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool EndPaint(nint h, PAINTSTRUCT* ps);
     [LibraryImport("user32.dll")] public static partial int FillRect(nint dc, RECT* r, nint brush);

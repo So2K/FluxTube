@@ -141,6 +141,10 @@ public sealed class AppSettings
     public bool AudioOnlyMode { get; set; } = false;
     /// <summary>Music Mode stage art composition ("hero" = large album cover + full-bleed blurred canvas, "full" = full-screen crisp artwork stage).</summary>
     public string MusicStageBg { get; set; } = "hero";
+    /// <summary>User's regular browser open command saved before enabling FluxTube YouTube URL Router (used for all non-YouTube links).</summary>
+    public string FallbackBrowserCmd { get; set; } = "";
+    /// <summary>When enabled, copying any YouTube link in Telegram/Discord/outside FluxTube automatically opens it in FluxTube (zero browser change needed).</summary>
+    public bool AutoOpenCopiedYouTubeLinks { get; set; } = false;
     /// <summary>Automatically suspends mpv video decoding (vid=no) whenever FluxTube is minimized or viewing another tab.</summary>
     public bool AutoSuspendVideoWhenHidden { get; set; } = false;
     /// <summary>Live audio visualizer style ("bars_wave", "ribbon", "bars", "off").</summary>

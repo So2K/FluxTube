@@ -940,21 +940,26 @@ public static class Shell
     private static long _navAt, _toastAt;
     private static float _markY = -1, _markShown, _prevSideW = SideW;
     private static int _markIdx = -1;
-    private static float _shakeBassAvg, _shakeEnergy, _shakePhase;
-    public static R MusicAccent(R r, float strength = 1f)
-    {
-        float e = PageBeatMotion.Active ? 0 : _shakeEnergy * strength;
-        return new R(r.X + MathF.Sin(_shakePhase) * e * 7f - e * 2f,
-            r.Y + MathF.Cos(_shakePhase * 1.3f) * e * 5f - e * 2f, r.W + e * 4f, r.H + e * 4f);
-    }
+    public static R MusicStageRect;
+    public static bool OverMusicStage(float x, float y) => !AnyModalOpen && MusicStageRect.W > 0 && MusicStageRect.Contains(x, y);
+    private static long _musicVolHudUntil;
+    public static int MusicVolHudValue { get; private set; }
+    public static bool MusicVolHudActive => UI.Now < _musicVolHudUntil;
+
+    private static float _shakeBassAvg, _shakeEnergy;
+    public static R MusicAccent(R r, float strength = 1f) => r;
 
     public static void SetMusicVolume(int volume)
     {
         int value = Math.Clamp(volume, 0, 150);
+        if (value != AppSettings.Current.Volume) PlayVolumeSfx(value);
         AppSettings.Current.Volume = value;
         _volSaveDueAt = UI.Now + 450;
+        MusicVolHudValue = value;
+        _musicVolHudUntil = UI.Now + 1150;
         if (P.Muted && value > 0) P.Command("set", "mute", "no");
         P.SetVolumeSmooth(value, 0);
+        App.Invalidate();
     }
 
     public static bool TopBarControlAt(float x, float y)
@@ -1040,6 +1045,7 @@ public static class Shell
     {
         _args = args;
         ThumbPack.Open();
+        ImpulseBank.PrewarmAllAsync();
         MediaCache.IsActive = BgPlayers.HasVideo;
         ThreadPool.SetMinThreads(4, 2);
         _search = new Edit(L.T("Поиск или ссылка YouTube…", "Search or YouTube link…")) { Bg = () => Th.Card };
@@ -1187,6 +1193,8 @@ public static class Shell
             OpenInNewTab("video", "kJQP7kiw5Fk", "Luis Fonsi - Despacito ft. Daddy Yankee", "Luis Fonsi");
             OpenInNewTab("root", "downloads", "");
         }
+        if (LinkRouter.StartupUrl is { Length: > 0 } startUrl)
+            App.After(140, () => HandleDropped(startUrl, newTab: false, backgroundTab: false));
     }
 
     private static DateTime CookieStamp() => File.Exists(Paths.Cookies) ? File.GetLastWriteTimeUtc(Paths.Cookies) : default;
@@ -1822,17 +1830,11 @@ public static class Shell
             return;
         }
 
-        // Detect short musical transients + drive per-element FFT wave bounce (text, likes, waveform avatars, buttons!)
+        // Pure v9.2.2 per-element GPU bass/spectrum bounce for Audio-Only Music Mode (exempt Shorts!)
+        MusicStageRect = default;
         bool musicBounceOn = AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && _cur is not ShortsPage && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test;
         MusicBounce.Update(musicBounceOn, (float)UI.Dt);
-        if (musicBounceOn)
-        {
-            _shakeBassAvg = AudioAnalyzer.BassEnergy;
-            _shakeEnergy = AudioAnalyzer.BeatEnvelope;
-            _shakePhase = AudioAnalyzer.BeatPhase;
-            if (_shakeEnergy > 0.01f) UI.Animate();
-        }
-        else { _shakeEnergy = 0f; _shakeBassAvg = 0f; }
+        _shakeEnergy = 0f; _shakeBassAvg = 0f;
 
         // Tactile frosted/matte glass backdrop behind the entire window + GPU stylization & stencil glass pass 1
         Gfx.DrawFrostedBackdrop(w, h);
@@ -2931,11 +2933,17 @@ public static class Shell
             AppSettings.Current.Save();
         }
 
-        // Gentle idle cleanup (no blocking full Gen2 GC stalls)
+        // Gentle zero-stall idle memory reclamation (frees offscreen blur target 3.5s after scrolling, trims stale VRAM)
+        Gfx.TrimMemory(minimized: false);
         if (now - UI.LastInput > 5000)
         {
             Gfx.DropIdleText();
             UI.PruneCaches();
+        }
+        if (now - UI.LastInput > 15_000)
+        {
+            Images.TrimMemory(minimized: false);
+            MusicArt.Trim(P.CurrentVideoId);
         }
 
         var stamp = CookieStamp();

@@ -120,6 +120,7 @@ public static unsafe class Gfx
     private static ID2D1Effect? _mbEffect;
     private static int _mbBmpW, _mbBmpH;
     private static float _mbBmpScale;
+    private static long _mbLastUsedAt;
     private static int _mbDepth, _mbSavedClips;
     private static R _mbRegion;
     private static float _mbStdDev, _mbAngle;
@@ -130,8 +131,19 @@ public static unsafe class Gfx
         public float R, G, B, A;
         public void Dispose() { Brush?.Dispose(); Stops?.Dispose(); Brush = null; Stops = null; A = -1; }
     }
+    private sealed class LinearSlot
+    {
+        public ID2D1GradientStopCollection? Stops;
+        public ID2D1LinearGradientBrush? Brush;
+        public uint Rgb;
+        public float A0, A1, A2, Mid;
+        public void Dispose() { Brush?.Dispose(); Stops?.Dispose(); Brush = null; Stops = null; A0 = -1; }
+    }
     private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new(), new(), new(), new(), new()];
+    private static readonly LinearSlot[] _linears = [new(), new(), new()];
     private static readonly GradientStop[] _radialStopsBuf = new GradientStop[6];
+    private static readonly GradientStop[] _linearStopsBuf = new GradientStop[3];
+    private static int _linearCursor;
 
     public static void Init(nint hwnd)
     {
@@ -680,6 +692,7 @@ public static unsafe class Gfx
         DisposeMotionBlurResources();
         DisposeGlassResources();
         foreach (var s in _radials) s.Dispose();
+        foreach (var l in _linears) l.Dispose();
         ClearTextCache();
         while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
         try { DeviceLost?.Invoke(); } catch { }
@@ -767,6 +780,7 @@ public static unsafe class Gfx
         {
             EnsureMotionBlurResources();
             if (_mbBmp == null || _mbEffect == null) return false;
+            _mbLastUsedAt = Environment.TickCount64;
 
             int savedClips = _clipDepth;
             for (int i = savedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
@@ -1186,8 +1200,10 @@ public static unsafe class Gfx
         }
         else
         {
+            if (_sceneBmp != null) DisposeGlassTargets();
             _activeTarget = _target;
         }
+        _linearCursor = 0;
         DC.Target = _activeTarget;
         DC.BeginDraw();
         DC.Clear(ToColor(clear));
@@ -1413,7 +1429,7 @@ public static unsafe class Gfx
         {
             EnsureBackdropBaked(mode);
             if (_backdropBmp != null)
-                DC.DrawBitmap(_backdropBmp, new Vortice.RawRectF(0, 0, w, h), 1f, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
+                DC.DrawBitmap(_backdropBmp, new Vortice.RawRectF(0, 0, w, h), 1f, Vortice.Direct2D1.InterpolationMode.Linear, null, null);
         }
 
         // Custom wallpaper image (works WITH glass or INSTEAD of glass!)
@@ -1570,7 +1586,7 @@ public static unsafe class Gfx
     }
 
     public static void Image(ID2D1Bitmap bmp, R dest, float opacity = 1)
-        => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
+        => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.Linear, null, null);
 
     /// <summary>Hardware anti-aliased rounded image using a single reusable GPU bitmap brush — zero corner halo artifacts on any backdrop, pattern, or dashed border!</summary>
     public static void ImageRounded(ID2D1Bitmap bmp, R dest, float radius, float opacity = 1f)
@@ -1624,24 +1640,36 @@ public static unsafe class Gfx
         b.Bitmap = null;
     }
 
-    /// <summary>Vertical smooth scrim gradient (e.g. for cinematic full-bleed album art readability).</summary>
+    /// <summary>Zero-allocation cached vertical scrim gradient (eliminates 288+ COM GPU allocations/sec in Music Mode).</summary>
     public static void FillVerticalFade(R r, uint rgbColor, float topAlpha, float midAlpha, float botAlpha, float midStop = 0.52f)
     {
         if (r.W <= 0 || r.H <= 0) return;
-        float rf = ((rgbColor >> 16) & 255) / 255f;
-        float gf = ((rgbColor >> 8) & 255) / 255f;
-        float bf = (rgbColor & 255) / 255f;
-        using var stops = DC.CreateGradientStopCollection([
-            new GradientStop(0f, new Color4(rf, gf, bf, topAlpha)),
-            new GradientStop(Math.Clamp(midStop, 0.1f, 0.9f), new Color4(rf, gf, bf, midAlpha)),
-            new GradientStop(1f, new Color4(rf, gf, bf, botAlpha)),
-        ]);
-        using var brush = DC.CreateLinearGradientBrush(new LinearGradientBrushProperties(new Vector2(r.X, r.Y), new Vector2(r.X, r.Bottom)), stops);
-        DC.FillRectangle(Raw(r), brush);
+        float ms = Math.Clamp(midStop, 0.1f, 0.9f);
+        uint rgb = rgbColor & 0x00FFFFFFu;
+        var s = _linears[(uint)(_linearCursor++) % (uint)_linears.Length];
+        if (s.Brush == null || s.Rgb != rgb || MathF.Abs(s.A0 - topAlpha) > 0.003f || MathF.Abs(s.A1 - midAlpha) > 0.003f || MathF.Abs(s.A2 - botAlpha) > 0.003f || MathF.Abs(s.Mid - ms) > 0.003f)
+        {
+            s.Dispose();
+            float rf = ((rgb >> 16) & 255) / 255f;
+            float gf = ((rgb >> 8) & 255) / 255f;
+            float bf = (rgb & 255) / 255f;
+            _linearStopsBuf[0] = new GradientStop(0f, new Color4(rf, gf, bf, topAlpha));
+            _linearStopsBuf[1] = new GradientStop(ms, new Color4(rf, gf, bf, midAlpha));
+            _linearStopsBuf[2] = new GradientStop(1f, new Color4(rf, gf, bf, botAlpha));
+            s.Stops = DC.CreateGradientStopCollection(_linearStopsBuf, Gamma.StandardRgb, ExtendMode.Clamp);
+            s.Brush = DC.CreateLinearGradientBrush(new LinearGradientBrushProperties(new Vector2(r.X, r.Y), new Vector2(r.X, r.Bottom)), s.Stops);
+            s.Rgb = rgb; s.A0 = topAlpha; s.A1 = midAlpha; s.A2 = botAlpha; s.Mid = ms;
+        }
+        else
+        {
+            s.Brush.StartPoint = new Vector2(r.X, r.Y);
+            s.Brush.EndPoint = new Vector2(r.X, r.Bottom);
+        }
+        DC.FillRectangle(Raw(r), s.Brush);
     }
 
     public static void ImageRegion(ID2D1Bitmap bmp, R dest, R src, float opacity = 1)
-        => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.HighQualityCubic, (Vortice.RawRectF?)Raw(src), null);
+        => DC.DrawBitmap(bmp, (Vortice.RawRectF?)Raw(dest), opacity, Vortice.Direct2D1.InterpolationMode.Linear, (Vortice.RawRectF?)Raw(src), null);
 
     /// <summary>GPU bitmap straight from memory: raw premultiplied BGRA, or BC1 blocks (an eighth of the video memory).</summary>
     public static ID2D1Bitmap1 CreateBitmap(byte* data, int w, int h, bool bc1)
@@ -1797,6 +1825,79 @@ public static unsafe class Gfx
         return run;
     }
 
+    private readonly record struct GlyphSlot(string Ch, float Ox, float Oy, float W, float H, int Idx, TextRun Run);
+    private sealed class GlyphRunEntry { public required GlyphSlot[] Slots; public int TextGen; }
+    private static readonly Dictionary<TKey, GlyphRunEntry> _glyphCache = new();
+    private static int _textCacheGen;
+
+    /// <summary>
+    /// Per-character independent dancing vector text (exact DirectWrite kerning &amp; line wrapping cached once per string):
+    /// caches each glyph's DirectWrite TextRun directly inside GlyphSlot -> ZERO per-frame dictionary lookups!
+    /// </summary>
+    public static TextRun DrawDancingText(string text, float x, float y, float size, uint color, int weight = 600,
+        float maxW = 0, int lines = 2, bool shadow = false, float amp = 1.0f, uint accentMixColor = 0)
+    {
+        var run = Text(text, size, weight, maxW, lines);
+        if (string.IsNullOrEmpty(text) || run.Layout == null) return run;
+        if (!MusicBounce.Active || text.Length > 140)
+        {
+            if (shadow) Draw(run, x + 1f, y + 1.5f, Fade(0xFF000000, 0.58f));
+            Draw(run, x, y, color);
+            return run;
+        }
+
+        var key = Key(text, size, weight, maxW, lines, false);
+        if (!_glyphCache.TryGetValue(key, out var entry) || entry.TextGen != _textCacheGen)
+        {
+            if (_glyphCache.Count > 64) _glyphCache.Clear();
+            var list = new List<GlyphSlot>(text.Length);
+            float lineH = LineHeight(size, weight);
+            float maxY = lines > 0 ? lineH * lines + 1f : 100000f;
+            int visIdx = 0;
+            for (int i = 0; i < text.Length; i++)
+            {
+                char ch = text[i];
+                if (char.IsSurrogate(ch))
+                {
+                    if (char.IsHighSurrogate(ch) && i + 1 < text.Length) i++;
+                    continue;
+                }
+                if (char.IsWhiteSpace(ch)) continue;
+                run.Layout.HitTestTextPosition((uint)i, false, out float gx, out float gy, out var m);
+                if (gy >= maxY - 1f || (maxW > 0 && gx + m.Width > maxW + 4f)) continue;
+                var chStr = ch.ToString();
+                var chRun = Text(chStr, size, weight, 0, 1);
+                list.Add(new GlyphSlot(chStr, gx, gy, MathF.Max(4f, m.Width), MathF.Max(size, m.Height), visIdx++, chRun));
+            }
+            entry = new GlyphRunEntry { Slots = list.ToArray(), TextGen = _textCacheGen };
+            _glyphCache[key] = entry;
+        }
+
+        var slots = entry.Slots;
+        if (slots.Length == 0)
+        {
+            if (shadow) Draw(run, x + 1f, y + 1.5f, Fade(0xFF000000, 0.58f));
+            Draw(run, x, y, color);
+            return run;
+        }
+
+        for (int i = 0; i < slots.Length; i++)
+        {
+            var g = slots[i];
+            float gx = x + g.Ox, gy = y + g.Oy;
+            var gr = g.Run;
+            if (gr.Layout == null) gr = Text(g.Ch, size, weight, 0, 1);
+            var tf = MusicBounce.PushGlyph(new R(gx, gy, g.W, g.H), g.Idx, amp, out float energy);
+            uint col = accentMixColor != 0 && energy > 0.35f
+                ? Mix(color, accentMixColor, Math.Clamp((energy - 0.35f) * 0.55f, 0f, 0.48f))
+                : color;
+            if (shadow) Draw(gr, gx + 1f, gy + 1.5f, Fade(0xFF000000, 0.58f));
+            Draw(gr, gx, gy, col);
+            MusicBounce.Pop(tf);
+        }
+        return run;
+    }
+
     /// <summary>Icon glyph centred in the box.</summary>
     public static void Icon(string glyph, R box, float size, uint color)
     {
@@ -1815,18 +1916,40 @@ public static unsafe class Gfx
 
     private static void TrimTextCache()
     {
-        if (_cur.Count < 900) return;
+        if (_cur.Count < 700) return;
         foreach (var r in _prev.Values) r.Layout?.Dispose();
         _prev = _cur;
         _cur = new Dictionary<TKey, TextRun>(256);
+        _textCacheGen++;
     }
 
     /// <summary>Nothing is moving: layouts not drawn since the last trim are let go (they are rebuilt on demand).</summary>
     public static void DropIdleText()
     {
-        if (_prev.Count == 0) return;
-        foreach (var r in _prev.Values) r.Layout?.Dispose();
-        _prev = new Dictionary<TKey, TextRun>();
+        if (_prev.Count > 0)
+        {
+            foreach (var r in _prev.Values) r.Layout?.Dispose();
+            _prev = new Dictionary<TKey, TextRun>();
+            _textCacheGen++;
+        }
+    }
+
+    /// <summary>Reclaims idle offscreen GPU targets (~16-33 MB VRAM for motion blur &amp; glass when minimized/idle).</summary>
+    public static void TrimMemory(bool minimized)
+    {
+        long now = Environment.TickCount64;
+        if (_mbBmp != null && (minimized || now - _mbLastUsedAt > 3500))
+        {
+            _mbBmp.Dispose();
+            _mbBmp = null;
+            _mbBmpW = _mbBmpH = 0;
+        }
+        if (minimized)
+        {
+            DisposeGlassTargets();
+            DropIdleText();
+            _glyphCache.Clear();
+        }
     }
 
     public static void ClearTextCache()
@@ -1834,14 +1957,16 @@ public static unsafe class Gfx
         foreach (var r in _prev.Values) r.Layout?.Dispose();
         foreach (var r in _cur.Values) r.Layout?.Dispose();
         _prev.Clear(); _cur.Clear();
+        _glyphCache.Clear();
+        _textCacheGen++;
         while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
     }
 }
 
 /// <summary>
 /// Ultra-cheap per-element GPU bass/spectrum bounce for Audio-Only Music Mode (~0.0005ms per element, zero alloc).
-/// Each UI element reacts to its own FFT frequency band + kick impulse so buttons, tabs, sidebar icons, cover art,
-/// and cards hop, breathe, and tilt independently to the beat instead of shaking as one stiff rectangle.
+/// Pure v9.2.2 FFT transient physics (silky beat-locked hop, scale &amp; tilt per band) + optional Drive boost
+/// and per-glyph scatter dance for individual title/like characters.
 /// </summary>
 public static class MusicBounce
 {
@@ -1876,12 +2001,11 @@ public static class MusicBounce
         float high = AudioAnalyzer.HighEnergy;
         Bass = bass; Mid = mid; High = high;
 
+        // Exact v9.2.2 silky FFT bass transient envelope — tight, elastic, 100% locked to the rhythm!
         float avgAlpha = 1f - MathF.Exp(-dt * 6.5f);
         _bassAvg += (bass - _bassAvg) * avgAlpha;
-        // Fuse Draka1337's 3ms sample-domain BassOnsetDetector (BeatMotionStrength) directly with FFT transients!
-        float onsetKick = AudioAnalyzer.BeatMotionStrength * 1.15f + AudioAnalyzer.BassPressure * 0.35f;
-        float kickRaw = MathF.Max(onsetKick, MathF.Max(0f, bass - _bassAvg * 0.84f) * 2.8f + MathF.Max(0f, bass - 0.26f) * 0.85f);
-        Kick = MathF.Max(Kick * MathF.Exp(-dt * 14.5f), Math.Clamp(kickRaw, 0f, 1.55f));
+        float kickRaw = MathF.Max(0f, bass - _bassAvg * 0.84f) * 2.85f + MathF.Max(0f, bass - 0.24f) * 0.88f;
+        Kick = MathF.Max(Kick * MathF.Exp(-dt * 14.5f), Math.Clamp(kickRaw, 0f, 1.50f));
 
         var bands = AudioAnalyzer.Bands;
         float decay = MathF.Exp(-dt * 13.5f);
@@ -1891,13 +2015,13 @@ public static class MusicBounce
         {
             float v = bands[i];
             _bandAvg[i] += (v - _bandAvg[i]) * bandAvgA;
-            float trans = MathF.Max(0f, v - _bandAvg[i] * 0.78f) * 2.35f + v * 0.62f;
-            float next = MathF.Max(_bandPulse[i] * decay, Math.Clamp(trans, 0f, 1.45f));
+            float trans = MathF.Max(0f, v - _bandAvg[i] * 0.78f) * 2.40f + v * 0.64f;
+            float next = MathF.Max(_bandPulse[i] * decay, Math.Clamp(trans, 0f, 1.50f));
             _bandPulse[i] = next;
             if (next > maxE) maxE = next;
         }
 
-        _phase += dt * (11.5f + Kick * 17f);
+        _phase += dt * (11.5f + Kick * 17.5f);
         Active = maxE > 0.012f;
         if (Active) UI.Animate();
     }
@@ -1911,18 +2035,49 @@ public static class MusicBounce
         if (!Active) return prev;
         int b = band & 31;
         float kickShare = b < 8 ? 0.50f : b < 18 ? 0.24f : 0.12f;
-        float e = Math.Clamp(_bandPulse[b] * 0.76f + Kick * kickShare, 0f, 1.55f) * amp;
+        float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.32f : 1.0f;
+        float e = Math.Clamp(_bandPulse[b] * 0.78f + Kick * kickShare, 0f, 1.65f) * amp * drive;
         if (e <= 0.008f) return prev;
 
-        // Distinct phase per band so neighbouring items ripple & hop independently without clipping top chrome edges
+        // Distinct phase per band so neighbouring items ripple & hop independently like v9.2.2!
         float wave = MathF.Cos(_phase * 1.15f + b * 1.29f);
-        float dy = Math.Clamp((-0.55f + 0.45f * wave) * e * 4.6f, -6.5f, 4.5f);
-        float dx = Math.Clamp(MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 1.8f, -4.5f, 4.5f);
-        float sc = 1f + Math.Clamp(e * 0.036f, 0f, 0.068f);
-        float ang = Math.Clamp(MathF.Sin(_phase * 1.07f + b * 2.31f) * e * 0.022f * rotAmp, -0.04f, 0.04f);
+        float dy = Math.Clamp((-0.55f + 0.45f * wave) * e * 4.8f, -8.5f, 5.5f);
+        float dx = Math.Clamp(MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 2.0f, -5.5f, 5.5f);
+        float sc = 1f + Math.Clamp(e * 0.038f, 0f, 0.082f);
+        float ang = Math.Clamp(MathF.Sin(_phase * 1.07f + b * 2.31f) * e * 0.024f * rotAmp, -0.052f, 0.052f);
 
         var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.5f);
         var local = Matrix3x2.CreateScale(sc, sc, center)
+            * Matrix3x2.CreateRotation(ang, center)
+            * Matrix3x2.CreateTranslation(dx, dy);
+        Gfx.DC.Transform = local * prev;
+        return prev;
+    }
+
+    /// <summary>Per-letter scatter bounce: each character hops, tilts &amp; stretches wildly out-of-phase to its own FFT band!</summary>
+    public static Matrix3x2 PushGlyph(R rect, int charIdx, float amp, out float energy)
+    {
+        var prev = Gfx.DC.Transform;
+        energy = 0f;
+        if (!Active) return prev;
+        int b = (charIdx * 3 + 1) & 31;
+        float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.35f : 1.05f;
+        float e = Math.Clamp(_bandPulse[b] * 0.72f + Kick * 0.42f, 0f, 1.65f) * amp * drive;
+        energy = e;
+        if (e <= 0.01f) return prev;
+
+        // Prime-stepped phases make adjacent letters jump & tilt completely independently ("вразнобой")!
+        float ph1 = _phase * 1.38f + charIdx * 2.17f;
+        float ph2 = _phase * 1.09f + charIdx * 3.41f;
+        float ph3 = _phase * 1.24f + charIdx * 1.67f;
+        float dy = Math.Clamp((-0.42f + 0.88f * MathF.Sin(ph1)) * e * 7.2f, -10.5f, 6.8f);
+        float dx = Math.Clamp(MathF.Cos(ph2) * e * 2.1f, -3.2f, 3.2f);
+        float scY = 1f + Math.Clamp(e * 0.095f * (0.65f + 0.35f * MathF.Cos(ph1)), 0f, 0.19f);
+        float scX = 1f + Math.Clamp(e * 0.055f, 0f, 0.11f);
+        float ang = Math.Clamp(MathF.Sin(ph3) * e * 0.105f, -0.17f, 0.17f);
+
+        var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.55f);
+        var local = Matrix3x2.CreateScale(scX, scY, center)
             * Matrix3x2.CreateRotation(ang, center)
             * Matrix3x2.CreateTranslation(dx, dy);
         Gfx.DC.Transform = local * prev;

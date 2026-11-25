@@ -3,13 +3,14 @@ using System.Globalization;
 namespace FluxTube.Services;
 
 /// <summary>
-/// Studio-grade Mastering, True Stereo Convolution Reverb (`afir` + Abbey Road parallel bus), and Live DJ FX rack for libmpv:
-/// - 10-band constant-Q EQ + 3-band DJ Isolator Kill switches (LOW / MID / HIGH KILL)
-/// - Bi-polar Pioneer CDJ Resonant Filter (LPF &lt;- 0 -&gt; HPF)
-/// - PS1 / SP-1200 Bitcrusher (`acrusher`) + Analog Tube/Tape Soft-Clip Drive (`asoftclip`) + DJ Jet Flanger (`flanger`)
-/// - 100% bit-untouched Parallel Dry/Wet FFT Convolution Reverb (`asplit` + Abbey Road HP/LP + Pre-Delay + `afir` + `amix`)
-///   with 7 synthesized studio/cinema/PSX IRs + Custom `.wav` IR loader (REAPER ReaVerb / Bricasti / Lexicon compatible!)
-/// - Tape-locked Nightcore / Slowed+Shimmer + Formant-preserving pitch shift + Bauer BS2B Headphone 3D + Lookahead Limiter.
+/// VST-Class Studio Mastering, True Stereo FDN/Dattorro/Shimmer Convolution Reverb (`afir`), and Pioneer DJM-900 FX Engine:
+/// - 10-band constant-Q EQ + Steep 24 dB/oct 4-pole DJ Isolator Kills (LOW / MID / HIGH KILL)
+/// - Resonant Pioneer DJM-900 Sound Color Filter (LPF &lt;- 0 -&gt; HPF with live resonant cutoff peak!)
+/// - Waves MaxxBass-style Sub-Harmonics (`virtualbass` + stereo LFE foldback) + 62 Hz warm sub shelf
+/// - Aphex Aural Exciter (`aexciter`) + Transient Punch (`crystalizer`) + Real 3-Band Xfer OTT Multiband (`mcompand`)
+/// - 2x Oversampled Tube/Tape Drive (`asoftclip=tanh`) + PS1/SP-1200 Bitcrusher (`acrusher`) + Layered Club Phaser+Jet Flanger
+/// - True Unity-Calibrated Parallel Stereo Convolution Reverb (`asplit` + Abbey Road HP/LP + Pre-Delay + `afir=dry=1:wet=1:irnorm=-1` + wide wet sheen + `amix`)
+/// - Psychoacoustic Mastering Clipper (`apsyclip`) + Transparent Lookahead Limiter (`alimiter`) + Bauer BS2B 3D + 8D.
 /// </summary>
 public static class AudioDsp
 {
@@ -58,119 +59,119 @@ public static class AudioDsp
 
         new("Juicy", "Сочный Мастер", "Juicy Master", "studio", "Studio",
             [1.8f, 2.8f, 1.0f, -1.4f, -0.4f, 0.8f, 1.8f, 2.4f, 3.0f, 3.4f],
-            12, "plate", 24, 38, 24, 1.00f, false, 0, false, true, Drive: 14),
+            16, "plate", 28, 42, 26, 1.00f, false, 0, false, true, Drive: 14),
 
-        new("OttMaster", "OTT Гипер-Мастер", "OTT Hyper-Master", "studio", "Loud",
+        new("OttMaster", "OTT Гипер-Мастер", "OTT Hyper-Master", "studio", "OTT",
             [3.2f, 3.6f, 0.8f, -2.0f, -0.8f, 1.4f, 2.8f, 3.8f, 4.4f, 4.2f],
-            10, "plate", 36, 72, 32, 1.00f, false, 0, false, true, Drive: 26),
+            14, "plate", 42, 78, 34, 1.00f, false, 0, false, true, Drive: 26),
 
         new("WarmAnalog", "Тёплая Лента", "Tape Warmth", "studio", "Tape",
             [2.4f, 3.2f, 2.2f, 1.0f, 0.4f, 0.0f, -0.6f, -1.2f, -2.0f, -2.8f],
-            16, "vintage", 22, 24, 18, 1.00f, false, 0, false, true, Drive: 42),
+            22, "vintage", 26, 22, 18, 1.00f, false, 0, false, true, Drive: 44),
 
         new("StudioRef", "Студийный Баланс", "Studio Ref", "studio", "Crisp",
             [0.8f, 1.0f, 0.0f, -0.8f, 0.0f, 0.5f, 1.2f, 1.8f, 2.0f, 1.5f],
-            0, "room", 8, 20, 12, 1.00f, false, 0, false, true),
+            0, "room", 10, 24, 12, 1.00f, false, 0, false, true),
 
         new("CrystalAir", "Кристальный Верх", "Crystal Air", "studio", "Hi-Fi",
             [0.5f, 1.0f, 0.0f, -1.0f, -0.5f, 0.8f, 2.2f, 3.5f, 4.5f, 5.5f],
-            14, "plate", 10, 52, 32, 1.00f, false, 0, false, true),
+            18, "plate", 12, 58, 34, 1.00f, false, 0, false, true),
 
         new("Headphone3D", "Наушники 3D (BS2B)", "Headphone 3D", "studio", "Binaural",
             [1.4f, 1.6f, 0.4f, -0.6f, 0.0f, 0.6f, 1.4f, 2.0f, 2.4f, 2.2f],
-            16, "room", 16, 22, 18, 1.00f, false, 0, false, true, Headphone3D: true),
+            20, "room", 18, 24, 20, 1.00f, false, 0, false, true, Headphone3D: true),
 
         // Bass & Club
         new("BassBoost", "Bass Boost", "Bass Boost", "bass", "Sub",
             [5.5f, 5.0f, 2.5f, -0.5f, -1.0f, 0.0f, 1.2f, 1.8f, 2.0f, 1.5f],
-            10, "room", 58, 28, 20, 1.00f, false, 0, false, true, Drive: 18),
+            12, "room", 62, 32, 22, 1.00f, false, 0, false, true, Drive: 18),
 
         new("SubMonster", "Саб-Монстр", "Sub Monster", "bass", "808",
             [8.0f, 6.8f, 3.0f, -1.5f, -1.5f, 0.0f, 1.5f, 2.2f, 2.5f, 1.5f],
-            8, "room", 82, 34, 24, 1.00f, false, 0, false, true, Drive: 28),
+            10, "room", 86, 38, 26, 1.00f, false, 0, false, true, Drive: 28),
 
-        new("Phonk", "Phonk / Drift", "Phonk / Drift", "bass", "Punch",
+        new("Phonk", "Phonk / Drift", "Phonk / Drift", "bass", "OTT",
             [5.0f, 4.2f, 1.5f, -2.0f, -0.5f, 1.8f, 3.5f, 4.2f, 3.5f, 2.8f],
-            18, "plate", 56, 56, 34, 1.00f, false, 0, false, true, Drive: 48),
+            22, "plate", 60, 64, 36, 1.00f, false, 0, false, true, Drive: 50),
 
         new("Trap808", "Трэп / 808", "Trap / 808", "bass", "Hip-Hop",
             [6.5f, 5.2f, 1.8f, -1.8f, -0.8f, 0.5f, 1.5f, 2.8f, 4.0f, 3.5f],
-            12, "room", 62, 36, 26, 1.00f, false, 0, false, true, Drive: 20),
+            16, "room", 66, 40, 28, 1.00f, false, 0, false, true, Drive: 22),
 
         new("ClubEdm", "Клуб / EDM", "Club / EDM", "bass", "Wide",
             [4.5f, 4.0f, 1.5f, -1.5f, -0.8f, 0.8f, 2.2f, 3.2f, 3.8f, 3.5f],
-            22, "hall", 45, 48, 44, 1.00f, false, 0, false, true, Drive: 16),
+            26, "hall", 48, 56, 46, 1.00f, false, 0, false, true, Drive: 18),
 
         new("DnBJungle", "DnB / Jungle", "DnB / Jungle", "bass", "Break",
             [5.2f, 4.5f, 1.5f, -1.5f, 0.0f, 1.2f, 2.8f, 3.5f, 4.2f, 3.5f],
-            15, "plate", 48, 44, 34, 1.00f, false, 0, false, true, Drive: 22),
+            18, "plate", 52, 52, 36, 1.00f, false, 0, false, true, Drive: 24),
 
         new("RockMetal", "Рок / Метал", "Rock / Metal", "bass", "Drive",
             [3.5f, 3.0f, 1.0f, -2.0f, -1.2f, 1.5f, 3.2f, 3.8f, 2.8f, 2.0f],
-            12, "room", 26, 42, 24, 1.00f, false, 0, false, true, Drive: 32),
+            16, "room", 30, 48, 26, 1.00f, false, 0, false, true, Drive: 34),
 
         // Vibes & Shimmer
         new("Nightcore", "Nightcore", "Nightcore", "vibes", "1.22×",
             [2.5f, 2.2f, 0.8f, -1.0f, 0.0f, 1.0f, 2.2f, 3.0f, 3.6f, 4.0f],
-            16, "plate", 24, 34, 26, 1.22f, true, 0, false, true),
+            20, "plate", 26, 38, 28, 1.22f, true, 0, false, true),
 
         new("NightcoreUltra", "Hyperpop / Nightcore+", "Hyperpop / Nightcore+", "vibes", "1.30×",
             [3.8f, 3.0f, 1.2f, -1.5f, -0.5f, 1.5f, 2.8f, 3.8f, 4.6f, 5.0f],
-            22, "plate", 34, 48, 38, 1.30f, true, 0, false, true, Drive: 24),
+            24, "plate", 36, 56, 40, 1.30f, true, 0, false, true, Drive: 24),
 
         new("ValhallaShimmer", "Valhalla Шиммер", "Valhalla Shimmer", "vibes", "Dream",
             [2.0f, 2.2f, 0.6f, -1.2f, -0.4f, 0.6f, 1.8f, 2.8f, 3.8f, 4.2f],
-            58, "shimmer", 20, 26, 52, 1.00f, false, 0, false, true),
+            62, "shimmer", 22, 28, 54, 1.00f, false, 0, false, true),
 
         new("SlowedReverb", "Slowed + Shimmer", "Slowed + Shimmer", "vibes", "0.84×",
             [3.8f, 3.4f, 1.6f, -0.8f, -1.0f, -0.2f, 1.2f, 2.0f, 2.8f, 2.5f],
-            64, "shimmer", 34, 22, 48, 0.84f, true, 0, false, true),
+            66, "shimmer", 36, 24, 50, 0.84f, true, 0, false, true),
 
         new("DoomerNight", "Doomer / Ночь", "Doomer / Night", "vibes", "0.90×",
             [3.2f, 3.8f, 2.2f, 0.2f, -1.2f, -1.5f, -0.8f, 0.4f, -1.5f, -3.5f],
-            50, "vintage", 28, 14, 42, 0.90f, true, 0, false, true, Drive: 22),
+            54, "vintage", 30, 16, 44, 0.90f, true, 0, false, true, Drive: 24),
 
         new("Space8D", "8D Космос", "8D Space", "vibes", "3D",
             [2.5f, 2.2f, 0.8f, -1.0f, 0.0f, 0.5f, 1.8f, 2.6f, 3.2f, 3.5f],
-            52, "shimmer", 26, 28, 52, 1.00f, false, 0, true, true),
+            54, "shimmer", 28, 30, 54, 1.00f, false, 0, true, true),
 
         new("Vaporwave", "Vaporwave 80s", "Vaporwave 80s", "vibes", "0.78×",
             [3.5f, 3.0f, 1.4f, 0.4f, -0.8f, -0.5f, 1.0f, 1.8f, 1.0f, -1.5f],
-            58, "vintage", 30, 18, 60, 0.78f, true, 0, false, true, Drive: 28, Mod: 32),
+            58, "vintage", 32, 20, 60, 0.78f, true, 0, false, true, Drive: 30, Mod: 36),
 
         new("ConcertHall", "Lexicon 480L Зал", "Lexicon 480L Hall", "vibes", "Live",
             [2.0f, 2.4f, 0.8f, -0.6f, 0.0f, 0.8f, 1.8f, 2.5f, 2.2f, 1.6f],
-            42, "hall", 20, 26, 44, 1.00f, false, 0, false, true),
+            46, "hall", 22, 28, 46, 1.00f, false, 0, false, true),
 
         // DJ & Retro Hardware
         new("PsxJungle", "PS1 / PSX SPU", "PS1 / PSX SPU", "dj", "1996",
             [3.2f, 3.8f, 2.0f, 0.4f, -0.6f, 0.8f, 1.6f, 0.6f, -2.5f, -5.5f],
-            46, "psx", 32, 20, 28, 1.00f, false, 0, false, true, Crush: 28, Drive: 22),
+            48, "psx", 34, 22, 30, 1.00f, false, 0, false, true, Crush: 28, Drive: 24),
 
         new("Lofi", "SP-1200 / Винил", "SP-1200 / Vinyl", "dj", "Lo-Fi",
             [2.4f, 3.4f, 2.2f, 1.2f, 0.4f, -0.5f, -2.0f, -4.2f, -6.5f, -8.5f],
-            30, "vintage", 20, 12, 18, 0.94f, true, 0, false, true, Crush: 36, Drive: 48),
+            34, "vintage", 22, 14, 20, 0.94f, true, 0, false, true, Crush: 36, Drive: 48),
 
         new("BitcrushHyper", "Bitcrush / Breakcore", "Bitcrush / Breakcore", "dj", "8-Bit",
             [4.0f, 3.5f, 1.0f, -1.5f, 0.0f, 1.6f, 3.0f, 3.8f, 3.2f, 2.0f],
-            20, "psx", 42, 40, 32, 1.00f, false, 0, false, true, Crush: 62, Drive: 44),
+            24, "psx", 44, 48, 34, 1.00f, false, 0, false, true, Crush: 62, Drive: 46),
 
-        new("DjJetSwirl", "DJ Jet Flanger", "DJ Jet Flanger", "dj", "Club",
+        new("DjJetSwirl", "DJ Jet Phaser", "DJ Jet Phaser", "dj", "Club",
             [3.5f, 3.0f, 1.0f, -1.2f, 0.0f, 1.0f, 2.2f, 3.0f, 3.2f, 2.5f],
-            26, "hall", 36, 36, 44, 1.00f, false, 0, false, true, Mod: 66),
+            30, "hall", 38, 42, 46, 1.00f, false, 0, false, true, Mod: 70),
 
         new("ClubUnderwater", "Клуб за стеной (LPF)", "Outside Club (LPF)", "dj", "LPF",
             [5.0f, 4.5f, 2.0f, 0.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f],
-            42, "hall", 52, 10, 28, 1.00f, false, 0, false, true, DjFilter: -68),
+            46, "hall", 54, 12, 30, 1.00f, false, 0, false, true, DjFilter: -68),
 
         // Voice & Cinema
         new("CinemaImax", "Кино / IMAX Зал", "Cinema / IMAX", "voice", "IMAX",
             [4.5f, 3.8f, 1.2f, -1.0f, 0.4f, 1.8f, 2.8f, 2.4f, 2.6f, 2.2f],
-            34, "cinema", 40, 34, 54, 1.00f, false, 0, false, true),
+            38, "cinema", 44, 38, 54, 1.00f, false, 0, false, true),
 
         new("Vocal", "Вокал / Подкаст", "Vocal / Podcast", "voice", "Clear",
             [-6.5f, -3.5f, -1.2f, 0.5f, 1.8f, 3.0f, 4.2f, 3.2f, 1.8f, 0.8f],
-            6, "room", 0, 32, 8, 1.00f, false, 0, false, true),
+            8, "room", 0, 34, 8, 1.00f, false, 0, false, true),
 
         new("LateNight", "Ночной режим", "Late Night", "voice", "Soft",
             [-3.0f, -1.5f, 0.5f, 1.2f, 2.0f, 2.5f, 2.5f, 1.5f, 0.5f, -1.0f],
@@ -311,23 +312,22 @@ public static class AudioDsp
 
     private static string F(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 
-    private static (int PreDelayMs, int HpHz, int LpHz, float WetScale) RoomParams(string room) => room switch
+    private static (int PreDelayMs, int HpHz, int LpHz, float WetScale, float WetWide) RoomParams(string room) => room switch
     {
-        "room" => (14, 170, 11500, 0.72f),
-        "plate" => (22, 230, 13500, 0.84f),
-        "cinema" => (38, 165, 11000, 0.92f),
-        "shimmer" or "cathedral" => (42, 210, 14000, 0.96f),
-        "psx" => (18, 200, 7800, 0.88f),
-        "vintage" => (26, 220, 6800, 0.86f),
-        "custom" => (24, 180, 12500, 0.88f),
-        _ => (32, 195, 11500, 0.86f), // "hall" 480L
+        "room" => (10, 155, 12500, 0.85f, 1.12f),
+        "plate" => (18, 210, 15000, 0.96f, 1.18f),
+        "cinema" => (32, 145, 11800, 1.08f, 1.24f),
+        "shimmer" or "cathedral" => (36, 185, 16500, 1.16f, 1.28f),
+        "psx" => (14, 180, 8400, 0.90f, 1.16f),
+        "vintage" => (22, 195, 7200, 0.68f, 1.20f),
+        "custom" => (20, 165, 14000, 1.00f, 1.16f),
+        _ => (26, 175, 13000, 1.02f, 1.22f), // "hall" Lexicon 480L
     };
 
     /// <summary>
-    /// Builds a clean, studio-grade mpv `af` filter graph (`lavfi=[...]`) featuring:
-    /// - True parallel wet/dry FFT stereo convolution reverb (`asplit` + Abbey Road EQ + Pre-Delay + `afir` + `amix`)
-    ///   so dry vocals &amp; drums stay 100% crisp, punchy, and comb-free!
-    /// - Live DJ Color Filter, 3-band Isolator Kills, PS1 Bitcrusher, Analog Tube/Tape Drive, Jet Flanger, BS2B, and Lookahead Limiter.
+    /// Builds a clean, zero-warning, studio VST-grade mpv `af` filter graph (`lavfi=[...]`).
+    /// IMPORTANT: in FFmpeg `afir`, `dry` is INPUT gain BEFORE convolution (must be `1`, NEVER `0`!),
+    /// `wet` is OUTPUT gain (`1`), and `irnorm=-1` preserves our exact unity L2 normalization from ImpulseBank!
     /// </summary>
     public static string BuildFilterGraph(AppSettings s)
     {
@@ -339,12 +339,12 @@ public static class AudioDsp
             if (ir8d != null)
             {
                 var esc8 = ImpulseBank.EscapeForLavfi(ir8d);
-                return $"lavfi=[apulsator=hz=0.14:width=1:amount=0.82,asplit=2[d8][w8];[w8]highpass=f=200:poles=2,adelay=28|28[wp8];amovie='{esc8}',aresample=48000[ir8];[wp8][ir8]afir=dry=0:wet=10:irnorm=-1[rv8];[d8][rv8]amix=inputs=2:weights=1 0.34:normalize=0:duration=first]";
+                return $"lavfi=[aformat=channel_layouts=stereo:sample_rates=48000,apulsator=hz=0.14:width=1:amount=0.82,asplit=2[d8][w8];[w8]highpass=f=185:poles=2,adelay=24|24[wp8];amovie='{esc8}',aformat=channel_layouts=stereo:sample_rates=48000[ir8];[wp8][ir8]afir=dry=1:wet=1:irnorm=-1:minp=2048:maxp=8192,extrastereo=m=1.22:c=1[rv8];[d8][rv8]amix=inputs=2:weights=0.92 0.48:normalize=0:duration=first]";
             }
             return "lavfi=[apulsator=hz=0.14:width=1:amount=0.82]";
         }
 
-        var pre = new List<string>(24);
+        var pre = new List<string>(28);
         float bass = Math.Clamp(s.FxBass, 0f, 100f) / 100f;
         float exc = Math.Clamp(s.FxExciter, 0f, 100f) / 100f;
         float rev = Math.Clamp(s.FxReverb, 0f, 100f) / 100f;
@@ -358,8 +358,13 @@ public static class AudioDsp
         for (int i = 0; i < Freqs.Length; i++)
             if (s.EqBands[i] > maxBoost) maxBoost = s.EqBands[i];
 
-        // 1. Gain-staging headroom before boosts (zero internal clipping)
-        float preCutDb = Math.Clamp(maxBoost * 0.42f + bass * 4.2f + exc * 1.6f + drive * 2.4f, 0f, 10.5f);
+        // 0. Guarantee clean stereo 48kHz floating-point processing bus for convolution & stereo VST filters
+        bool needsStereo48 = rev > 0.01f || s.PlayerAudio8D || bass >= 0.22f || exc > 0.02f || mod > 0.02f;
+        if (needsStereo48)
+            pre.Add("aformat=channel_layouts=stereo:sample_rates=48000");
+
+        // 1. Gain-staging headroom before boosts (zero internal clipping!)
+        float preCutDb = Math.Clamp(maxBoost * 0.40f + bass * 4.4f + exc * 2.6f + drive * 2.2f, 0f, 11.0f);
         if (preCutDb > 0.25f)
             pre.Add($"volume=-{F(preCutDb)}dB");
 
@@ -370,25 +375,42 @@ public static class AudioDsp
             pre.Add($"rubberband=pitch={ratio.ToString("0.0000", CultureInfo.InvariantCulture)}:formant=preserved");
         }
 
-        // 3. 3-Band DJ Isolator Kill Switches (Pioneer DJM-900 style instant kills!)
-        if (s.FxKillLow) pre.Add("highpass=f=280:poles=2");
-        if (s.FxKillMid) pre.Add("equalizer=f=1000:t=o:w=2.0:g=-28");
-        if (s.FxKillHigh) pre.Add("lowpass=f=3200:poles=2");
+        // 3. Pioneer DJM-900 Steep 24 dB/oct 4-Pole DJ Isolator Kill Switches!
+        if (s.FxKillLow)
+        {
+            pre.Add("highpass=f=300:poles=2");
+            pre.Add("highpass=f=300:poles=2");
+        }
+        if (s.FxKillMid)
+        {
+            pre.Add("equalizer=f=920:t=o:w=1.8:g=-30");
+            pre.Add("equalizer=f=1850:t=o:w=1.1:g=-18");
+        }
+        if (s.FxKillHigh)
+        {
+            pre.Add("lowpass=f=2400:poles=2");
+            pre.Add("lowpass=f=2400:poles=2");
+        }
 
-        // 4. Bi-Polar Pioneer CDJ Resonant DJ Color Filter (-100 = LPF muffle, +100 = HPF drop riser!)
+        // 4. Bi-Polar Pioneer DJM-900 Resonant Sound Color Filter (-100 = Resonant LPF, +100 = Resonant HPF Riser!)
+        // Adding a sharp resonant Q=3.2 boost right at the moving cutoff frequency gives the authentic liquid club sweep!
         if (djf < -0.02f)
         {
             float t = -djf; // 0..1
-            float cutoff = 18000f * MathF.Pow(160f / 18000f, t);
-            float q = 0.85f + t * 1.45f;
-            pre.Add($"lowpass=f={F(cutoff)}:poles=2:width_type=q:w={F(q)}");
+            float cutoff = 17500f * MathF.Pow(145f / 17500f, t);
+            float resDb = 2.4f + t * 5.2f;
+            pre.Add($"lowpass=f={F(cutoff)}:poles=2");
+            pre.Add($"lowpass=f={F(cutoff * 1.08f)}:poles=2");
+            pre.Add($"equalizer=f={F(cutoff)}:t=q:w=3.2:g={F(resDb)}");
         }
         else if (djf > 0.02f)
         {
             float t = djf;
-            float cutoff = 35f * MathF.Pow(4200f / 35f, t);
-            float q = 0.85f + t * 1.45f;
-            pre.Add($"highpass=f={F(cutoff)}:poles=2:width_type=q:w={F(q)}");
+            float cutoff = 42f * MathF.Pow(4600f / 42f, t);
+            float resDb = 2.4f + t * 5.4f;
+            pre.Add($"highpass=f={F(cutoff)}:poles=2");
+            pre.Add($"highpass=f={F(cutoff * 0.92f)}:poles=2");
+            pre.Add($"equalizer=f={F(cutoff)}:t=q:w=3.2:g={F(resDb)}");
         }
 
         // 5. 10-band musical constant-Q graphic EQ
@@ -399,78 +421,125 @@ public static class AudioDsp
             pre.Add($"equalizer=f={Freqs[i]}:t=q:w=1.41:g={F(g)}");
         }
 
-        // 6. Clean low-shelf sub-bass punch (65Hz warm shelf)
+        // 6. Waves MaxxBass / RBass Sub-Bass Engine: warm 62 Hz sub shelf + psychoacoustic sub-harmonics folded cleanly back to stereo!
         if (bass > 0.01f && !s.FxKillLow)
-            pre.Add($"bass=g={F(bass * 7.5f)}:f=65:t=s:w=0.55");
+        {
+            pre.Add($"bass=g={F(bass * 6.8f)}:f=62:t=s:w=0.58");
+            if (bass >= 0.22f)
+            {
+                float str = Math.Clamp(0.85f + (bass - 0.22f) * 2.55f, 0.85f, 2.85f);
+                float lfeFold = Math.Clamp(0.88f + bass * 0.22f, 0.88f, 1.10f);
+                pre.Add($"virtualbass=cutoff=195:strength={F(str)}");
+                // virtualbass outputs 2.1 (FL, FR, LFE): fold LFE (c2) back into stereo L/R so headphone sub stays massive!
+                pre.Add($"pan=stereo|c0=c0+{F(lfeFold)}*c2|c1=c1+{F(lfeFold)}*c2");
+            }
+        }
 
-        // 7. Analog Tube/Tape Soft-Clip Drive + subtle vinyl pitch flutter
+        // 7. 2x Oversampled Analog Tube/Tape Soft-Clip Drive (RC-20 / Sausage Fattener warmth!)
         if (drive > 0.02f)
         {
-            float boostDb = drive * 7.5f;
+            float boostDb = drive * 8.2f;
             pre.Add($"volume=+{F(boostDb)}dB");
-            pre.Add("asoftclip=type=tanh:threshold=0.78:output=0.92");
-            pre.Add($"volume=-{F(boostDb * 0.58f)}dB");
+            pre.Add("asoftclip=type=tanh:threshold=0.72:output=0.94:oversample=2");
+            pre.Add($"volume=-{F(boostDb * 0.62f)}dB");
             if (drive > 0.35f)
-                pre.Add($"vibrato=f=1.6:d={F((drive - 0.35f) * 0.045f)}");
+            {
+                float tapeAmt = (drive - 0.35f) / 0.65f;
+                pre.Add($"vibrato=f=1.45:d={F(tapeAmt * 0.042f)}");
+                pre.Add($"treble=g=-{F(tapeAmt * 1.8f)}:f=10500:t=s:w=0.6");
+            }
         }
 
         // 8. PS1 / SP-1200 Lo-Fi Bitcrusher & Sample-Rate Decimator
         if (crush > 0.02f)
         {
-            float bits = Math.Clamp(14.5f - crush * 9.5f, 4.5f, 15f);
-            int samples = Math.Clamp((int)MathF.Round(1f + crush * crush * 9f), 1, 10);
-            float mix = Math.Clamp(0.28f + crush * 0.72f, 0.25f, 1f);
-            pre.Add($"acrusher=level_in=1:level_out=1:bits={F(bits)}:samples={samples}:mode=log:aa=0.35:mix={F(mix)}");
+            float bits = Math.Clamp(14.0f - crush * 9.5f, 4.2f, 14.5f);
+            int samples = Math.Clamp((int)MathF.Round(1f + crush * crush * 10f), 1, 11);
+            float mix = Math.Clamp(0.32f + crush * 0.68f, 0.30f, 1f);
+            pre.Add($"acrusher=level_in=1:level_out=1:bits={F(bits)}:samples={samples}:mode=log:aa=0.30:mix={F(mix)}");
         }
 
-        // 9. Musical studio brilliance air shelf + smooth soft-knee bus glue compressor
-        if (exc > 0.01f)
+        // 9. Aphex Aural Exciter + Transient Crystalizer + Real 3-Band Xfer OTT Multiband Glue!
+        if (exc > 0.02f)
         {
-            pre.Add($"treble=g={F(exc * 4.0f)}:f=6800:t=s:w=0.6");
-            pre.Add($"acompressor=threshold=-18dB:ratio={F(1.6f + exc * 1.8f)}:attack=10:release=125:knee=4:makeup={F(0.8f + exc * 2.2f)}dB");
+            // Real harmonic high-frequency brilliance generator (Aphex Exciter)
+            float exAmt = Math.Clamp(0.45f + exc * 2.6f, 0.45f, 3.1f);
+            float exDrv = Math.Clamp(4.0f + exc * 4.8f, 4.0f, 8.8f);
+            pre.Add($"aexciter=level_in=1:level_out=1:amount={F(exAmt)}:drive={F(exDrv)}:blend=0:freq=6200:ceil=16500");
+
+            // Transient crispness & punch shaper
+            float crys = Math.Clamp(exc * 2.2f, 0.25f, 2.2f);
+            pre.Add($"crystalizer=i={F(crys)}:c=false");
+
+            if (exc >= 0.48f)
+            {
+                // Real 3-band Xfer OTT / Soundgoodizer multiband upward+downward compressor (220Hz / 2.4kHz / 20kHz)!
+                float ott = (exc - 0.48f) / 0.52f; // 0..1 OTT intensity
+                float upBoost = Math.Clamp(6f + ott * 7f, 6f, 13f);
+                string tLow = $"-70/-{F(70 - upBoost)},-38/-{F(38 - upBoost)},-18/-17,0/-{F(4.5f + ott * 2.5f)}";
+                string tMid = $"-70/-{F(70 - upBoost * 0.92f)},-38/-{F(38 - upBoost * 0.92f)},-18/-16.5,0/-{F(4.0f + ott * 2.2f)}";
+                string tHi  = $"-70/-{F(70 - upBoost * 1.05f)},-38/-{F(38 - upBoost * 1.05f)},-18/-16,0/-{F(3.5f + ott * 2.0f)}";
+                pre.Add($"mcompand=args='0.006,0.085 6 {tLow} 220 | 0.003,0.060 6 {tMid} 2400 | 0.001,0.042 6 {tHi} 20000'");
+                pre.Add($"volume=-{F(2.2f + ott * 2.8f)}dB");
+            }
+            else
+            {
+                pre.Add($"acompressor=threshold=-18dB:ratio={F(1.6f + exc * 2.2f)}:attack=9:release=110:knee=4:makeup={F(0.8f + exc * 2.2f)}dB");
+            }
         }
 
-        // 10. DJ Jet Flanger / Stereo Swirl Modulation
+        // 10. Club DJ Jet Swirl: Layered Analog Phaser (`aphaser`) + Stereo Jet Flanger (`flanger`)!
         if (mod > 0.02f)
         {
-            float depth = 1.2f + mod * 5.2f;
-            float regen = 18f + mod * 54f;
-            float speed = 0.22f + mod * 0.65f;
-            pre.Add($"flanger=delay=2.5:depth={F(depth)}:regen={F(regen)}:width=75:speed={F(speed)}:shape=sin:phase=45");
+            float phDecay = Math.Clamp(0.28f + mod * 0.40f, 0.25f, 0.68f);
+            float phSpd = Math.Clamp(0.28f + mod * 0.85f, 0.25f, 1.25f);
+            // Keep in_gain*(1+decay)*out_gain < 1.0 for zero headroom clipping warning, then clean makeup
+            pre.Add($"aphaser=in_gain=0.52:out_gain=0.60:delay=3.2:decay={F(phDecay)}:speed={F(phSpd)}:type=t");
+            pre.Add("volume=+2.2dB");
+
+            float depth = 1.6f + mod * 5.8f;
+            float regen = 24f + mod * 58f;
+            float speed = 0.24f + mod * 0.72f;
+            pre.Add($"flanger=delay=2.4:depth={F(depth)}:regen={F(regen)}:width=78:speed={F(speed)}:shape=s:phase=45");
         }
 
-        // 11. Mid/Side 3D stereo widening & optional Bauer BS2B binaural headphone crossfeed
+        // 11. Mid/Side 3D stereo widening & optional Bauer BS2B binaural headphone crossfeed + 8D
         if (stereo > 0.01f)
-            pre.Add($"extrastereo=m={F(1.0f + stereo * 1.05f)}:c=1");
+            pre.Add($"extrastereo=m={F(1.0f + stereo * 1.10f)}:c=1");
         if (s.FxHeadphone3D)
             pre.Add("bs2b=profile=jmeier");
         if (s.PlayerAudio8D)
             pre.Add("apulsator=hz=0.14:width=1:amount=0.84");
 
-        // 12. Post-reverb makeup & transparent lookahead master bus limiter
+        // 12. Post-reverb makeup + Psychoacoustic Mastering Clipper (`apsyclip`) + Lookahead Safety Limiter!
         var post = new List<string>(4);
         if (s.FxLimiter && (pre.Count > 0 || rev > 0.01f))
         {
-            float makeup = Math.Clamp(preCutDb * 0.64f, 0f, 5.2f);
+            float makeup = Math.Clamp(preCutDb * 0.68f, 0f, 5.6f);
             if (makeup > 0.25f) post.Add($"volume=+{F(makeup)}dB");
-            post.Add("alimiter=level_in=1:level_out=0.95:limit=0.93:attack=5:release=50");
+            post.Add("apsyclip=level_in=1:level_out=0.96:clip=0.94:adaptive=0.52:iterations=8");
+            post.Add("alimiter=level_in=1:level_out=0.96:limit=0.95:attack=4:release=45");
         }
 
-        // 13. TRUE PARALLEL STEREO CONVOLUTION REVERB (`asplit` + Abbey Road HP/LP + Pre-Delay + `afir` + `amix`)!
-        // Dry signal stays 100% bit-untouched -> ZERO comb filtering, ZERO dullness, ZERO muddy sub-bass!
-        float effRev = s.PlayerAudio8D ? MathF.Max(rev, 0.26f) : rev;
+        // 13. TRUE UNITY-CALIBRATED PARALLEL STEREO CONVOLUTION REVERB!
+        // Dry stays 100% crisp & punchy while the wet bus passes through Abbey Road HP/LP + Pre-Delay + `afir` (dry=1:wet=1:irnorm=-1!) + wide stereo bloom!
+        float effRev = s.PlayerAudio8D ? MathF.Max(rev, 0.30f) : rev;
         if (effRev > 0.01f)
         {
             var irPath = ImpulseBank.GetImpulsePath(s.FxReverbRoom, s.CustomIrPath);
             if (irPath != null)
             {
-                var (preMs, hpHz, lpHz, wetScale) = RoomParams(s.FxReverbRoom);
-                // Smooth perceptual wet curve (gentle at 10-30% for mastering polish, lush & huge at 50-100% for Slowed/Shimmer!)
-                float wetWeight = Math.Clamp(MathF.Pow(effRev, 1.15f) * 1.15f * wetScale, 0.03f, 1.35f);
+                var (preMs, hpHz, lpHz, wetScale, wetWide) = RoomParams(s.FxReverbRoom);
+                // Smooth equal-power-inspired studio dry/wet mix curve:
+                // 20% = crisp dry (0.98) + noticeable studio sheen (0.28)
+                // 55% = rich dry (0.86) + huge lush hall/shimmer (0.78)
+                // 100% = dreamy ambient dry (0.45) + massive wash (1.32)
+                float dryWeight = Math.Clamp(1.0f - MathF.Pow(effRev, 1.85f) * 0.55f, 0.42f, 1.0f);
+                float wetWeight = Math.Clamp(MathF.Pow(effRev, 1.05f) * 1.25f * wetScale, 0.06f, 1.45f);
                 var escIr = ImpulseBank.EscapeForLavfi(irPath);
                 string preChain = pre.Count > 0 ? string.Join(",", pre) + "," : "";
                 string postChain = post.Count > 0 ? "," + string.Join(",", post) : "";
-                return $"lavfi=[{preChain}asplit=2[dry][wet];[wet]highpass=f={hpHz}:poles=2,lowpass=f={lpHz}:poles=2,adelay={preMs}|{preMs}[wpre];amovie='{escIr}',aresample=48000[ir];[wpre][ir]afir=dry=0:wet=10:irnorm=-1[rv];[dry][rv]amix=inputs=2:weights=1 {F(wetWeight)}:normalize=0:duration=first{postChain}]";
+                return $"lavfi=[{preChain}asplit=2[dry][wet];[wet]highpass=f={hpHz}:poles=2,lowpass=f={lpHz}:poles=2,adelay={preMs}|{preMs}[wpre];amovie='{escIr}',aformat=channel_layouts=stereo:sample_rates=48000[ir];[wpre][ir]afir=dry=1:wet=1:irnorm=-1:minp=2048:maxp=8192,extrastereo=m={F(wetWide)}:c=1[rv];[dry][rv]amix=inputs=2:weights={F(dryWeight)} {F(wetWeight)}:normalize=0:duration=first{postChain}]";
             }
         }
 

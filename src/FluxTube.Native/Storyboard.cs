@@ -206,18 +206,27 @@ public static class Storyboard
 
         int tw = (int)Math.Round(240 * Gfx.Scale / 2) * 2;
         int th = (int)Math.Round((double)tw * book.TileH / book.TileW / 2) * 2;
-        var dst = new byte[tw * th * 4];
-        Resample(px, sw, sx, sy, book.TileW, book.TileH, dst, tw, th);
+        int byteLen = tw * th * 4;
+        var dst = System.Buffers.ArrayPool<byte>.Shared.Rent(byteLen);
+        try
+        {
+            Resample(px, sw, sx, sy, book.TileW, book.TileH, dst, tw, th);
 
-        // mpv keeps the picture file mapped while it shows it: rotate through several files, so the one being
-        // written is never the one on screen (writing over it would flash black)
-        _slot = (_slot + 1) % 8;
-        var file = Path.Combine(Paths.Data, "preview" + _slot + ".bgra");
-        try { File.WriteAllBytes(file, dst); }
-        catch (Exception e) { Paths.Log("preview write: " + e.Message); return; }
-        if (_lastFile.Length == 0) Paths.Log($"preview ready: {tw}x{th} px");
-        _lastKey = key; _lastFile = file; _lastW = tw; _lastH = th;
-        Send(file, tw, th);
+            // mpv keeps the picture file mapped while it shows it: rotate through several files, so the one being
+            // written is never the one on screen (writing over it would flash black)
+            _slot = (_slot + 1) % 8;
+            var file = Path.Combine(Paths.Data, "preview" + _slot + ".bgra");
+            try
+            {
+                using var fs = new FileStream(file, FileMode.Create, FileAccess.Write, FileShare.Read);
+                fs.Write(dst, 0, byteLen);
+            }
+            catch (Exception e) { Paths.Log("preview write: " + e.Message); return; }
+            if (_lastFile.Length == 0) Paths.Log($"preview ready: {tw}x{th} px");
+            _lastKey = key; _lastFile = file; _lastW = tw; _lastH = th;
+            Send(file, tw, th);
+        }
+        finally { System.Buffers.ArrayPool<byte>.Shared.Return(dst); }
     }
 
     private static void Send(string? file, int w, int h)
@@ -364,23 +373,29 @@ public static class Storyboard
     private static void SharpenMild(byte[] px, int w, int h)
     {
         if (w < 3 || h < 3) return;
-        var src = (byte[])px.Clone();
-        int stride = w * 4;
-        for (int y = 1; y < h - 1; y++)
+        int len = px.Length;
+        var src = System.Buffers.ArrayPool<byte>.Shared.Rent(len);
+        try
         {
-            int row = y * stride;
-            for (int x = 1; x < w - 1; x++)
+            Buffer.BlockCopy(px, 0, src, 0, len);
+            int stride = w * 4;
+            for (int y = 1; y < h - 1; y++)
             {
-                int o = row + x * 4;
-                for (int c = 0; c < 3; c++)
+                int row = y * stride;
+                for (int x = 1; x < w - 1; x++)
                 {
-                    int center = src[o + c];
-                    int avg = (src[o - 4 + c] + src[o + 4 + c] + src[o - stride + c] + src[o + stride + c]) >> 2;
-                    int v = center + ((center - avg) * 3 >> 3); // ~0.375 sharpen strength
-                    px[o + c] = (byte)Math.Clamp(v, 0, 255);
+                    int o = row + x * 4;
+                    for (int c = 0; c < 3; c++)
+                    {
+                        int center = src[o + c];
+                        int avg = (src[o - 4 + c] + src[o + 4 + c] + src[o - stride + c] + src[o + stride + c]) >> 2;
+                        int v = center + ((center - avg) * 3 >> 3); // ~0.375 sharpen strength
+                        px[o + c] = (byte)Math.Clamp(v, 0, 255);
+                    }
                 }
             }
         }
+        finally { System.Buffers.ArrayPool<byte>.Shared.Return(src); }
     }
 
     /// <summary>Catmull-Rom bicubic copy of one tile out of the sheet into a crisp opaque BGRA image.</summary>
