@@ -20,6 +20,8 @@ public sealed class InnerTube
     private JsonObject? _context;
     private string _clientVersion = "2.20261112.00.00";
     private string? _visitorData;
+    private string _sessionIndex = "0";
+    private string? _delegatedSessionId;
     private DateTime _bootAt;
     private JsonNode? _bootInitialData;
     private readonly SemaphoreSlim _bootLock = new(1, 1);
@@ -125,6 +127,8 @@ public sealed class InnerTube
                    ?? throw new InvalidOperationException("no INNERTUBE_CONTEXT");
         _clientVersion = cfg.S("INNERTUBE_CLIENT_VERSION") ?? _clientVersion;
         _visitorData = cfg.S("VISITOR_DATA") ?? _context.S("client", "visitorData");
+        _sessionIndex = cfg.S("SESSION_INDEX") ?? "0";
+        _delegatedSessionId = cfg.S("DELEGATED_SESSION_ID");
         LoggedIn = cfg["LOGGED_IN"]?.GetValue<bool>() ?? false;
 
         var client = (JsonObject)_context["client"]!;
@@ -173,7 +177,8 @@ public sealed class InnerTube
         if (auth != null)
         {
             h.TryAddWithoutValidation("Authorization", auth);
-            h.TryAddWithoutValidation("X-Goog-AuthUser", "0");
+            h.TryAddWithoutValidation("X-Goog-AuthUser", _sessionIndex);
+            if (!string.IsNullOrEmpty(_delegatedSessionId)) h.TryAddWithoutValidation("X-Goog-PageId", _delegatedSessionId);
             h.TryAddWithoutValidation("X-Youtube-Bootstrap-Logged-In", "true");
         }
         req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8);
@@ -203,10 +208,27 @@ public sealed class InnerTube
     public async Task<FeedPage> HomeAsync(CancellationToken ct = default)
     {
         await EnsureBootAsync(ct);
-        // the page's embedded feed follows the account language, the API call follows our hl: always use the API
+        // Use the exact 1-to-1 ytInitialData from https://www.youtube.com/ (identical ranking, personalization, and chips as desktop YouTube!)
+        JsonNode? d = _bootInitialData;
         _bootInitialData = null;
-        var d = await PostAsync("browse", new JsonObject { ["browseId"] = "FEwhat_to_watch" }, Origin + "/", ct);
+        if (d == null)
+        {
+            try
+            {
+                var html = await GetHtmlAsync(Origin + "/", ct);
+                ParseBoot(html);
+                d = _bootInitialData;
+                _bootInitialData = null;
+            }
+            catch { }
+        }
+        d ??= await PostAsync("browse", new JsonObject { ["browseId"] = "FEwhat_to_watch" }, Origin + "/", ct);
         var page = ParseFeed(d);
+        if (page.Items.Count == 0)
+        {
+            d = await PostAsync("browse", new JsonObject { ["browseId"] = "FEwhat_to_watch" }, Origin + "/", ct);
+            page = ParseFeed(d);
+        }
         if (J.FindFirst(d, "feedFilterChipBarRenderer")?.P("contents") is JsonArray chips)
         {
             foreach (var ch in chips)
