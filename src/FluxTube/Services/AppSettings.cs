@@ -47,6 +47,8 @@ public sealed class AppSettings
     public bool MarkWatched { get; set; } = true;
     public bool HideShorts { get; set; } = true;
     public bool Autoplay { get; set; } = false;
+    /// <summary>True: switching to a background-opened or paused video tab immediately starts playing it. False: stays paused until Play is pressed.</summary>
+    public bool AutoPlayOpenedTabs { get; set; } = false;
     public bool SponsorBlock { get; set; } = true;
     public string[] SponsorCategories { get; set; } = ["sponsor", "selfpromo", "interaction"];
     public bool SponsorBlockOnDownload { get; set; } = false;

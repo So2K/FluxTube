@@ -119,6 +119,9 @@ public static unsafe class App
         PreviewPlayer.RegisterAndCreate(Hwnd);
 
         Gfx.Init(Hwnd);
+        DropTarget.InitOle();
+        DropTarget.Attach(Hwnd);
+        DropTarget.Attach(VideoHwnd);
         UiThread.Post = a => Post(a);
         Shell.Init(args);
 
@@ -132,13 +135,20 @@ public static unsafe class App
         W.SetTimer(Hwnd, 1, 500, 0);
         ProfileOptimization.StartProfile("native.jitprofile");
 
-        W.MSG msg;
-        while (W.GetMessageW(&msg, 0, 0, 0) > 0)
+        try
         {
-            W.TranslateMessage(&msg);
-            W.DispatchMessageW(&msg);
+            W.MSG msg;
+            while (W.GetMessageW(&msg, 0, 0, 0) > 0)
+            {
+                W.TranslateMessage(&msg);
+                W.DispatchMessageW(&msg);
+            }
+            return 0;
         }
-        return 0;
+        finally
+        {
+            DropTarget.ShutdownOle();
+        }
     }
 
     /// <summary>The window frame (resize border, snap preview) in the theme's colours.</summary>

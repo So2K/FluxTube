@@ -100,7 +100,7 @@ public sealed class PlaybackTracker
         });
     }
 
-    public void Play(VideoItem v, string source, double? startOverride = null)
+    public void Play(VideoItem v, string source, double? startOverride = null, bool startPaused = false)
     {
         Flush();
         var gen = ++_gen;
@@ -122,7 +122,7 @@ public sealed class PlaybackTracker
             IsLocal = true;
             IsPreview = false;
             MediaCache.Pinned = null;
-            _p.Load(local!.File!, v.VideoId, start);
+            _p.Load(local!.File!, v.VideoId, start, startPaused);
         }
         else
         {
@@ -137,7 +137,7 @@ public sealed class PlaybackTracker
             if (ready != null)
             {
                 // 1. the link was resolved ahead of the click (hover, visible card, related list)
-                LoadFull(ready, v.Title, start, false);
+                LoadFull(ready, v.Title, start, startPaused);
                 Paths.Log($"play {id}: prefetched");
             }
             else if (cached != null)
@@ -146,7 +146,7 @@ public sealed class PlaybackTracker
                 var proxy = StreamProxy.Instance;
                 var s = new StreamInfo(id, proxy.RegisterCached(cached.Video), cached.Audio != null ? proxy.RegisterCached(cached.Audio) : null,
                     new Dictionary<string, string>(), v.Title, 0, DateTime.UtcNow) { Vitag = cached.Video.Itag, Aitag = cached.Audio?.Itag ?? 0 };
-                LoadFull(s, v.Title, start, false);
+                LoadFull(s, v.Title, start, startPaused);
                 Paths.Log($"play {id}: from disk cache{(cached.Complete ? " (complete, offline)" : "")}");
                 if (!cached.Complete)
                     _ = Task.Run(async () =>
@@ -177,6 +177,7 @@ public sealed class PlaybackTracker
             {
                 // 3. never opened: one direct player request gives working links (see QuickStream); yt-dlp only if that fails
                 _p.Command("stop");
+                if (startPaused) _p.SetPause(true);
                 _ = Task.Run(async () =>
                 {
                     StreamInfo? q = null;
@@ -188,7 +189,7 @@ public sealed class PlaybackTracker
                         {
                             if (gen != _gen) return;
                             IsPreview = q.Preview;
-                            LoadFull(q, v.Title, start, false);
+                            LoadFull(q, v.Title, start, startPaused);
                             Paths.Log($"play {id}: started after {Elapsed():0} ms ({(q.Preview ? "beginning only, proper link follows" : "direct link")})");
                         });
                         if (!q.Preview) return;
@@ -218,7 +219,7 @@ public sealed class PlaybackTracker
                         UiThread.Post(() =>
                         {
                             if (gen != _gen) return;
-                            if (s != null) LoadFull(s, v.Title, start, false);
+                            if (s != null) LoadFull(s, v.Title, start, startPaused);
                             else
                             {
                                 var error = Resolver.Instance.FailureFor(id);

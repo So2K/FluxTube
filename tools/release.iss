@@ -1,14 +1,18 @@
-#define AppVersion "9.1.3"
+#ifndef AppVersion
+#define AppVersion "9.1.4"
+#endif
 
 [Setup]
 AppId=FluxTube.Native
 AppName=FluxTube
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}.0
 AppPublisher=So2K
 AppPublisherURL=https://github.com/So2K/FluxTube
 AppUpdatesURL=https://github.com/So2K/FluxTube/releases
 DefaultDirName={localappdata}\Programs\FluxTube
 DefaultGroupName=FluxTube
+DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\FluxTube.exe
 SetupIconFile=..\src\FluxTube.Native\app.ico
 OutputDir=..\dist\release
@@ -18,14 +22,20 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0.19041
 CloseApplications=yes
 RestartApplications=yes
+
+[Languages]
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "..\dist\stage\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\FluxTube"; Filename: "{app}\FluxTube.exe"
+Name: "{autoprograms}\FluxTube"; Filename: "{app}\FluxTube.exe"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\FluxTube.exe"; Description: "Запустить FluxTube"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\FluxTube.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,FluxTube}"; Flags: nowait postinstall skipifsilent

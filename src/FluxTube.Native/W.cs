@@ -114,6 +114,8 @@ internal static unsafe partial class W
     [LibraryImport("kernel32.dll")] public static partial nint GlobalAlloc(uint flags, nuint bytes);
     [LibraryImport("kernel32.dll")] public static partial nint GlobalLock(nint mem);
     [LibraryImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool GlobalUnlock(nint mem);
+    [LibraryImport("kernel32.dll")] public static partial nuint GlobalSize(nint mem);
+    [LibraryImport("user32.dll", StringMarshalling = StringMarshalling.Utf16)] public static partial uint RegisterClipboardFormatW(string format);
 
     [LibraryImport("gdi32.dll", StringMarshalling = StringMarshalling.Utf16)]
     public static partial nint CreateFontW(int h, int w, int esc, int orient, int weight, uint italic, uint underline, uint strike, uint charset, uint outp, uint clip, uint quality, uint pitch, string face);
@@ -139,7 +141,13 @@ internal static unsafe partial class W
     [LibraryImport("uxtheme.dll", EntryPoint = "#136")] public static partial void FlushMenuThemes();
     [LibraryImport("uxtheme.dll", StringMarshalling = StringMarshalling.Utf16)] public static partial int SetWindowTheme(nint h, string? app, string? ids);
     [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)] public static partial nint ShellExecuteW(nint h, string? op, string file, string? args, string? dir, int show);
+    [LibraryImport("shell32.dll")] public static partial uint DragQueryFileW(nint hDrop, uint iFile, char* lpszFile, uint cch);
     [LibraryImport("ole32.dll")] public static partial int CoInitializeEx(nint reserved, uint coinit);
+    [LibraryImport("ole32.dll")] public static partial int OleInitialize(nint reserved);
+    [LibraryImport("ole32.dll")] public static partial void OleUninitialize();
+    [LibraryImport("ole32.dll")] public static partial int RegisterDragDrop(nint hwnd, nint dropTarget);
+    [LibraryImport("ole32.dll")] public static partial int RevokeDragDrop(nint hwnd);
+    [LibraryImport("ole32.dll")] public static partial void ReleaseStgMedium(void* pmedium);
 
     public static int LoWord(nint l) => (short)(l.ToInt64() & 0xFFFF);
     public static int HiWord(nint l) => (short)((l.ToInt64() >> 16) & 0xFFFF);

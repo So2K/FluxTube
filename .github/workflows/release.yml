@@ -1,0 +1,233 @@
+name: Build & Release FluxTube
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 9.1.4). Leave empty to read from Updater.cs.'
+        required: false
+        default: ''
+      publish_release:
+        description: 'Publish GitHub Release (creates tag v<version> if needed)'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Installer & Portable (win-x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = ''
+          if ('${{ github.event_name }}' -eq 'push' -and '${{ github.ref_name }}' -match '^v(.+)$') {
+            $version = $Matches[1]
+          } elseif ('${{ inputs.version }}' -ne '') {
+            $version = '${{ inputs.version }}'.TrimStart('v', 'V').Trim()
+          } else {
+            $src = Get-Content -Raw src/FluxTube.Native/Updater.cs
+            if ($src -match 'CurrentVersion\s*=\s*"([^"]+)"') {
+              $version = $Matches[1]
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw 'Unable to determine release version.'
+          }
+          $tag = "v$version"
+          Write-Host "Resolved version=$version tag=$tag"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+          # Ensure Updater.cs carries the exact release version being built
+          $updaterPath = 'src/FluxTube.Native/Updater.cs'
+          $updaterSrc = Get-Content -Raw $updaterPath
+          $updated = [regex]::Replace($updaterSrc, 'CurrentVersion\s*=\s*"[^"]+"', "CurrentVersion = `"$version`"")
+          if ($updated -ne $updaterSrc) {
+            Set-Content -Path $updaterPath -Value $updated -NoNewline
+            Write-Host "Synchronized Updater.CurrentVersion -> $version"
+          }
+
+      - name: Setup .NET 8 & 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Download runtime binaries (libmpv, yt-dlp, ffmpeg, deno)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force third_party/mpv, third_party/dl, dist/deps | Out-Null
+
+          $headers = @{ 'User-Agent' = 'FluxTube-CI' }
+          if ($env:GH_TOKEN) { $headers['Authorization'] = "Bearer $env:GH_TOKEN" }
+
+          # 1. libmpv-2.dll (standard x86_64 build for universal x64 CPU support)
+          Write-Host 'Fetching latest libmpv-2.dll...'
+          $mpvRel = Invoke-RestMethod -Headers $headers 'https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest'
+          $mpvAsset = $mpvRel.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}.*\.7z$' } | Select-Object -First 1
+          if (-not $mpvAsset) {
+            $mpvAsset = $mpvRel.assets | Where-Object { $_.name -like 'mpv-dev-x86_64-*.7z' } | Select-Object -First 1
+          }
+          if (-not $mpvAsset) { throw 'Could not find mpv-dev-x86_64 asset in shinchiro/mpv-winbuild-cmake.' }
+          Write-Host "Downloading $($mpvAsset.name)..."
+          Invoke-WebRequest -Headers $headers -Uri $mpvAsset.browser_download_url -OutFile dist/deps/mpv-dev.7z
+          7z e -y dist/deps/mpv-dev.7z libmpv-2.dll -othird_party/mpv | Out-Null
+          if (-not (Test-Path third_party/mpv/libmpv-2.dll)) {
+            7z x -y dist/deps/mpv-dev.7z -odist/deps/mpv_extract | Out-Null
+            $foundMpv = Get-ChildItem -Recurse -Path dist/deps/mpv_extract -Filter 'libmpv-2.dll' | Select-Object -First 1
+            if (-not $foundMpv) { throw 'libmpv-2.dll not found inside mpv-dev archive.' }
+            Copy-Item $foundMpv.FullName third_party/mpv/libmpv-2.dll -Force
+          }
+
+          # 2. yt-dlp.exe
+          Write-Host 'Downloading yt-dlp.exe...'
+          Invoke-WebRequest -Headers $headers -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile third_party/dl/yt-dlp.exe
+
+          # 3. ffmpeg.exe + ffprobe.exe
+          Write-Host 'Downloading FFmpeg (win64-gpl)...'
+          Invoke-WebRequest -Headers $headers -Uri 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip' -OutFile dist/deps/ffmpeg.zip
+          7z x -y dist/deps/ffmpeg.zip -odist/deps/ffmpeg_extract | Out-Null
+          $ffBin = Get-ChildItem -Recurse -Path dist/deps/ffmpeg_extract -Filter 'ffmpeg.exe' | Select-Object -First 1
+          $fpBin = Get-ChildItem -Recurse -Path dist/deps/ffmpeg_extract -Filter 'ffprobe.exe' | Select-Object -First 1
+          $ffLic = Get-ChildItem -Recurse -Path dist/deps/ffmpeg_extract -Filter 'LICENSE*' | Select-Object -First 1
+          if (-not $ffBin -or -not $fpBin) { throw 'ffmpeg.exe or ffprobe.exe missing from archive.' }
+          Copy-Item $ffBin.FullName dist/deps/ffmpeg.exe -Force
+          Copy-Item $fpBin.FullName dist/deps/ffprobe.exe -Force
+          if ($ffLic) { Copy-Item $ffLic.FullName dist/deps/FFmpeg-GPL.txt -Force }
+
+          # 4. deno.exe (JS runtime for yt-dlp)
+          Write-Host 'Downloading deno.exe...'
+          Invoke-WebRequest -Headers $headers -Uri 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip' -OutFile dist/deps/deno.zip
+          7z x -y dist/deps/deno.zip -odist/deps/deno_extract | Out-Null
+          $denoBin = Get-ChildItem -Recurse -Path dist/deps/deno_extract -Filter 'deno.exe' | Select-Object -First 1
+          if (-not $denoBin) { throw 'deno.exe missing from archive.' }
+          Copy-Item $denoBin.FullName dist/deps/deno.exe -Force
+
+      - name: Publish FluxTube.Native (Native AOT win-x64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish src/FluxTube.Native/FluxTube.Native.csproj -c Release -r win-x64 -o dist/stage --nologo
+          Get-ChildItem -Path dist/stage -Recurse -Filter '*.pdb' | Remove-Item -Force
+
+      - name: Publish WinUI WebView Helper (web/)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish src/FluxTube/FluxTube.csproj -c Release -r win-x64 -p:Platform=x64 -o dist/stage/web --nologo
+          # Remove debug symbols & duplicate mpv/yt-dlp inside web/ (helper only uses WebView2 for fallback login)
+          Get-ChildItem -Path dist/stage/web -Recurse -Filter '*.pdb' | Remove-Item -Force
+          Remove-Item -Force -ErrorAction SilentlyContinue dist/stage/web/libmpv-2.dll
+          Remove-Item -Force -Recurse -ErrorAction SilentlyContinue dist/stage/web/tools
+
+      - name: Assemble tools & verify stage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist/stage/tools, dist/stage/licenses, dist/release | Out-Null
+          Copy-Item dist/deps/ffmpeg.exe dist/stage/tools/ffmpeg.exe -Force
+          Copy-Item dist/deps/ffprobe.exe dist/stage/tools/ffprobe.exe -Force
+          Copy-Item dist/deps/deno.exe dist/stage/tools/deno.exe -Force
+          if (Test-Path dist/deps/FFmpeg-GPL.txt) {
+            Copy-Item dist/deps/FFmpeg-GPL.txt dist/stage/licenses/FFmpeg-GPL.txt -Force
+          }
+
+          $required = @(
+            'dist/stage/FluxTube.exe',
+            'dist/stage/libmpv-2.dll',
+            'dist/stage/e_sqlite3.dll',
+            'dist/stage/Assets/ytsrv.py',
+            'dist/stage/Assets/browsercookies.py',
+            'dist/stage/Assets/fonts/lucide.ttf',
+            'dist/stage/Assets/mpv/scripts/fluxosc.lua',
+            'dist/stage/tools/yt-dlp.exe',
+            'dist/stage/tools/ffmpeg.exe',
+            'dist/stage/tools/ffprobe.exe',
+            'dist/stage/tools/deno.exe',
+            'dist/stage/web/FluxTube.exe'
+          )
+          foreach ($f in $required) {
+            if (-not (Test-Path $f)) { throw "Missing required staged file: $f" }
+            $sz = [math]::Round((Get-Item $f).Length / 1MB, 2)
+            Write-Host "OK: $f ($sz MB)"
+          }
+
+      - name: Build Portable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '${{ steps.ver.outputs.version }}'
+          $zipPath = "dist/release/FluxTube-$ver-Portable-win-x64.zip"
+          7z a -tzip -mx=7 $zipPath .\dist\stage\* | Out-Null
+          if (-not (Test-Path $zipPath)) { throw "Failed to create $zipPath" }
+
+      - name: Build Inno Setup Installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '${{ steps.ver.outputs.version }}'
+          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $iscc) {
+            $cand = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+            if (Test-Path $cand) { $iscc = $cand }
+          }
+          if (-not $iscc) {
+            Write-Host 'Installing Inno Setup via Chocolatey...'
+            choco install innosetup -y --no-progress
+            $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          }
+          if (-not (Test-Path $iscc)) { throw 'ISCC.exe not found.' }
+          & $iscc "/DAppVersion=$ver" "tools\release.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+      - name: Generate SHA256SUMS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = Get-ChildItem -Path dist/release -File | Where-Object { $_.Extension -in '.exe', '.zip' } | Sort-Object Name
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash -Algorithm SHA256 $f.FullName).Hash.ToLowerInvariant()
+            "$h  $($f.Name)"
+          }
+          Set-Content -Path dist/release/SHA256SUMS.txt -Value $lines
+          Get-Content dist/release/SHA256SUMS.txt
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: FluxTube-${{ steps.ver.outputs.version }}-win-x64
+          path: dist/release/*
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' || inputs.publish_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: FluxTube ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            dist/release/FluxTube-${{ steps.ver.outputs.version }}-Setup-x64.exe
+            dist/release/FluxTube-${{ steps.ver.outputs.version }}-Portable-win-x64.zip
+            dist/release/SHA256SUMS.txt

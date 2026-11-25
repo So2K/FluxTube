@@ -210,16 +210,17 @@ public sealed class MpvPlayer : IDisposable
         });
     }
 
-    public void Load(string url, string? videoId, double startSeconds = 0)
+    public void Load(string url, string? videoId, double startSeconds = 0, bool startPaused = false)
     {
         if (!IsReady) return;
         Interlocked.Increment(ref _loadGen);
         CurrentUrl = url;
         CurrentVideoId = videoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
+        if (startPaused) { Paused = true; Set("pause", "yes"); }
         var opts = startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", CultureInfo.InvariantCulture)}" : "start=0";
         Command("loadfile", url, "replace", "-1", opts);
-        Set("pause", "no");
+        if (!startPaused) Set("pause", "no");
     }
 
     /// <summary>Plays already-resolved googlevideo URLs directly: no yt-dlp on the critical path.</summary>
@@ -230,6 +231,7 @@ public sealed class MpvPlayer : IDisposable
         CurrentUrl = s.Video;
         CurrentVideoId = s.VideoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
+        if (keepPause) { Paused = true; Set("pause", "yes"); }
         var opts = new List<string> { "start=" + (startSeconds > 0.3 ? startSeconds.ToString("0.00", CultureInfo.InvariantCulture) : "0") };
         if (s.Audio != null) opts.Add("audio-file=" + Escaped(s.Audio));
         var t = string.IsNullOrEmpty(title) ? s.Title : title;
@@ -250,7 +252,7 @@ public sealed class MpvPlayer : IDisposable
     }
 
     public void TogglePause() => Command("cycle", "pause");
-    public void SetPause(bool p) => Set("pause", p ? "yes" : "no");
+    public void SetPause(bool p) { Paused = p; Set("pause", p ? "yes" : "no"); }
     public void SeekAbsolute(double s) => Command("seek", s.ToString(CultureInfo.InvariantCulture), "absolute");
     public void ShowText(string text, int ms = 1800) => Command("show-text", text, ms.ToString());
     public void SetSpeed(double v) { Speed = v; Set("speed", v.ToString(CultureInfo.InvariantCulture)); }

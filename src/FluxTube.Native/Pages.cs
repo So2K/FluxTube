@@ -1048,13 +1048,15 @@ public sealed class WatchPage : IPage
     private PlaylistPanel? _list;
     private readonly int _listScroll;
     private bool _listJump;
+    private bool _startPaused;
     public string? PlaylistId => _playlistId;
 
-    public WatchPage(VideoItem v, string source, string? playlistId = null)
+    public WatchPage(VideoItem v, string source, string? playlistId = null, bool startPaused = false)
     {
         Video = v;
         _source = source;
         _playlistId = playlistId;
+        _startPaused = startPaused;
         _listScroll = UI.Id("watch:list:" + v.VideoId);
         _infoScroll = UI.Id("watch:info:" + v.VideoId);
         _relScroll = UI.Id("watch:rel:" + v.VideoId);
@@ -1149,10 +1151,16 @@ public sealed class WatchPage : IPage
 
     public void Shown()
     {
+        bool startPaused = _startPaused;
+        _startPaused = false;
         if (!Shell.CurrentTabOwnsMainPlayer || PlaybackTracker.Instance.Current?.VideoId != Video.VideoId || !MpvPlayer.Instance.HasMedia)
         {
-            Shell.Play(Video, _source);
+            Shell.Play(Video, _source, startPaused);
             _subKey = ""; _audioId = "";
+        }
+        else if (!startPaused && AppSettings.Current.AutoPlayOpenedTabs && MpvPlayer.Instance.Paused)
+        {
+            MpvPlayer.Instance.SetPause(false);
         }
         var sp = MpvPlayer.Instance.Speed;
         if (sp > 0.1) _speed = sp.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "×";
@@ -1558,8 +1566,24 @@ public sealed class WatchPage : IPage
         bool overL = UI.Hover(likeR), overD = UI.Hover(disR);
         bool isLike = _rating == "LIKE", isDis = _rating == "DISLIKE";
 
-        // Keep the rating control visually consistent with the neighboring action pills.
-        Gfx.Fill(pill, Th.Card, h / 2);
+        float rad = h / 2;
+        Gfx.Fill(pill, Th.Card, rad);
+
+        // Clip each half strictly to its side while filling the full rounded pill so outer corners stay perfectly round.
+        if (isLike || overL)
+        {
+            Gfx.PushClip(likeR);
+            Gfx.Fill(pill, isLike ? Gfx.Fade(Th.Brand, overL ? 0.22f : 0.16f) : Th.A(0.08f), rad);
+            Gfx.PopClip();
+        }
+        if (isDis || overD)
+        {
+            Gfx.PushClip(disR);
+            Gfx.Fill(pill, isDis ? Gfx.Fade(Th.Brand, overD ? 0.22f : 0.16f) : Th.A(0.08f), rad);
+            Gfx.PopClip();
+        }
+        if (isLike || isDis)
+            Gfx.Stroke(pill, Gfx.Fade(Th.Brand, 0.35f), rad, 1f);
 
         uint likeC = isLike || overL ? Th.Brand : Th.Text;
         uint disC = isDis || overD ? Th.Brand : Th.Text;

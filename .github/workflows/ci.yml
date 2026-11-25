@@ -1,0 +1,46 @@
+name: CI Build
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8 & 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Prepare build placeholders for third-party binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force third_party/mpv, third_party/dl | Out-Null
+          if (-not (Test-Path third_party/mpv/libmpv-2.dll)) { Set-Content -Path third_party/mpv/libmpv-2.dll -Value '' }
+          if (-not (Test-Path third_party/dl/yt-dlp.exe)) { Set-Content -Path third_party/dl/yt-dlp.exe -Value '' }
+
+      - name: Build FluxTube.Native (Release win-x64)
+        shell: pwsh
+        run: dotnet build src/FluxTube.Native/FluxTube.Native.csproj -c Release -r win-x64 --nologo
+
+      - name: Build WinUI WebView Helper (Release win-x64)
+        shell: pwsh
+        run: dotnet build src/FluxTube/FluxTube.csproj -c Release -r win-x64 -p:Platform=x64 --nologo

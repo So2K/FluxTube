@@ -670,6 +670,7 @@ public sealed class SettingsPage : IPage
         ToggleRow("hs", "Скрывать Shorts в лентах", s.HideShorts, v => s.HideShorts = v);
         ToggleRow("mw", "Отмечать просмотренное в истории YouTube", s.MarkWatched, v => s.MarkWatched = v, "Рекомендации учитывают ваши просмотры");
         ToggleRow("ap", "Автовоспроизведение следующего", s.Autoplay, v => s.Autoplay = v);
+        ToggleRow("tabplay", "Автостарт видео при открытии вкладки", s.AutoPlayOpenedTabs, v => s.AutoPlayOpenedTabs = v, "Выключено: открытые в фоне и поставленные на паузу вкладки остаются на паузе при переключении");
 
         Section("Поиск");
         ToggleRow("strict", "Только по теме", s.SearchStrict, v => s.SearchStrict = v, "В выдаче остаются видео, где слова запроса есть в названии или у канала");

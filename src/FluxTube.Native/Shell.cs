@@ -79,6 +79,7 @@ public static class Shell
         public string Title = "";
         public string Sub = "";
         public bool KeepInBg = true;
+        public bool StartPaused;
         public double Position;
         public readonly string Key = Guid.NewGuid().ToString("N");
         public string PlayKey => Key + "|" + Arg;
@@ -90,6 +91,9 @@ public static class Shell
     private static int _hoverTab = -1;
     private static R _hoverTabRect, _tabPreviewRect;
     private static long _hoverTabSince, _tabVolBoostUntil;
+    private static string? _dragTabKey;
+    private static float _dragStartX, _dragGrabOffset;
+    private static bool _draggingTab;
 
     public static IReadOnlyList<Tab> Tabs => _tabs;
     public static bool CurrentTabOwnsMainPlayer => _tab >= 0 && _tab < _tabs.Count && _mainTabKey == _tabs[_tab].Key;
@@ -123,6 +127,7 @@ public static class Shell
             {
                 if (t.Kind == "video") BgPlayers.Stop(t.PlayKey);
                 t.Position = 0;
+                t.StartPaused = false;
             }
             t.Kind = kind; t.Arg = arg; t.Title = title; t.Sub = sub;
         }
@@ -139,7 +144,7 @@ public static class Shell
         Sfx.Tab();
         if (_tab < 0) SetTab("root", "home", "");
         var idx = Math.Min(_tab + 1, _tabs.Count);
-        _tabs.Insert(idx, new Tab { Kind = kind, Arg = arg, Title = title, Sub = sub });
+        _tabs.Insert(idx, new Tab { Kind = kind, Arg = arg, Title = title, Sub = sub, StartPaused = kind == "video" && !activate });
         if (activate) GoTab(idx);
         else App.Invalidate();
     }
@@ -157,7 +162,7 @@ public static class Shell
         Sfx.Tab();
         if (_tab < 0) SetTab("root", "home", "");
         var idx = Math.Min(_tab + 1, _tabs.Count);
-        _tabs.Insert(idx, new Tab { Kind = kind, Arg = arg, Title = title, Sub = sub });
+        _tabs.Insert(idx, new Tab { Kind = kind, Arg = arg, Title = title, Sub = sub, StartPaused = kind == "video" && !activate });
         if (activate) GoTab(idx);
         else
         {
@@ -185,13 +190,34 @@ public static class Shell
         Sfx.Tab();
         var s = _tabs[i];
         _tabs.Insert(i + 1, new Tab { Kind = s.Kind, Arg = s.Arg, Title = s.Title, Sub = s.Sub, KeepInBg = s.KeepInBg,
-            Position = s.Kind == "video" && s.Key == _mainTabKey ? CurrentLivePos() : s.Position });
+            Position = s.Kind == "video" && s.Key == _mainTabKey ? CurrentLivePos() : s.Position,
+            StartPaused = s.Kind == "video" && s.Key == _mainTabKey ? P.Paused : s.StartPaused });
         GoTab(i + 1);
+    }
+
+    public static void MoveTab(int from, int to)
+    {
+        if (from < 0 || from >= _tabs.Count || to < 0 || to >= _tabs.Count || from == to) return;
+        var item = _tabs[from];
+        _tabs.RemoveAt(from);
+        _tabs.Insert(to, item);
+        if (_tab == from) _tab = to;
+        else if (from < _tab && to >= _tab) _tab--;
+        else if (from > _tab && to <= _tab) _tab++;
+        Sfx.Tick();
+        App.Invalidate();
+    }
+
+    private static bool ShouldStartPaused(Tab t)
+    {
+        if (t.Kind != "video" || AppSettings.Current.AutoPlayOpenedTabs) return false;
+        if (BgPlayers.Has(t.PlayKey)) return BgPlayers.IsPaused(t.PlayKey);
+        return t.StartPaused;
     }
 
     private static IPage PageFor(Tab t) => t.Kind switch
     {
-        "video" => new WatchPage(new VideoItem { VideoId = t.Arg, Title = t.Title, Channel = t.Sub }, "tab", _listOf.GetValueOrDefault(t.Arg)),
+        "video" => new WatchPage(new VideoItem { VideoId = t.Arg, Title = t.Title, Channel = t.Sub }, "tab", _listOf.GetValueOrDefault(t.Arg), ShouldStartPaused(t)),
         "search" => new FeedPage("search", t.Arg, null),
         "channel" => new ChannelPage(t.Arg, t.Title),
         "playlist" => new FeedPage("playlist", "VL" + t.Arg, t.Title),
@@ -270,6 +296,7 @@ public static class Shell
             {
                 var pos = CurrentLivePos();
                 prev.Position = pos;
+                prev.StartPaused = P.Paused;
                 SaveTabPos(prev.Arg, pos);
                 if (target.Kind == "video" && target.Key != prev.Key && !P.Paused && prev.KeepInBg && !BgPlayers.Has(prev.PlayKey))
                     BgPlayers.Play(prev.PlayKey, pos);
@@ -280,6 +307,7 @@ public static class Shell
         {
             var pos = BgPlayers.GetTimePos(target.PlayKey);
             target.Position = pos;
+            target.StartPaused = BgPlayers.IsPaused(target.PlayKey);
             SaveTabPos(target.Arg, pos);
         }
         _tab = i;
@@ -295,6 +323,7 @@ public static class Shell
         Sfx.Back();
         var removed = _tabs[i];
         var wasActive = i == _tab;
+        var wasPaused = removed.Kind == "video" && _mainTabKey == removed.Key && P.HasMedia ? P.Paused : removed.StartPaused;
         _tabs.RemoveAt(i);
 
         if (removed.Kind == "video")
@@ -309,7 +338,7 @@ public static class Shell
                 VideoReady = false;
             }
         }
-        _closedTabs.Add(new Tab { Kind = removed.Kind, Arg = removed.Arg, Title = removed.Title, Sub = removed.Sub, KeepInBg = removed.KeepInBg, Position = removed.Position });
+        _closedTabs.Add(new Tab { Kind = removed.Kind, Arg = removed.Arg, Title = removed.Title, Sub = removed.Sub, KeepInBg = removed.KeepInBg, StartPaused = wasPaused, Position = removed.Position });
         if (_closedTabs.Count > 12) _closedTabs.RemoveAt(0);
 
         if (_tabs.Count == 0) { _tab = -1; _back.Clear(); OpenRoot("home"); return; }
@@ -352,6 +381,7 @@ public static class Shell
             {
                 var pos = BgPlayers.GetTimePos(kept.PlayKey);
                 kept.Position = pos;
+                kept.StartPaused = BgPlayers.IsPaused(kept.PlayKey);
                 SaveTabPos(kept.Arg, pos);
             }
             Navigate(PageFor(kept), push: false);
@@ -401,18 +431,23 @@ public static class Shell
             else if (isBg)
             {
                 var bgPaused = BgPlayers.IsPaused(t.PlayKey);
-                items.Add(new(bgPaused ? "Продолжить в фоне" : "Пауза (в фоне)", () => BgPlayers.TogglePause(t.PlayKey), icon: bgPaused ? Th.Play : Th.Pause));
+                items.Add(new(bgPaused ? "Продолжить в фоне" : "Пауза (в фоне)", () => { BgPlayers.TogglePause(t.PlayKey); t.StartPaused = BgPlayers.IsPaused(t.PlayKey); }, icon: bgPaused ? Th.Play : Th.Pause));
                 items.Add(new(BgPlayers.IsMuted(t.PlayKey) ? "Включить звук" : "Выключить звук", () => BgPlayers.ToggleMute(t.PlayKey), icon: BgPlayers.IsMuted(t.PlayKey) ? Th.Volume : Th.Mute));
-                items.Add(new("Остановить фоновое воспроизведение", () => BgPlayers.Stop(t.PlayKey), icon: Th.Stop));
+                items.Add(new("Остановить фоновое воспроизведение", () => { BgPlayers.Stop(t.PlayKey); t.StartPaused = true; }, icon: Th.Stop));
             }
             else
             {
-                items.Add(new("Запустить в фоне (звук)", () => { t.KeepInBg = true; BgPlayers.Play(t.PlayKey); Toast("Играет в фоне: " + TabLabel(t), Th.Good, 2000); }, icon: Th.Headphones));
+                items.Add(new("Запустить в фоне (звук)", () => { t.KeepInBg = true; t.StartPaused = false; BgPlayers.Play(t.PlayKey); Toast("Играет в фоне: " + TabLabel(t), Th.Good, 2000); }, icon: Th.Headphones));
             }
             items.Add(MenuItem.Sep);
         }
         items.Add(new("Новая вкладка", () => { NewTab(); _search.Focus(); }, icon: Th.Add, shortcut: "Ctrl+T"));
         items.Add(new("Дублировать вкладку", () => DuplicateTab(i), icon: Th.Copy));
+        if (_tabs.Count > 1)
+        {
+            if (i > 0) items.Add(new("Переместить влево", () => MoveTab(i, i - 1), icon: Th.Back, shortcut: "Ctrl+Shift+PgUp"));
+            if (i < _tabs.Count - 1) items.Add(new("Переместить вправо", () => MoveTab(i, i + 1), icon: Th.ChevronRight, shortcut: "Ctrl+Shift+PgDn"));
+        }
         if (_closedTabs.Count > 0) items.Add(new("Открыть закрытую вкладку", ReopenClosedTab, icon: Th.Restart, shortcut: "Ctrl+Shift+T"));
         items.Add(MenuItem.Sep);
         items.Add(new("Закрыть вкладку", () => CloseTab(i), icon: Th.Close, shortcut: "Ctrl+W", danger: true));
@@ -438,25 +473,86 @@ public static class Shell
         Gfx.FillFrosted(strip, Th.Bg, 0, opacity: 0.84f);
         Gfx.Fill(new R(strip.X, strip.Bottom - 1, strip.W, 1), Th.Line);
         const float addW = 28;
+        float xStart = strip.X + 24;
+        float maxRight = strip.Right - addW - 24;
         float avail = MathF.Max(100, strip.W - 48 - addW - 8);
         float tw = Math.Clamp(avail / Math.Max(1, _tabs.Count), 108, 250);
-        float x = strip.X + 24;
+        int visibleCount = 0;
+        for (int i = 0; i < _tabs.Count && xStart + i * tw < maxRight; i++) visibleCount++;
+
         int hoveredNow = -1;
         R hoveredRect = default;
         Action? deferred = null;
 
-        for (int i = 0; i < _tabs.Count && x < strip.Right - addW - 24; i++)
+        // Release drag cleanly when LMB is released
+        bool droppedDragThisFrame = false;
+        if (!UI.Down && _dragTabKey != null)
+        {
+            droppedDragThisFrame = _draggingTab;
+            _dragTabKey = null;
+            _draggingTab = false;
+        }
+
+        // Update active tab drag & live swap as cursor crosses neighbour midpoints
+        int dragIdx = -1;
+        float dragVisualX = 0;
+        if (_dragTabKey != null && UI.Down)
+        {
+            dragIdx = _tabs.FindIndex(t => t.Key == _dragTabKey);
+            if (dragIdx < 0 || dragIdx >= visibleCount || visibleCount <= 1)
+            {
+                _dragTabKey = null;
+                _draggingTab = false;
+                dragIdx = -1;
+            }
+            else
+            {
+                if (!_draggingTab && MathF.Abs(UI.MX - _dragStartX) > 6f)
+                    _draggingTab = true;
+                if (_draggingTab)
+                {
+                    float minX = xStart;
+                    float maxX = xStart + Math.Max(0, visibleCount - 1) * tw;
+                    dragVisualX = Math.Clamp(UI.MX - _dragGrabOffset, minX, maxX);
+                    int targetIdx = Math.Clamp((int)MathF.Floor((dragVisualX - xStart + tw * 0.5f) / tw), 0, visibleCount - 1);
+                    if (targetIdx != dragIdx)
+                    {
+                        MoveTab(dragIdx, targetIdx);
+                        dragIdx = targetIdx;
+                    }
+                    UI.Hand();
+                    UI.Animate();
+                }
+            }
+        }
+
+        void DrawOneTab(int i, bool elevated)
         {
             var t = _tabs[i];
             int tabIdx = i;
-            var r = new R(Gfx.Snap(x), strip.Y + 4, tw - 6, TabH - 8);
+            float slotX = xStart + i * tw;
+            float drawX = elevated
+                ? UI.Smooth(UI.Id("tabx:" + t.Key), dragVisualX, 1000f)
+                : UI.Smooth(UI.Id("tabx:" + t.Key), slotX, 26);
+            if (elevated) drawX = dragVisualX;
+            var r = new R(Gfx.Snap(drawX), strip.Y + 4, tw - 6, TabH - 8);
             var active = i == _tab;
-            var id = UI.Id("tab", i);
-            var over = UI.Hover(r);
+            var id = UI.Id("tab:" + t.Key);
+            var over = !_draggingTab && UI.Hover(r);
             if (over) { hoveredNow = i; hoveredRect = r; }
             var sel = UI.Smooth(id ^ 0x4242, active ? 1 : 0, 20);
-            if (sel > 0.01f) Gfx.Fill(r, Th.A(0.11f * sel), 8);
-            if (!active) UI.Glow(id, r, 8, over);
+
+            if (elevated)
+            {
+                Gfx.Fill(new R(r.X + 1, r.Y + 3, r.W, r.H), Gfx.Fade(0xFF000000, 0.34f), 8);
+                Gfx.FillFrosted(r, Th.Menu, 8, opacity: 0.96f);
+                Gfx.Stroke(r, Gfx.Fade(Th.Brand, 0.72f), 8, 1.2f);
+            }
+            else
+            {
+                if (sel > 0.01f) Gfx.Fill(r, Th.A(0.11f * sel), 8);
+                if (!active) UI.Glow(id, r, 8, over);
+            }
 
             var isVideo = t.Kind == "video";
             var isMainPlaying = isVideo && _mainTabKey == t.Key && T.Current?.VideoId == t.Arg && P.HasMedia;
@@ -486,7 +582,7 @@ public static class Shell
             }
 
             // Subtle accent indicator bar at bottom of active or playing tab
-            if (playingNow && !active)
+            if (playingNow && !active && !elevated)
                 Gfx.Fill(new R(r.X + 10, r.Bottom - 2, r.W - 20, 2), Gfx.Fade(Th.Brand, 0.85f), 1);
 
             // Left icon slot: for video tabs, interactive Play/Pause button right on the tab!
@@ -502,11 +598,14 @@ public static class Shell
                 {
                     var glyph = playingNow ? Th.Pause : Th.Play;
                     var col = playingNow ? Th.Brand : (isMainPlaying || isBg ? Th.Warn : Gfx.Mix(Th.Dim, Th.Text, MathF.Max(sel, over ? 0.7f : 0)));
-                    if (UI.IconButton(UI.Id(id, 2), iconR, glyph, 10, col))
+                    if (!_draggingTab && !droppedDragThisFrame && UI.IconButton(UI.Id(id, 2), iconR, glyph, 10, col))
                     {
                         btnHandled = true;
-                        // The icon is part of the tab's hit area when that tab is inactive.
                         deferred ??= active && isMainPlaying ? P.TogglePause : () => GoTab(tabIdx);
+                    }
+                    else if (_draggingTab || droppedDragThisFrame)
+                    {
+                        Gfx.Icon(glyph, iconR, 10, col);
                     }
                 }
             }
@@ -517,53 +616,88 @@ public static class Shell
 
             // Right buttons: Close (and Mute when playing in background)
             var close = new R(r.Right - 24, r.Y + (r.H - 21) / 2, 21, 21);
+            R muteR = default;
             float rightUsed = 26;
             if (isBg)
             {
-                var muteR = new R(close.X - 22, r.Y + (r.H - 21) / 2, 21, 21);
+                muteR = new R(close.X - 22, r.Y + (r.H - 21) / 2, 21, 21);
                 var muted = BgPlayers.IsMuted(t.PlayKey);
-                if (UI.IconButton(UI.Id(id, 3), muteR, muted ? Th.Mute : Th.Volume, 10.5f, muted ? Th.Warn : Th.Brand))
+                if (!_draggingTab && !droppedDragThisFrame && UI.IconButton(UI.Id(id, 3), muteR, muted ? Th.Mute : Th.Volume, 10.5f, muted ? Th.Warn : Th.Brand))
                 {
                     btnHandled = true;
-                    var vid = t.Arg;
                     deferred ??= () => BgPlayers.ToggleMute(t.PlayKey);
+                }
+                else if (_draggingTab || droppedDragThisFrame)
+                {
+                    Gfx.Icon(muted ? Th.Mute : Th.Volume, muteR, 10.5f, muted ? Th.Warn : Th.Brand);
                 }
                 rightUsed += 22;
             }
 
-            var run = Gfx.Text(TabLabel(t), 12.5f, active || playingNow ? 600 : 400, MathF.Max(10, r.W - 28 - rightUsed));
-            Gfx.Draw(run, r.X + 28, Gfx.Snap(r.Y + (r.H - run.H) / 2), Gfx.Mix(Th.Sub, Th.Text, MathF.Max(sel, playingNow ? 0.85f : 0)));
+            var run = Gfx.Text(TabLabel(t), 12.5f, active || playingNow || elevated ? 600 : 400, MathF.Max(10, r.W - 28 - rightUsed));
+            Gfx.Draw(run, r.X + 28, Gfx.Snap(r.Y + (r.H - run.H) / 2), Gfx.Mix(Th.Sub, Th.Text, MathF.Max(sel, playingNow || elevated ? 0.9f : 0)));
 
-            if (UI.IconButton(UI.Id(id, 1), close, Th.Close, 9, Th.Sub)) { btnHandled = true; deferred ??= () => CloseTab(tabIdx); }
-            if (!btnHandled)
+            if (!_draggingTab && !droppedDragThisFrame)
+            {
+                if (UI.IconButton(UI.Id(id, 1), close, Th.Close, 9, Th.Sub)) { btnHandled = true; deferred ??= () => CloseTab(tabIdx); }
+            }
+            else
+            {
+                Gfx.Icon(Th.Close, close, 9, Th.Sub);
+            }
+
+            // Start potential drag when pressing on tab body (excluding close / mute / active play buttons)
+            bool overSubBtn = UI.Hover(close) || (muteR.W > 0 && UI.Hover(muteR)) || (isVideo && active && isMainPlaying && UI.Hover(iconR));
+            if (UI.Pressed && over && !overSubBtn && visibleCount > 1)
+            {
+                _dragTabKey = t.Key;
+                _dragStartX = UI.MX;
+                _dragGrabOffset = UI.MX - slotX;
+                _draggingTab = false;
+            }
+
+            if (!btnHandled && !_draggingTab && !droppedDragThisFrame)
             {
                 if (UI.MiddleClick(r)) deferred ??= () => CloseTab(tabIdx);
                 else if (UI.RightClick(r)) deferred ??= () => TabContextMenu(tabIdx);
                 else if (UI.Click(id, r)) deferred ??= () => GoTab(tabIdx);
             }
-            x += tw;
         }
 
+        // Draw stationary/sliding tabs first, then the dragged tab on top!
+        for (int i = 0; i < visibleCount; i++)
+        {
+            if (_draggingTab && i == dragIdx) continue;
+            DrawOneTab(i, elevated: false);
+        }
+        if (_draggingTab && dragIdx >= 0 && dragIdx < visibleCount)
+            DrawOneTab(dragIdx, elevated: true);
+
         // "+" New Tab button — always drawn without single-frame flicker
-        var addR = new R(Gfx.Snap(x + 2), strip.Y + 4, addW, TabH - 9);
+        var addR = new R(Gfx.Snap(xStart + visibleCount * tw + 2), strip.Y + 4, addW, TabH - 9);
         if (UI.IconButton(UI.Id("tab:add"), addR, Th.Add, 12, Th.Sub))
             deferred ??= () => { NewTab(); _search.Focus(); };
 
         if (deferred != null) App.Post(deferred);
 
-        if (hoveredNow != _hoverTab)
+        if (_draggingTab)
+        {
+            _hoverTab = -1;
+            _hoverTabSince = 0;
+        }
+        else if (hoveredNow != _hoverTab)
         {
             _hoverTab = hoveredNow;
             _hoverTabSince = hoveredNow >= 0 ? UI.Now : 0;
         }
-        if (hoveredNow >= 0) _hoverTabRect = hoveredRect;
+        if (!_draggingTab && hoveredNow >= 0) _hoverTabRect = hoveredRect;
     }
 
     /// <summary>Floating preview card under the hovered tab (crisp HD thumbnail, live playback state, per-tab smooth wheel volume).</summary>
     private static void DrawTabPreview()
     {
         _tabPreviewRect = default;
-        if (_hoverTab < 0 || _hoverTab >= _tabs.Count || Menus.Open || AccountMenu.Open) return;
+        if (_draggingTab || _hoverTab < 0 || _hoverTab >= _tabs.Count || Menus.Open || AccountMenu.Open) return;
         bool instant = UI.Now < _tabVolBoostUntil;
         long elapsed = UI.Now - _hoverTabSince;
         if (!instant && elapsed < 220) { UI.Animate(); return; }
@@ -597,7 +731,7 @@ public static class Shell
             var thumbUrl = t.Arg.Length == 11 ? $"https://i.ytimg.com/vi/{t.Arg}/hq720.jpg" : null;
             Cards.ThumbUrl(thumbR, thumbUrl, 8, Th.Menu);
 
-            string? status = isMain ? (P.Paused ? "Пауза" : "Играет") : isBg ? (BgPlayers.IsPaused(t.PlayKey) ? "Пауза (фон)" : "В фоне") : null;
+            string? status = isMain ? (P.Paused ? "Пауза" : "Играет") : isBg ? (BgPlayers.IsPaused(t.PlayKey) ? "Пауза (фон)" : "В фоне") : (!AppSettings.Current.AutoPlayOpenedTabs && t.StartPaused ? "На паузе" : null);
             if (status != null)
             {
                 var sr = Gfx.Text(status, 11, 600);
@@ -780,6 +914,7 @@ public static class Shell
         P.FileLoaded += () =>
         {
             Storyboard.Forget();
+            if (P.Paused) { VideoReady = true; PushPlayerState(); App.Invalidate(); }
             var id = _pendingBgHandoff;
             if (id == null || P.CurrentVideoId != _pendingBgVideoId) return;
             _pendingBgHandoff = null;
@@ -935,6 +1070,7 @@ public static class Shell
         }
         else _listOf.Remove(v.VideoId);
         SetTab("video", v.VideoId, v.Title, v.Channel);
+        if (_tab >= 0 && _tab < _tabs.Count) _tabs[_tab].StartPaused = false;
         var existing = _back.OfType<WatchPage>().LastOrDefault(w => w.Video.VideoId == v.VideoId && w.PlaylistId == playlistId);
         Navigate(existing ?? new WatchPage(v, source, playlistId));
     }
@@ -996,7 +1132,7 @@ public static class Shell
         catch (Exception e) { Paths.Log("mpv init: " + e); }
     });
 
-    public static void Play(VideoItem v, string source)
+    public static void Play(VideoItem v, string source, bool startPaused = false)
     {
         CancelSpace2x();
         MaybeHandoffToBg(v.VideoId);
@@ -1008,6 +1144,11 @@ public static class Shell
         {
             var pos = BgPlayers.GetTimePos(playKey);
             if (pos > 0.3) exactStart = pos;
+            if (startPaused)
+            {
+                BgPlayers.Stop(playKey, saveToDb: false);
+                fromBackground = false;
+            }
         }
         else if (!v.IsShort && tab?.Position is > 0.3)
         {
@@ -1030,7 +1171,7 @@ public static class Shell
             else P.Command("set", "mute", App.Mute ? "yes" : "no");
             if (v.IsShort && source == "shorts") P.Command("set", "loop-file", "inf");
             else if (T.Current?.VideoId != v.VideoId || T.CurrentSource == "shorts") P.Command("set", "loop-file", "no");
-            T.Play(v, source, exactStart);
+            T.Play(v, source, exactStart, startPaused);
         }
 
         var warm = WarmPlayer();
@@ -1163,8 +1304,139 @@ public static class Shell
 
     public static string? ExtractYouTubeId(string s)
     {
-        var m = System.Text.RegularExpressions.Regex.Match(s, @"(?:youtube\.com/(?:watch\?(?:.*&)?v=|shorts/|live/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})");
+        var m = System.Text.RegularExpressions.Regex.Match(s, @"(?:(?:youtube(?:-nocookie)?\.com)/(?:watch\?(?:.*&)?v=|shorts/|live/|embed/)|youtu\.be/)([A-Za-z0-9_-]{11})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return m.Success ? m.Groups[1].Value : null;
+    }
+
+    private static double ExtractYouTubeTime(string s)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(s, @"[?&#](?:t|start)=([0-9hms]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return 0;
+        var raw = m.Groups[1].Value.ToLowerInvariant();
+        if (double.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var secs)) return secs;
+        double total = 0;
+        foreach (System.Text.RegularExpressions.Match part in System.Text.RegularExpressions.Regex.Matches(raw, @"(\d+)([hms])"))
+        {
+            if (!double.TryParse(part.Groups[1].Value, out var n)) continue;
+            total += part.Groups[2].Value[0] switch { 'h' => n * 3600, 'm' => n * 60, _ => n };
+        }
+        return total;
+    }
+
+    /// <summary>Handles links, playlists, channels, local media files, or search text dropped via OLE Drag-and-Drop.</summary>
+    public static void HandleDropped(string raw, bool newTab, bool backgroundTab)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return;
+        if (W.IsIconic(App.Hwnd)) W.ShowWindow(App.Hwnd, W.SW_SHOWNORMAL);
+        W.SetForegroundWindow(App.Hwnd);
+
+        if (raw.StartsWith("localfile:", StringComparison.Ordinal))
+        {
+            var path = raw[10..];
+            if (!File.Exists(path)) return;
+            Sfx.VideoOpen();
+            var title = Path.GetFileNameWithoutExtension(path);
+            PlayFile(new DownloadItem { File = path, Title = title, Url = path });
+            Toast("Открыт файл: " + title, Th.Good, 2400);
+            return;
+        }
+
+        var url = DropTarget.ExtractUrl(raw) ?? raw.Trim();
+        var vid = ExtractYouTubeId(url);
+        var list = System.Text.RegularExpressions.Regex.Match(url, @"[?&]list=([A-Za-z0-9_-]{10,})");
+        if (vid != null)
+        {
+            var at = ExtractYouTubeTime(url);
+            if (at > 1) SaveTabPos(vid, at);
+            var pl = list.Success ? list.Groups[1].Value : null;
+            if (pl != null) _listOf[vid] = pl;
+            if (newTab)
+            {
+                OpenVideoInNewTab(new VideoItem { VideoId = vid }, activate: !backgroundTab);
+                if (backgroundTab) Toast("Видео добавлено в фоновую вкладку", Th.Good, 2000);
+            }
+            else
+            {
+                OpenVideo(new VideoItem { VideoId = vid }, "drop", pl);
+            }
+            return;
+        }
+
+        if (list.Success && url.Contains("youtube.com/", StringComparison.OrdinalIgnoreCase))
+        {
+            if (newTab) OpenInNewTab("playlist", list.Groups[1].Value, "", "", activate: !backgroundTab);
+            else OpenPlaylist(list.Groups[1].Value, "");
+            return;
+        }
+
+        var ch = System.Text.RegularExpressions.Regex.Match(url, @"youtube\.com/channel/(UC[A-Za-z0-9_-]{16,})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (ch.Success)
+        {
+            if (newTab) OpenInNewTab("channel", ch.Groups[1].Value, "", "", activate: !backgroundTab);
+            else OpenChannel(ch.Groups[1].Value, "");
+            return;
+        }
+
+        var handle = System.Text.RegularExpressions.Regex.Match(url, @"youtube\.com/(@[A-Za-z0-9_.-]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (handle.Success)
+        {
+            var h = handle.Groups[1].Value;
+            _search.Text = h;
+            if (newTab) OpenInNewTab("search", h, "", "", activate: !backgroundTab);
+            else OpenSearch(h);
+            return;
+        }
+
+        if (Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Scheme.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            Downloader.Instance.Enqueue(url);
+            OpenRoot("downloads");
+            Toast("Ссылка добавлена в загрузки", Th.Good);
+            return;
+        }
+
+        var q = raw.Trim();
+        _search.Text = q;
+        if (newTab) OpenInNewTab("search", q, "", "", activate: !backgroundTab);
+        else OpenSearch(q);
+    }
+
+    private static void DrawDropOverlay(float w, float h)
+    {
+        if (!DropTarget.IsDragging) return;
+        bool onTabs = DropTarget.DragToNewTab;
+        Gfx.Fill(new R(0, 0, w, h), Gfx.Fade(0xFF000000, Th.Light ? 0.20f : 0.48f));
+        if (onTabs)
+        {
+            var tabZone = new R(0, TopH, w, TabH);
+            Gfx.Fill(tabZone, Gfx.Fade(Th.Brand, 0.24f));
+            Gfx.Stroke(tabZone.Inset(2), Th.Brand, 6, 2f);
+        }
+        else
+        {
+            Gfx.Stroke(new R(12, TopH + TabH + 10, w - 24, MathF.Max(60, h - TopH - TabH - 22)), Gfx.Fade(Th.Brand, 0.72f), 14, 2f);
+        }
+
+        float cw = MathF.Min(460, w - 48), ch = 122;
+        var card = new R(Gfx.Snap((w - cw) / 2), Gfx.Snap((h - ch) / 2), cw, ch);
+        Gfx.Fill(card.Inset(-4), Gfx.Fade(0xFF000000, 0.34f), 20);
+        Gfx.FillFrosted(card, Th.Panel, 16, opacity: 0.96f);
+        Gfx.Stroke(card, Gfx.Fade(Th.Brand, 0.75f), 16, 1.5f);
+
+        var badge = new R(card.X + 20, card.Y + (ch - 48) / 2, 48, 48);
+        Gfx.Fill(badge, Gfx.Fade(Th.Brand, 0.18f), 12);
+        Gfx.Icon(onTabs ? Th.Add : Th.Play, badge, 20, Th.Brand);
+
+        float tx = badge.Right + 16, tw = card.Right - tx - 20;
+        var title = Gfx.Text(DropTarget.DragTitle, 16, 600, tw, 1);
+        Gfx.Draw(title, tx, card.Y + 22, Th.Text);
+        if (DropTarget.DragSubtitle.Length > 0)
+        {
+            var sub = Gfx.Text(DropTarget.DragSubtitle, 12.5f, 400, tw, 1);
+            Gfx.Draw(sub, tx, card.Y + 48, Th.Sub);
+        }
+        var hint = Gfx.Text(onTabs ? "Отпустите — откроется в новой вкладке" : "На панель вкладок или Ctrl — открыть в новой вкладке", 11.5f, 500, tw, 1);
+        Gfx.Draw(hint, tx, card.Bottom - 30, Th.Brand);
     }
 
     // ---------------- the frame ----------------
@@ -1360,6 +1632,7 @@ public static class Shell
             else Gfx.Fill(new R(sideW, h - barH, w - sideW, barH), Th.Panel);
         }
         DrawToast(w, h - barH);
+        DrawDropOverlay(w, h);
         var eff = AppSettings.Current.SeasonalEffect;
         if (eff == "halloween") DrawHalloweenFestive(w, h);
         else if (eff == "newyear") DrawNewYearFestive(w, h);
@@ -1912,6 +2185,11 @@ public static class Shell
             GoTab((_tab + dir + _tabs.Count) % _tabs.Count);
             return true;
         }
+        if (ctrl && W.KeyDown(0x10) && (vk == W.VK_PRIOR || vk == W.VK_NEXT) && _tabs.Count > 1)
+        {
+            MoveTab(_tab, Math.Clamp(_tab + (vk == W.VK_PRIOR ? -1 : 1), 0, _tabs.Count - 1));
+            return true;
+        }
         if (ctrl && vk == 'T')
         {
             if (W.KeyDown(0x10)) ReopenClosedTab();
@@ -2189,6 +2467,7 @@ public static class Shell
                 AppSettings.Current.WindowHeight = (rc.B - rc.T) / s;
             }
             T.Flush();
+            DropTarget.DetachAll();
             Downloader.Instance.Shutdown();
             Loupe.Shutdown();
             PreviewPlayer.Shutdown();
