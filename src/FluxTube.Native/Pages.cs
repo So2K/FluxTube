@@ -1887,7 +1887,7 @@ public sealed class WatchPage : IPage
             var showVidLbl = L.T("Показать видео", "Show video");
             var showVidW = UI.PillWidth(Th.Play, showVidLbl);
             topRx -= showVidW;
-            var tfVid = MusicBounce.Push(new R(topRx, topY, showVidW, 30), 26, amp: 0.85f);
+            var tfVid = MusicBounce.Push(new R(topRx, topY, showVidW, 30), 26, amp: 0.85f, textSafe: true);
             if (UI.Pill(UI.Id("ms:vid", _infoScroll), topRx, topY, 30, Th.Play, showVidLbl, out _, darkPill, 0xFFFFFFFF))
                 App.Post(Shell.ToggleAudioOnlyMode);
             MusicBounce.Pop(tfVid);
@@ -1895,7 +1895,7 @@ public sealed class WatchPage : IPage
 
             var eqW = UI.PillWidth(Th.Headphones, "EQ / FX");
             topRx -= eqW;
-            var tfEq = MusicBounce.Push(new R(topRx, topY, eqW, 30), 21, amp: 0.90f);
+            var tfEq = MusicBounce.Push(new R(topRx, topY, eqW, 30), 21, amp: 0.90f, textSafe: true);
             if (UI.Pill(UI.Id("ms:eq", _infoScroll), topRx, topY, 30, Th.Headphones, "EQ / FX", out _,
                 sOpt.AudioFxEnabled ? Th.Brand : darkPill, sOpt.AudioFxEnabled ? Th.OnBrand : 0xFFFFFFFF))
                 App.Post(AudioStudioPanel.Toggle);
@@ -1906,7 +1906,7 @@ public sealed class WatchPage : IPage
             var djLbl = "DJ";
             var djW = UI.PillWidth("\uE958", djLbl);
             topRx -= djW;
-            var tfDj = MusicBounce.Push(new R(topRx, topY, djW, 30), 16, amp: 0.95f);
+            var tfDj = MusicBounce.Push(new R(topRx, topY, djW, 30), 16, amp: 0.95f, textSafe: true);
             if (UI.Pill(UI.Id("ms:dj", _infoScroll), topRx, topY, 30, "\uE958", djLbl, out _,
                 djOn ? Th.Brand : darkPill, djOn ? Th.OnBrand : 0xFFFFFFFF))
                 App.Post(AudioStudioPanel.ShowDj);
@@ -1916,7 +1916,7 @@ public sealed class WatchPage : IPage
             var shLbl = L.T("Тряска", "Shake");
             var shW = UI.PillWidth(null, shLbl);
             topRx -= shW;
-            var tfSh = MusicBounce.Push(new R(topRx, topY, shW, 30), 11, amp: 0.95f);
+            var tfSh = MusicBounce.Push(new R(topRx, topY, shW, 30), 11, amp: 0.95f, textSafe: true);
             if (UI.Pill(UI.Id("ms:shake", _infoScroll), topRx, topY, 30, null, shLbl, out _,
                 sOpt.MusicBassShake ? Th.Brand : darkPill, sOpt.MusicBassShake ? Th.OnBrand : 0xFFFFFFFF))
             {
@@ -1930,7 +1930,7 @@ public sealed class WatchPage : IPage
             var impLbl = L.T("Драйв", "Impact");
             var impW = UI.PillWidth(null, impLbl);
             topRx -= impW;
-            var tfImp = MusicBounce.Push(new R(topRx, topY, impW, 30), 7, amp: 0.90f);
+            var tfImp = MusicBounce.Push(new R(topRx, topY, impW, 30), 7, amp: 0.90f, textSafe: true);
             if (UI.Pill(UI.Id("ms:impact", _infoScroll), topRx, topY, 30, null, impLbl, out _,
                 sOpt.MusicImpactEffects ? Th.Brand : darkPill, sOpt.MusicImpactEffects ? Th.OnBrand : 0xFFFFFFFF))
             {
@@ -1943,7 +1943,7 @@ public sealed class WatchPage : IPage
             var bgLbl = fullArtMode ? L.T("Карточка", "Card") : L.T("На весь фон", "Full Art");
             var bgW = UI.PillWidth(null, bgLbl);
             topRx -= bgW;
-            var tfBg = MusicBounce.Push(new R(topRx, topY, bgW, 30), 3, amp: 0.85f);
+            var tfBg = MusicBounce.Push(new R(topRx, topY, bgW, 30), 3, amp: 0.85f, textSafe: true);
             if (UI.Pill(UI.Id("ms:bgmode", _infoScroll), topRx, topY, 30, null, bgLbl, out _,
                 fullArtMode ? Th.Brand : darkPill, fullArtMode ? Th.OnBrand : 0xFFFFFFFF))
             {
@@ -1961,7 +1961,7 @@ public sealed class WatchPage : IPage
                     : L.T("Только звук · Видео отключено", "Audio only · Video disabled");
                 var chip = Gfx.Text(chipTxt, 11.5f, 600, maxChipW - 22);
                 var cb = new R(video.X + 16, video.Y + 14, MathF.Min(maxChipW, chip.W + 22), 26);
-                var tfCb = MusicBounce.Push(cb, 6, amp: 0.65f, rotAmp: 0.30f);
+                var tfCb = MusicBounce.Push(cb, 6, amp: 0.65f, rotAmp: 0.30f, textSafe: true);
                 Gfx.Fill(cb, darkPill, 13);
                 Gfx.Stroke(cb, Gfx.Fade(0xFFFFFFFF, 0.14f), 13, 1f);
                 Gfx.Draw(chip, cb.X + 11, cb.Y + (cb.H - chip.H) / 2, 0xFFF2F2F7);
@@ -1988,7 +1988,7 @@ public sealed class WatchPage : IPage
                 var artR = new R(artX, artY, artW, artH);
 
                 // Exact v9.2.2 elastic GPU bass bounce + dual expanding neon shockwave rings around cover art!
-                var tfArt = MusicBounce.Push(artR, 1, amp: 1.50f, rotAmp: 1.30f);
+                var tfArt = MusicBounce.Push(artR, 1, amp: 1.50f, rotAmp: 1.30f, textSafe: false);
                 if (sOpt.MusicBassShake && bass > 0.14f)
                 {
                     float ringExp = (bass - 0.14f) * 32f;
@@ -2045,7 +2045,7 @@ public sealed class WatchPage : IPage
                 var bdR = new R(txtX + chRun.W + 10f, subY + 1f, bdRun.W + 12f, 19f);
                 if (bdR.Right <= video.Right - 20f)
                 {
-                    var tfBd = MusicBounce.Push(bdR, 14, amp: 0.95f);
+                    var tfBd = MusicBounce.Push(bdR, 14, amp: 0.95f, textSafe: true);
                     Gfx.Fill(bdR, Gfx.Fade(0xFFFFFFFF, 0.16f), 4f);
                     Gfx.Stroke(bdR, Gfx.Fade(0xFFFFFFFF, 0.22f), 4f, 1f);
                     Gfx.Draw(bdRun, bdR.X + 6f, bdR.Y + (bdR.H - bdRun.H) * 0.5f, 0xFFFFFFFF);
@@ -2385,7 +2385,7 @@ public sealed class WatchPage : IPage
 
         var chMaxW = MathF.Max(70, MathF.Min(260, leftEdge - (x0 + 54) - 14));
         var chAvR = new R(x0, y + 1, 42, 42);
-        var tfChAv = MusicBounce.Push(chAvR, 3, amp: 1.22f);
+        var tfChAv = MusicBounce.Push(chAvR, 3, amp: 1.22f, textSafe: false);
         Cards.Avatar(chAvR.X, chAvR.Y, chAvR.W, _info?.ChannelAvatar, chName);
         MusicBounce.Pop(tfChAv);
         var nameRun = Gfx.Text(chName, 15, 600, chMaxW);

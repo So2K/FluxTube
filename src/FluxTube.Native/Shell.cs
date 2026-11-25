@@ -1782,11 +1782,13 @@ public static class Shell
         AudioAnalyzer.RequestFrame(force: true, visual: false);
         float dt = (float)Math.Clamp(UI.Dt, 0.003, 0.04);
         float bass = AudioAnalyzer.BassEnergy;
+        float loudGain = AudioAnalyzer.LoudnessGain;
+        float dyn = AudioAnalyzer.TrackDynamics;
         _vbBassAvg += (bass - _vbBassAvg) * (1f - MathF.Exp(-dt * 6.5f));
-        float kickRaw = MathF.Max(0f, bass - _vbBassAvg * 0.84f) * 2.85f
-                      + MathF.Max(0f, bass - 0.24f) * 0.88f
-                      + AudioAnalyzer.BeatMotionStrength * 0.55f;
-        _vbKick = MathF.Max(_vbKick * MathF.Exp(-dt * 14.5f), Math.Clamp(kickRaw, 0f, 1.45f));
+        float kickRaw = (MathF.Max(0f, bass - _vbBassAvg * 0.84f) * 2.85f
+                      + MathF.Max(0f, bass - 0.22f) * 0.92f
+                      + AudioAnalyzer.BeatMotionStrength * 0.58f) * loudGain;
+        _vbKick = MathF.Max(_vbKick * MathF.Exp(-dt * (13.0f + (1f - Math.Clamp(dyn - 0.6f, 0f, 1f)) * 4.5f)), Math.Clamp(kickRaw, 0f, 1.65f));
 
         if (_vbKick <= 0.015f)
         {
@@ -1795,11 +1797,11 @@ public static class Shell
             return;
         }
 
-        _vbPhase += dt * (11.5f + _vbKick * 17.5f);
+        _vbPhase += dt * (10.5f + _vbKick * 18.5f + AudioAnalyzer.HighEnergy * 5.0f);
         float waveY = -0.55f + 0.45f * MathF.Cos(_vbPhase * 1.15f);
         float waveX = MathF.Sin(_vbPhase * 0.94f);
-        float dx = Gfx.Snap(Math.Clamp(waveX * _vbKick * 3.8f, -5.5f, 5.5f));
-        float dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 6.8f, -8.5f, 5.0f));
+        float dx = Gfx.Snap(Math.Clamp(waveX * _vbKick * 4.2f, -6.5f, 6.5f));
+        float dy = Gfx.Snap(Math.Clamp(waveY * _vbKick * 7.4f, -9.5f, 5.5f));
         VideoBeatShift = new System.Numerics.Vector2(dx, dy);
         VideoBeatGlow = Math.Clamp(_vbKick * 0.72f, 0f, 1.0f);
         UI.Animate();
@@ -2323,7 +2325,7 @@ public static class Shell
         }
 
         var thumb = new R(r.X + 14, r.Y + 9, 78, 44);
-        var tfTh = MusicBounce.Push(thumb, 1, amp: 1.25f);
+        var tfTh = MusicBounce.Push(thumb, 1, amp: 1.25f, textSafe: false);
         Cards.Thumb(thumb, cur, false, 7, badge: false, behind: Th.Panel);
         MusicBounce.Pop(tfTh);
         if (UI.Click(UI.Id("np:thumb"), thumb)) App.Post(OpenCurrentVideo);

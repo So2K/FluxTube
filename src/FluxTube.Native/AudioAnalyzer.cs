@@ -38,6 +38,8 @@ public static unsafe class AudioAnalyzer
     private static long _lastNeededAt, _lastForcedAt;
     private static bool _loggedMode;
     private static float _bassEnergy, _midEnergy, _highEnergy;
+    private static float _capturedTrackRms, _capturedRawRms;
+    private static float _loudness, _slowTrackRms = 0.08f, _trackDynamics = 1f, _loudnessGain = 1f;
     private static long _lastStepFrame = -1;
 
     private static float _beatEnvelope, _beatPhase, _capturedBeatStrength;
@@ -55,6 +57,12 @@ public static unsafe class AudioAnalyzer
     public static float BassEnergy => _bassEnergy;
     public static float MidEnergy => _midEnergy;
     public static float HighEnergy => _highEnergy;
+    /// <summary>Perceptual track loudness (0..1, -44..-5 dBFS) reflecting real quiet vs loud sections.</summary>
+    public static float Loudness => _loudness;
+    /// <summary>Short-term loudness relative to the track's 5s baseline (0.35 quiet intro .. 1.55 big drop).</summary>
+    public static float TrackDynamics => _trackDynamics;
+    /// <summary>Combined shake multiplier driven by track loudness, drop dynamics, and player volume (0..1.65).</summary>
+    public static float LoudnessGain => _loudnessGain;
     public static ReadOnlySpan<float> Bands => _smoothBands;
     public static ReadOnlySpan<float> Peaks => _peakBands;
     public static ReadOnlySpan<float> Wave => _smoothWave;
@@ -170,6 +178,30 @@ public static unsafe class AudioAnalyzer
             _bassEnergy = Math.Clamp(bass / 6f, 0f, 1f);
             _midEnergy = Math.Clamp(mid / 12f, 0f, 1f);
             _highEnergy = Math.Clamp(high / (BandCount - 18f), 0f, 1f);
+
+            // Real track loudness (dBFS) + 5-second dynamic drop tracker + player volume curve
+            float trackRms = playing ? _capturedTrackRms : 0f;
+            float db = trackRms > 0.0002f ? 20f * MathF.Log10(trackRms) : -60f;
+            float loudTarget = playing ? Math.Clamp((db + 42f) / 36f, 0f, 1f) : 0f; // -42 dBFS -> 0, -6 dBFS -> 1
+            float loudAlpha = 1f - MathF.Exp(-dt * (loudTarget > _loudness ? 18f : 7.5f));
+            _loudness += (loudTarget - _loudness) * loudAlpha;
+
+            if (playing && trackRms > 0.003f)
+                _slowTrackRms += (trackRms - _slowTrackRms) * (1f - MathF.Exp(-dt * 0.28f));
+            else if (!playing)
+                _slowTrackRms = 0.08f;
+
+            float dynTarget = playing ? Math.Clamp(trackRms / MathF.Max(0.025f, _slowTrackRms), 0.35f, 1.55f) : 0f;
+            _trackDynamics += (dynTarget - _trackDynamics) * (1f - MathF.Exp(-dt * 9.5f));
+
+            // Player volume gently scales physical shake feel (0% = 0, 25% = 0.56, 70% = 0.96, 100% = 1.18, 130% = 1.36)
+            var mpv = MpvPlayer.Instance;
+            float volPct = mpv.Muted ? 0f : Math.Clamp((float)mpv.Volume, 0f, 150f);
+            float volCurve = volPct <= 0.5f ? 0f : Math.Clamp(0.24f + MathF.Pow(volPct / 100f, 0.72f) * 0.94f, 0f, 1.42f);
+            float combined = playing
+                ? Math.Clamp((0.20f + 1.10f * MathF.Pow(_loudness, 1.25f)) * (0.58f + 0.52f * _trackDynamics) * volCurve, 0f, 1.68f)
+                : 0f;
+            _loudnessGain += (combined - _loudnessGain) * (1f - MathF.Exp(-dt * 14f));
 
             for (int i = 0; i < WavePoints; i++)
             {
@@ -590,8 +622,10 @@ public static unsafe class AudioAnalyzer
                                     }
                                 }
                                 bool silent = (flags & 0x2) != 0 || data == null;
-                                // Compensate player volume so WASAPI loopback spectrum & bass shake stay equally punchy at 20-40% volume!
+                                // Compensate player volume for spectrum visibility while also tracking true raw & track RMS loudness!
                                 float volGain = Math.Clamp(100f / MathF.Max(14f, (float)MpvPlayer.Instance.Volume), 0.72f, 4.2f);
+                                float sumSqComp = 0f, sumSqRaw = 0f;
+                                uint rmsCount = 0;
                                 if (silent)
                                 {
                                     for (uint f = 0; f < frames; f++) { ring[ringPos] = 0f; DetectBass(0, f); ringPos = (ringPos + 1) & (FftSize - 1); }
@@ -600,13 +634,17 @@ public static unsafe class AudioAnalyzer
                                 else if (isFloat && bits == 32)
                                 {
                                     var fp = (float*)data;
-                                    float invCh = volGain / channels;
+                                    float invRaw = 1f / channels;
                                     for (uint f = 0; f < frames; f++)
                                     {
                                         float sum = 0f;
                                         int baseIdx = (int)(f * channels);
                                         for (int c = 0; c < channels; c++) sum += fp[baseIdx + c];
-                                        float sample = Math.Clamp(sum * invCh, -1.6f, 1.6f);
+                                        float raw = sum * invRaw;
+                                        float sample = Math.Clamp(raw * volGain, -1.6f, 1.6f);
+                                        sumSqRaw += raw * raw;
+                                        sumSqComp += sample * sample;
+                                        rmsCount++;
                                         ring[ringPos] = sample;
                                         DetectBass(sample, f);
                                         ringPos = (ringPos + 1) & (FftSize - 1);
@@ -616,18 +654,36 @@ public static unsafe class AudioAnalyzer
                                 else if (bits == 16)
                                 {
                                     var sp = (short*)data;
-                                    float scale = volGain / (32768f * channels);
+                                    float rawScale = 1f / (32768f * channels);
                                     for (uint f = 0; f < frames; f++)
                                     {
                                         float sum = 0f;
                                         int baseIdx = (int)(f * channels);
                                         for (int c = 0; c < channels; c++) sum += sp[baseIdx + c];
-                                        float sample = Math.Clamp(sum * scale, -1.6f, 1.6f);
+                                        float raw = sum * rawScale;
+                                        float sample = Math.Clamp(raw * volGain, -1.6f, 1.6f);
+                                        sumSqRaw += raw * raw;
+                                        sumSqComp += sample * sample;
+                                        rmsCount++;
                                         ring[ringPos] = sample;
                                         DetectBass(sample, f);
                                         ringPos = (ringPos + 1) & (FftSize - 1);
                                     }
                                     gotSamples = true;
+                                }
+                                if (rmsCount > 0)
+                                {
+                                    float pktTrackRms = MathF.Sqrt(sumSqComp / rmsCount);
+                                    float pktRawRms = MathF.Sqrt(sumSqRaw / rmsCount);
+                                    lock (_dataLock)
+                                    {
+                                        _capturedTrackRms = _capturedTrackRms * 0.55f + pktTrackRms * 0.45f;
+                                        _capturedRawRms = _capturedRawRms * 0.55f + pktRawRms * 0.45f;
+                                    }
+                                }
+                                else if (silent)
+                                {
+                                    lock (_dataLock) { _capturedTrackRms *= 0.7f; _capturedRawRms *= 0.7f; }
                                 }
                                 if (beatHit)
                                 {

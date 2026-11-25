@@ -688,6 +688,7 @@ public static unsafe class Gfx
         _dashStyle = null;
         _imgBrush?.Dispose();
         _imgBrush = null;
+        DisposeDanceAtlas();
         BgEngine.DisposeGpuResources();
         MusicArt.OnDeviceLost();
         DisposeMotionBlurResources();
@@ -726,17 +727,25 @@ public static unsafe class Gfx
         _mbDepth = 0;
     }
 
+    private static float _mbResScale = 1f;
+
     private static void EnsureMotionBlurResources()
     {
         if (PxW <= 0 || PxH <= 0) return;
-        if (_mbBmp == null || _mbBmpW != PxW || _mbBmpH != PxH || MathF.Abs(_mbBmpScale - Scale) > 0.001f)
+        // Above 1080p (e.g. 2694x1824 / 4K), render scroll motion blur at half resolution -> 4x less VRAM & 4x faster GPU DirectionalBlur!
+        float resScale = (long)PxW * PxH > 2_000_000L ? 0.5f : 1f;
+        int tw = Math.Max(1, (int)(PxW * resScale));
+        int th = Math.Max(1, (int)(PxH * resScale));
+        float targetDpi = 96f * Scale * resScale;
+        if (_mbBmp == null || _mbBmpW != tw || _mbBmpH != th || MathF.Abs(_mbBmpScale - targetDpi) > 0.05f)
         {
             _mbBmp?.Dispose();
-            _mbBmp = DC.CreateBitmap(new SizeI(PxW, PxH),
-                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96 * Scale, 96 * Scale, BitmapOptions.Target));
-            _mbBmpW = PxW;
-            _mbBmpH = PxH;
-            _mbBmpScale = Scale;
+            _mbBmp = DC.CreateBitmap(new SizeI(tw, th),
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), targetDpi, targetDpi, BitmapOptions.Target));
+            _mbBmpW = tw;
+            _mbBmpH = th;
+            _mbBmpScale = targetDpi;
+            _mbResScale = resScale;
         }
         if (_mbEffect == null)
         {
@@ -753,7 +762,7 @@ public static unsafe class Gfx
     public static bool PushMotionBlur(R region, float vx, float vy)
     {
         var s = Services.AppSettings.Current;
-        if (!s.UiMotionBlur || _target == null || _mbDepth > 0 || region.W < 4 || region.H < 4)
+        if (!s.UiMotionBlur || _target == null || _mbDepth > 0 || MusicBounce.Active || region.W < 4 || region.H < 4)
             return false;
 
         float speed = MathF.Sqrt(vx * vx + vy * vy);
@@ -787,6 +796,7 @@ public static unsafe class Gfx
             for (int i = savedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
 
             DC.Target = _mbBmp;
+            DC.SetDpi(96f * Scale * _mbResScale, 96f * Scale * _mbResScale);
             float pad = MathF.Ceiling(stdDev * 3.2f) + 6f;
             var clearR = new R(0, 0, W, H).Intersect(effRegion.Inset(-pad));
             DC.PushAxisAlignedClip(Raw(clearR), AntialiasMode.Aliased);
@@ -809,6 +819,8 @@ public static unsafe class Gfx
         }
         catch
         {
+            DC.Target = _activeTarget ?? _target;
+            DC.SetDpi(96f * Scale, 96f * Scale);
             _mbDepth = 0;
             return false;
         }
@@ -824,6 +836,7 @@ public static unsafe class Gfx
         for (int i = _mbSavedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
 
         DC.Target = _activeTarget ?? _target;
+        DC.SetDpi(96f * Scale, 96f * Scale);
 
         for (int i = 0; i < _mbSavedClips; i++)
             DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
@@ -1837,14 +1850,130 @@ public static unsafe class Gfx
         return run;
     }
 
-    private readonly record struct GlyphSlot(string Ch, float Ox, float Oy, float W, float H, int Idx, TextRun Run);
+    private readonly record struct DanceGlyphKey(char Ch, int Size10, int Weight, string Font);
+    private readonly record struct DanceSprite(float SrcX, float SrcY, float SrcW, float SrcH, float DipW, float DipH, float Pad);
+    private readonly record struct GlyphSlot(char Ch, float Ox, float Oy, float W, float H, int Idx);
     private sealed class GlyphRunEntry { public required GlyphSlot[] Slots; public int TextGen; }
     private static readonly Dictionary<TKey, GlyphRunEntry> _glyphCache = new();
+    private static readonly Dictionary<DanceGlyphKey, DanceSprite> _danceSprites = new();
+    private static ID2D1Bitmap1? _danceAtlas;
+    private static int _dancePenX, _dancePenY, _danceRowH;
+    private const int DanceAtlasW = 1024, DanceAtlasH = 512;
+    private const float DanceAtlasScale = 2f; // 2x supersampled crisp GPU sprites -> ZERO D2D glyph-atlas thrashing!
     private static int _textCacheGen;
 
+    private static void DisposeDanceAtlas()
+    {
+        _danceAtlas?.Dispose();
+        _danceAtlas = null;
+        _danceSprites.Clear();
+        _dancePenX = _dancePenY = _danceRowH = 0;
+    }
+
+    private static bool TryGetDanceSprite(char ch, float size, int weight, out DanceSprite sprite)
+    {
+        var font = ActiveFontName();
+        var gk = new DanceGlyphKey(ch, (int)(size * 10), weight, font);
+        if (_danceAtlas != null && _danceSprites.TryGetValue(gk, out sprite))
+            return true;
+
+        sprite = default;
+        if (_activeTarget == null || _mbDepth > 0) return false;
+
+        try
+        {
+            if (_danceAtlas == null)
+            {
+                _danceAtlas = DC.CreateBitmap(new SizeI(DanceAtlasW, DanceAtlasH),
+                    new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.Target));
+                _dancePenX = 2; _dancePenY = 2; _danceRowH = 0;
+                _danceSprites.Clear();
+                // Clear newly created atlas once
+                var savedTf0 = DC.Transform;
+                int savedClips0 = _clipDepth;
+                for (int i = savedClips0 - 1; i >= 0; i--) DC.PopAxisAlignedClip();
+                DC.Target = _danceAtlas;
+                DC.SetDpi(96, 96);
+                DC.Transform = Matrix3x2.Identity;
+                DC.Clear(new Color4(0, 0, 0, 0));
+                DC.Target = _activeTarget;
+                DC.SetDpi(96 * Scale, 96 * Scale);
+                DC.Transform = savedTf0;
+                for (int i = 0; i < savedClips0; i++) DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
+            }
+
+            var chRun = Text(ch.ToString(), size, weight, 0, 1);
+            if (chRun.Layout == null) return false;
+            const float pad = 3f;
+            float dipW = MathF.Ceiling(MathF.Max(4f, chRun.W)) + pad * 2f;
+            float dipH = MathF.Ceiling(MathF.Max(size, chRun.H)) + pad * 2f;
+            int pxW = (int)MathF.Ceiling(dipW * DanceAtlasScale);
+            int pxH = (int)MathF.Ceiling(dipH * DanceAtlasScale);
+            if (pxW <= 0 || pxH <= 0 || pxW >= DanceAtlasW - 4 || pxH >= DanceAtlasH - 4) return false;
+
+            // Shelf-pack into 1024x512 atlas; if full, reset cleanly (rare — holds ~400+ distinct glyphs!)
+            if (_dancePenX + pxW + 2 > DanceAtlasW)
+            {
+                _dancePenX = 2;
+                _dancePenY += _danceRowH + 2;
+                _danceRowH = 0;
+            }
+            if (_dancePenY + pxH + 2 > DanceAtlasH)
+            {
+                _danceSprites.Clear();
+                _dancePenX = 2; _dancePenY = 2; _danceRowH = 0;
+                var savedTfR = DC.Transform;
+                int savedClipsR = _clipDepth;
+                for (int i = savedClipsR - 1; i >= 0; i--) DC.PopAxisAlignedClip();
+                DC.Target = _danceAtlas;
+                DC.SetDpi(96, 96);
+                DC.Transform = Matrix3x2.Identity;
+                DC.Clear(new Color4(0, 0, 0, 0));
+                DC.Target = _activeTarget;
+                DC.SetDpi(96 * Scale, 96 * Scale);
+                DC.Transform = savedTfR;
+                for (int i = 0; i < savedClipsR; i++) DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
+            }
+
+            int sx = _dancePenX, sy = _dancePenY;
+            _dancePenX += pxW + 2;
+            if (pxH > _danceRowH) _danceRowH = pxH;
+
+            // Rasterize glyph ONCE in pure white into _danceAtlas at 2x scale!
+            var savedTf = DC.Transform;
+            var savedTextAA = DC.TextAntialiasMode;
+            int savedClips = _clipDepth;
+            for (int i = savedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
+            try
+            {
+                DC.Target = _danceAtlas;
+                DC.SetDpi(96, 96);
+                DC.TextAntialiasMode = Vortice.Direct2D1.TextAntialiasMode.Grayscale;
+                DC.Transform = Matrix3x2.CreateScale(DanceAtlasScale) * Matrix3x2.CreateTranslation(sx, sy);
+                DC.DrawTextLayout(new Vector2(pad, pad), chRun.Layout, Scratch(0xFFFFFFFF), DrawTextOptions.None);
+            }
+            finally
+            {
+                DC.TextAntialiasMode = savedTextAA;
+                DC.Target = _activeTarget;
+                DC.SetDpi(96 * Scale, 96 * Scale);
+                DC.Transform = savedTf;
+                for (int i = 0; i < savedClips; i++) DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
+            }
+
+            sprite = new DanceSprite(sx, sy, pxW, pxH, dipW, dipH, pad);
+            _danceSprites[gk] = sprite;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     /// <summary>
-    /// Per-character independent dancing vector text (exact DirectWrite kerning &amp; line wrapping cached once per string):
-    /// caches each glyph's DirectWrite TextRun directly inside GlyphSlot -> ZERO per-frame dictionary lookups!
+    /// Per-character 3-band Fourier liquid-wave dancing text rendered from a 2x supersampled GPU opacity-mask sprite atlas:
+    /// ZERO per-frame DirectWrite rasterization, ZERO D2D glyph-atlas stalls, silky 144/240 FPS rotation &amp; squash-stretch!
     /// </summary>
     public static TextRun DrawDancingText(string text, float x, float y, float size, uint color, int weight = 600,
         float maxW = 0, int lines = 2, bool shadow = false, float amp = 1.0f, uint accentMixColor = 0)
@@ -1877,9 +2006,7 @@ public static unsafe class Gfx
                 if (char.IsWhiteSpace(ch)) continue;
                 run.Layout.HitTestTextPosition((uint)i, false, out float gx, out float gy, out var m);
                 if (gy >= maxY - 1f || (maxW > 0 && gx + m.Width > maxW + 4f)) continue;
-                var chStr = ch.ToString();
-                var chRun = Text(chStr, size, weight, 0, 1);
-                list.Add(new GlyphSlot(chStr, gx, gy, MathF.Max(4f, m.Width), MathF.Max(size, m.Height), visIdx++, chRun));
+                list.Add(new GlyphSlot(ch, gx, gy, MathF.Max(4f, m.Width), MathF.Max(size, m.Height), visIdx++));
             }
             entry = new GlyphRunEntry { Slots = list.ToArray(), TextGen = _textCacheGen };
             _glyphCache[key] = entry;
@@ -1893,19 +2020,53 @@ public static unsafe class Gfx
             return run;
         }
 
-        for (int i = 0; i < slots.Length; i++)
+        // Pre-warm any unseen glyphs into the GPU sprite atlas BEFORE switching AntialiasMode
+        bool atlasOk = _activeTarget != null && _mbDepth == 0;
+        if (atlasOk)
         {
-            var g = slots[i];
-            float gx = x + g.Ox, gy = y + g.Oy;
-            var gr = g.Run;
-            if (gr.Layout == null) gr = Text(g.Ch, size, weight, 0, 1);
-            var tf = MusicBounce.PushGlyph(new R(gx, gy, g.W, g.H), g.Idx, amp, out float energy);
-            uint col = accentMixColor != 0 && energy > 0.35f
-                ? Mix(color, accentMixColor, Math.Clamp((energy - 0.35f) * 0.55f, 0f, 0.48f))
-                : color;
-            if (shadow) Draw(gr, gx + 1f, gy + 1.5f, Fade(0xFF000000, 0.58f));
-            Draw(gr, gx, gy, col);
-            MusicBounce.Pop(tf);
+            for (int i = 0; i < slots.Length; i++)
+            {
+                if (!TryGetDanceSprite(slots[i].Ch, size, weight, out _)) { atlasOk = false; break; }
+            }
+        }
+
+        if (!atlasOk || _danceAtlas == null)
+        {
+            // Safe fallback (translation-only, zero glyph-atlas thrashing)
+            if (shadow) Draw(run, x + 1f, y + 1.5f, Fade(0xFF000000, 0.58f));
+            Draw(run, x, y, color);
+            return run;
+        }
+
+        var prevAA = DC.AntialiasMode;
+        DC.AntialiasMode = AntialiasMode.Aliased; // required by Direct2D FillOpacityMask; atlas glyphs are 2x supersampled!
+        var font = ActiveFontName();
+        int size10 = (int)(size * 10);
+        try
+        {
+            for (int i = 0; i < slots.Length; i++)
+            {
+                var g = slots[i];
+                if (!_danceSprites.TryGetValue(new DanceGlyphKey(g.Ch, size10, weight, font), out var sp)) continue;
+                float gx = x + g.Ox, gy = y + g.Oy;
+                var tf = MusicBounce.PushGlyph(new R(gx, gy, g.W, g.H), g.Idx, amp, out float energy);
+                uint col = accentMixColor != 0 && energy > 0.35f
+                    ? Mix(color, accentMixColor, Math.Clamp((energy - 0.35f) * 0.55f, 0f, 0.48f))
+                    : color;
+                var srcR = new Vortice.RawRectF(sp.SrcX, sp.SrcY, sp.SrcX + sp.SrcW, sp.SrcY + sp.SrcH);
+                if (shadow)
+                {
+                    var shR = new Vortice.RawRectF(gx - sp.Pad + 1f, gy - sp.Pad + 1.5f, gx - sp.Pad + 1f + sp.DipW, gy - sp.Pad + 1.5f + sp.DipH);
+                    DC.FillOpacityMask(_danceAtlas, Scratch(Fade(0xFF000000, 0.58f)), OpacityMaskContent.Graphics, shR, srcR);
+                }
+                var dstR = new Vortice.RawRectF(gx - sp.Pad, gy - sp.Pad, gx - sp.Pad + sp.DipW, gy - sp.Pad + sp.DipH);
+                DC.FillOpacityMask(_danceAtlas, Scratch(col), OpacityMaskContent.Graphics, dstR, srcR);
+                MusicBounce.Pop(tf);
+            }
+        }
+        finally
+        {
+            DC.AntialiasMode = prevAA;
         }
         return run;
     }
@@ -1963,6 +2124,7 @@ public static unsafe class Gfx
         if (minimized)
         {
             DisposeGlassTargets();
+            DisposeDanceAtlas();
             DropIdleText();
             _glyphCache.Clear();
         }
@@ -1974,6 +2136,7 @@ public static unsafe class Gfx
         foreach (var r in _cur.Values) r.Layout?.Dispose();
         _prev.Clear(); _cur.Clear();
         _glyphCache.Clear();
+        DisposeDanceAtlas();
         _textCacheGen++;
         while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
     }
@@ -1991,8 +2154,9 @@ public static class MusicBounce
     public static float Bass { get; private set; }
     public static float Mid { get; private set; }
     public static float High { get; private set; }
+    public static float LoudnessGain { get; private set; }
 
-    private static float _bassAvg, _phase;
+    private static float _bassAvg, _phase, _lowPhase, _midPhase, _highPhase;
     private static readonly float[] _bandAvg = new float[32];
     private static readonly float[] _bandPulse = new float[32];
 
@@ -2003,7 +2167,7 @@ public static class MusicBounce
             if (Active)
             {
                 Active = false;
-                Kick = Bass = Mid = High = _bassAvg = 0f;
+                Kick = Bass = Mid = High = LoudnessGain = _bassAvg = 0f;
                 Array.Clear(_bandAvg);
                 Array.Clear(_bandPulse);
             }
@@ -2015,13 +2179,16 @@ public static class MusicBounce
         float bass = AudioAnalyzer.BassEnergy;
         float mid = AudioAnalyzer.MidEnergy;
         float high = AudioAnalyzer.HighEnergy;
-        Bass = bass; Mid = mid; High = high;
+        float loud = AudioAnalyzer.LoudnessGain;
+        float dyn = AudioAnalyzer.TrackDynamics;
+        Bass = bass; Mid = mid; High = high; LoudnessGain = loud;
 
-        // Exact v9.2.2 silky FFT bass transient envelope — tight, elastic, 100% locked to the rhythm!
+        // Track-adaptive loudness & dynamic drop physics: quiet intros breathe softly, big drops slam hard!
         float avgAlpha = 1f - MathF.Exp(-dt * 6.5f);
         _bassAvg += (bass - _bassAvg) * avgAlpha;
-        float kickRaw = MathF.Max(0f, bass - _bassAvg * 0.84f) * 2.85f + MathF.Max(0f, bass - 0.24f) * 0.88f;
-        Kick = MathF.Max(Kick * MathF.Exp(-dt * 14.5f), Math.Clamp(kickRaw, 0f, 1.50f));
+        float kickRaw = (MathF.Max(0f, bass - _bassAvg * 0.82f) * 2.95f + MathF.Max(0f, bass - 0.22f) * 0.90f) * loud;
+        float kickDecay = 12.5f + (1f - Math.Clamp(dyn - 0.6f, 0f, 1f)) * 4.5f;
+        Kick = MathF.Max(Kick * MathF.Exp(-dt * kickDecay), Math.Clamp(kickRaw, 0f, 1.65f));
 
         var bands = AudioAnalyzer.Bands;
         float decay = MathF.Exp(-dt * 13.5f);
@@ -2031,36 +2198,51 @@ public static class MusicBounce
         {
             float v = bands[i];
             _bandAvg[i] += (v - _bandAvg[i]) * bandAvgA;
-            float trans = MathF.Max(0f, v - _bandAvg[i] * 0.78f) * 2.40f + v * 0.64f;
-            float next = MathF.Max(_bandPulse[i] * decay, Math.Clamp(trans, 0f, 1.50f));
+            float trans = (MathF.Max(0f, v - _bandAvg[i] * 0.78f) * 2.40f + v * 0.64f) * loud;
+            float next = MathF.Max(_bandPulse[i] * decay, Math.Clamp(trans, 0f, 1.65f));
             _bandPulse[i] = next;
             if (next > maxE) maxE = next;
         }
 
-        _phase += dt * (11.5f + Kick * 17.5f);
+        // 3 independent Fourier water-wave phase velocities: slow deep bass swell, flowing mid wave, rapid treble ripples!
+        _phase += dt * (10.5f + Kick * 17.5f);
+        _lowPhase += dt * (3.2f + Bass * 4.8f + Kick * 5.5f);
+        _midPhase += dt * (6.4f + Mid * 8.2f);
+        _highPhase += dt * (12.5f + High * 14.0f);
         Active = maxE > 0.012f;
         if (Active) UI.Animate();
     }
 
     public static float BandEnergy(int band) => Active ? _bandPulse[band & 31] : 0f;
 
-    /// <summary>Pushes an independent per-element GPU hop/scale/tilt transform centered on rect. Zero heap alloc.</summary>
-    public static Matrix3x2 Push(R rect, int band, float amp = 1.0f, float rotAmp = 1.0f)
+    /// <summary>
+    /// Pushes an independent per-element GPU hop/scale/tilt transform centered on rect. Zero heap alloc.
+    /// Pass textSafe: true for text-bearing widgets (pure translation -> ZERO Direct2D glyph-atlas re-rasterization!).
+    /// </summary>
+    public static Matrix3x2 Push(R rect, int band, float amp = 1.0f, float rotAmp = 1.0f, bool textSafe = true)
     {
         var prev = Gfx.DC.Transform;
         if (!Active) return prev;
         int b = band & 31;
-        float kickShare = b < 8 ? 0.50f : b < 18 ? 0.24f : 0.12f;
+        float kickShare = b < 8 ? 0.52f : b < 18 ? 0.25f : 0.12f;
         float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.32f : 1.0f;
-        float e = Math.Clamp(_bandPulse[b] * 0.78f + Kick * kickShare, 0f, 1.65f) * amp * drive;
+        float e = Math.Clamp(_bandPulse[b] * 0.78f + Kick * kickShare, 0f, 1.70f) * amp * drive;
         if (e <= 0.008f) return prev;
 
         // Distinct phase per band so neighbouring items ripple & hop independently like v9.2.2!
         float wave = MathF.Cos(_phase * 1.15f + b * 1.29f);
-        float dy = Math.Clamp((-0.55f + 0.45f * wave) * e * 4.8f, -8.5f, 5.5f);
+        float dy = Math.Clamp((-0.55f + 0.45f * wave) * e * 4.8f, -9.0f, 5.8f);
         float dx = Math.Clamp(MathF.Sin(_phase * 0.94f + b * 1.73f) * e * 2.0f, -5.5f, 5.5f);
-        float sc = 1f + Math.Clamp(e * 0.038f, 0f, 0.082f);
-        float ang = Math.Clamp(MathF.Sin(_phase * 1.07f + b * 2.31f) * e * 0.024f * rotAmp, -0.052f, 0.052f);
+
+        if (textSafe)
+        {
+            // Pure translation preserves Direct2D's glyph atlas 100% (0 CPU re-rasterization at 144/240 FPS!)
+            Gfx.DC.Transform = Matrix3x2.CreateTranslation(dx, dy) * prev;
+            return prev;
+        }
+
+        float sc = 1f + Math.Clamp(e * 0.042f, 0f, 0.092f);
+        float ang = Math.Clamp(MathF.Sin(_phase * 1.07f + b * 2.31f) * e * 0.025f * rotAmp, -0.056f, 0.056f);
 
         var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.5f);
         var local = Matrix3x2.CreateScale(sc, sc, center)
@@ -2070,27 +2252,57 @@ public static class MusicBounce
         return prev;
     }
 
-    /// <summary>Per-letter scatter bounce: each character hops, tilts &amp; stretches wildly out-of-phase to its own FFT band!</summary>
+    /// <summary>
+    /// 3-Band Fourier Liquid Water-Wave Typography:
+    /// - Big slow ocean swell driven by Sub-Bass / Kick (lows)
+    /// - Medium traveling wave driven by Mids (vocals/synths)
+    /// - Crisp fine surface ripples driven by Highs (hats/sparkle) + local FFT band
+    /// - True water-surface tangent slope rotation so letters flow organically like a wave without crashing into each other!
+    /// </summary>
     public static Matrix3x2 PushGlyph(R rect, int charIdx, float amp, out float energy)
     {
         var prev = Gfx.DC.Transform;
         energy = 0f;
         if (!Active) return prev;
-        int b = (charIdx * 3 + 1) & 31;
-        float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.35f : 1.05f;
-        float e = Math.Clamp(_bandPulse[b] * 0.72f + Kick * 0.42f, 0f, 1.65f) * amp * drive;
-        energy = e;
-        if (e <= 0.01f) return prev;
 
-        // Prime-stepped phases make adjacent letters jump & tilt completely independently ("вразнобой")!
-        float ph1 = _phase * 1.38f + charIdx * 2.17f;
-        float ph2 = _phase * 1.09f + charIdx * 3.41f;
-        float ph3 = _phase * 1.24f + charIdx * 1.67f;
-        float dy = Math.Clamp((-0.42f + 0.88f * MathF.Sin(ph1)) * e * 7.2f, -10.5f, 6.8f);
-        float dx = Math.Clamp(MathF.Cos(ph2) * e * 2.1f, -3.2f, 3.2f);
-        float scY = 1f + Math.Clamp(e * 0.095f * (0.65f + 0.35f * MathF.Cos(ph1)), 0f, 0.19f);
-        float scX = 1f + Math.Clamp(e * 0.055f, 0f, 0.11f);
-        float ang = Math.Clamp(MathF.Sin(ph3) * e * 0.105f, -0.17f, 0.17f);
+        float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.28f : 1.0f;
+        float loud = Math.Clamp(LoudnessGain, 0.12f, 1.65f);
+        int localBand = (charIdx * 2 + 2) & 31;
+        float localE = _bandPulse[localBand];
+
+        // 3 coherent traveling water waves across the word (large swell + medium wave + small surface ripples)
+        const float kLow = 0.28f;  // ~22-char wide ocean bass swell
+        const float kMid = 0.72f;  // ~9-char medium flowing wave (counter-propagating for rich interference!)
+        const float kHi  = 1.68f;  // ~3.7-char sparkling treble surface ripple
+
+        float pLow = _lowPhase - charIdx * kLow;
+        float pMid = _midPhase + charIdx * kMid;
+        float pHi  = _highPhase - charIdx * kHi;
+
+        float aLow = Math.Clamp((Bass * 0.78f + Kick * 0.68f) * loud, 0f, 1.55f) * 5.8f * amp * drive;
+        float aMid = Math.Clamp(Mid * 0.92f * loud, 0f, 1.35f) * 3.2f * amp * drive;
+        float aHi  = Math.Clamp((High * 0.85f + localE * 0.28f) * loud, 0f, 1.25f) * 1.75f * amp * drive;
+
+        // Vertical water displacement = superposition of Big + Medium + Small waves
+        float yLow = MathF.Sin(pLow) * aLow;
+        float yMid = MathF.Sin(pMid) * aMid;
+        float yHi  = MathF.Sin(pHi)  * aHi;
+        float dy = Math.Clamp(yLow + yMid + yHi - Kick * 1.4f * amp, -11.5f, 9.0f);
+
+        // Gentle orbital water-particle horizontal sway (crests move forward, troughs move back -> keeps kerning clean!)
+        float dx = Math.Clamp((MathF.Cos(pLow) * aLow * 0.18f - MathF.Cos(pMid) * aMid * 0.14f), -2.4f, 2.4f);
+
+        // Exact derivative dY/d(charIdx) gives the natural water-surface tangent angle for each floating letter!
+        float slope = (-MathF.Cos(pLow) * kLow * aLow)
+                    + ( MathF.Cos(pMid) * kMid * aMid)
+                    + (-MathF.Cos(pHi)  * kHi  * aHi * 0.45f);
+        float ang = Math.Clamp(slope * 0.036f, -0.145f, 0.145f);
+
+        // Subtle organic crest stretch on bass/mid energy
+        float crest = Math.Clamp((Bass * 0.45f + Mid * 0.30f + High * 0.25f) * loud * amp * drive, 0f, 1.5f);
+        energy = Math.Clamp(crest + Kick * 0.45f, 0f, 1.65f);
+        float scY = 1f + Math.Clamp((Kick * 0.065f + MathF.Max(0f, -yLow) * 0.012f) * amp, 0f, 0.15f);
+        float scX = 1f + Math.Clamp(Kick * 0.035f * amp, 0f, 0.08f);
 
         var center = new Vector2(rect.X + rect.W * 0.5f, rect.Y + rect.H * 0.55f);
         var local = Matrix3x2.CreateScale(scX, scY, center)
