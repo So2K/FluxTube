@@ -144,7 +144,7 @@ public sealed class MpvPlayer : IDisposable
         CurrentUrl = url;
         CurrentVideoId = videoId;
         TimePos = 0; Duration = 0;
-        var opts = startSeconds > 3 ? $"start={startSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}" : "start=0";
+        var opts = startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}" : "start=0";
         Command("loadfile", url, "replace", "-1", opts);
         Set("pause", "no");
     }

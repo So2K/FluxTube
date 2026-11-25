@@ -68,6 +68,7 @@ internal static unsafe partial class W
     [LibraryImport("user32.dll")] public static partial nint LoadCursorW(nint inst, nint id);
     [LibraryImport("user32.dll")] public static partial nint SetCursor(nint cur);
     [LibraryImport("user32.dll")] public static partial short GetKeyState(int vk);
+    [LibraryImport("user32.dll")] public static partial short GetAsyncKeyState(int vk);
     [LibraryImport("user32.dll")] public static partial nuint SetTimer(nint h, nuint id, uint ms, nint proc);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool KillTimer(nint h, nuint id);
     [LibraryImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static partial bool TrackMouseEvent(TRACKMOUSEEVENT* e);
@@ -138,6 +139,7 @@ internal static unsafe partial class W
     public static int LoWord(nint l) => (short)(l.ToInt64() & 0xFFFF);
     public static int HiWord(nint l) => (short)((l.ToInt64() >> 16) & 0xFFFF);
     public static bool KeyDown(int vk) => (GetKeyState(vk) & 0x8000) != 0;
+    public static bool AsyncKeyDown(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
     public static uint Rgb(byte r, byte g, byte b) => (uint)(r | g << 8 | b << 16);
 
     public static void SetClipboardText(nint owner, string text)

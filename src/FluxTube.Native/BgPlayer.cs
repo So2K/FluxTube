@@ -20,6 +20,7 @@ public static class BgPlayers
         private IntPtr _ctx;
         private Thread? _thread;
         private volatile bool _disposed;
+        private volatile bool _fileLoaded;
         public volatile bool Paused;
         public volatile bool Muted;
         public volatile bool Loading = true;
@@ -27,7 +28,15 @@ public static class BgPlayers
         public double TimePos;
         public double Duration;
 
-        public Instance(string videoId) { VideoId = videoId; }
+        public Instance(string videoId, double initialPos) { VideoId = videoId; TimePos = initialPos; }
+
+        public double LivePos()
+        {
+            var c = _ctx;
+            if (c != IntPtr.Zero && !_disposed && _fileLoaded && mpv_get_property(c, "time-pos", Format.Double, out double v) >= 0 && v > 0.1)
+                return v;
+            return TimePos;
+        }
 
         public void Start(string? localFile, StreamInfo? stream, string fallbackUrl, double startSeconds)
         {
@@ -91,13 +100,16 @@ public static class BgPlayers
                 if (evPtr == IntPtr.Zero) continue;
                 var ev = Marshal.PtrToStructure<MpvEvent>(evPtr);
                 if (ev.event_id == EventId.Shutdown) return;
+                if (ev.event_id == EventId.FileLoaded) { _fileLoaded = true; continue; }
                 if (ev.event_id == EventId.PropertyChange)
                 {
                     var p = Marshal.PtrToStructure<MpvEventProperty>(ev.data);
                     if (p.data == IntPtr.Zero) continue;
                     switch (ev.reply_userdata)
                     {
-                        case 1: TimePos = Marshal.PtrToStructure<double>(p.data); break;
+                        case 1:
+                            if (_fileLoaded) TimePos = Marshal.PtrToStructure<double>(p.data);
+                            break;
                         case 2: Duration = Marshal.PtrToStructure<double>(p.data); break;
                         case 3:
                             Paused = Marshal.ReadInt32(p.data) != 0;
@@ -169,10 +181,10 @@ public static class BgPlayers
             App.Invalidate();
             return;
         }
-        var inst = new Instance(videoId);
+        var start = startOverride ?? Shell.GetSavedTabPos(videoId) ?? Db.ResumePosition(videoId) ?? 0;
+        var inst = new Instance(videoId, start);
         if (!_all.TryAdd(videoId, inst)) return;
         App.Invalidate();
-        var start = startOverride ?? Db.ResumePosition(videoId) ?? 0;
         _ = Task.Run(async () =>
         {
             try
@@ -216,13 +228,13 @@ public static class BgPlayers
         App.Invalidate();
     }
 
-    /// <summary>Stops the background player for videoId and saves its last position to DB. Returns its last TimePos.</summary>
-    public static double Stop(string videoId)
+    /// <summary>Stops the background player for videoId and optionally saves its last position to DB. Returns its exact live TimePos.</summary>
+    public static double Stop(string videoId, bool saveToDb = true)
     {
         if (!_all.TryRemove(videoId, out var inst)) return 0;
-        var pos = inst.TimePos;
+        var pos = inst.LivePos();
         var dur = inst.Duration;
-        if (pos > 2)
+        if (saveToDb && pos > 2)
         {
             var id = videoId;
             ThreadPool.QueueUserWorkItem(_ =>

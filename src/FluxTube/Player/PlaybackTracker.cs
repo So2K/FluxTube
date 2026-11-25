@@ -90,7 +90,7 @@ public sealed class PlaybackTracker
         });
     }
 
-    public void Play(VideoItem v, string source)
+    public void Play(VideoItem v, string source, double? startOverride = null)
     {
         Flush();
         var gen = ++_gen;
@@ -99,7 +99,7 @@ public sealed class PlaybackTracker
         CurrentSource = source;
         _segments = [];
         _skipped.Clear();
-        var start = v.IsShort ? 0 : Db.ResumePosition(v.VideoId) ?? 0; // a short always plays from its first frame
+        var start = startOverride ?? (v.IsShort ? 0 : Db.ResumePosition(v.VideoId) ?? 0); // a short always plays from its first frame
         _startPos = _lastPos = _lastSavedAt = start;
         _sessionId = Db.StartWatch(v, source);
         // the new history row carries the resume point from the start: a session that never gets to play keeps it
@@ -216,7 +216,7 @@ public sealed class PlaybackTracker
             }
             Resolver.Instance.MarkWatched(v.VideoId);
         }
-        if (start > 0) _p.ShowText($"Продолжение с {Fmt.Time(start)}", 2000);
+        if (start > 0 && startOverride == null) _p.ShowText($"Продолжение с {Fmt.Time(start)}", 2000);
         CurrentChanged?.Invoke();
 
         if (AppSettings.Current.SponsorBlock)

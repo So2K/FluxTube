@@ -354,7 +354,8 @@ public static unsafe class App
                     var delta = (short)((w >> 16) & 0xFFFF) / 120f;
                     if (W.KeyDown(W.VK_CONTROL))
                     {
-                        Shell.AdjustZoom(delta > 0 ? 0.05f : -0.05f);
+                        if (Shell.OverVideo(UI.MX, UI.MY)) Loupe.AdjustZoom(delta > 0 ? 0.4f : -0.4f);
+                        else Shell.AdjustZoom(delta > 0 ? 0.05f : -0.05f);
                         return 0;
                     }
                     if (Shell.OverVideo(UI.MX, UI.MY)) MpvPlayer.Instance.Command("keypress", delta > 0 ? "WHEEL_UP" : "WHEEL_DOWN");
@@ -364,7 +365,7 @@ public static unsafe class App
                 case W.WM_KEYDOWN:
                 case W.WM_SYSKEYDOWN:
                     UI.LastInput = Environment.TickCount64;
-                    if ((int)w == W.VK_CONTROL) Loupe.Update();
+                    if ((int)w == W.VK_CONTROL) Loupe.Poll();
                     if ((int)w == W.VK_SPACE && !W.KeyDown(W.VK_CONTROL) && !W.KeyDown(W.VK_MENU))
                     {
                         bool repeat = (l.ToInt64() & (1L << 30)) != 0;
@@ -373,7 +374,7 @@ public static unsafe class App
                     if (Shell.Key((int)w, W.KeyDown(W.VK_CONTROL), W.KeyDown(W.VK_MENU))) return 0;
                     break;
                 case W.WM_KEYUP:
-                    if ((int)w == W.VK_CONTROL) Loupe.Hide();
+                    if ((int)w == W.VK_CONTROL) Loupe.Poll();
                     if ((int)w == W.VK_SPACE && Shell.SpaceUp()) return 0;
                     break;
                 case W.WM_COMMAND:
@@ -469,7 +470,7 @@ internal static unsafe class VideoHost
                 if (x == _lastX && y == _lastY) return 0;
                 _lastX = x; _lastY = y;
                 _lastMove = Environment.TickCount64;
-                Loupe.Update();
+                Loupe.Poll();
                 if (_cursorHidden) { _cursorHidden = false; W.SetCursor(W.LoadCursorW(0, 32512)); }
                 if (_pipDownX >= 0 && Math.Abs(x - _pipDownX) + Math.Abs(y - _pipDownY) > 6)
                 {
@@ -485,6 +486,7 @@ internal static unsafe class VideoHost
                     W.TrackMouseEvent(&tme);
                     _tracking = true;
                     W.SetTimer(h, 1, 400, 0);
+                    W.SetTimer(h, 2, 50, 0); // instant Ctrl+hover detection even if mouse stops moving
                 }
                 return 0;
             }
@@ -492,13 +494,19 @@ internal static unsafe class VideoHost
             {
                 _tracking = false;
                 _lastX = _lastY = -1;
-                Loupe.Hide();
+                Loupe.Poll();
                 W.KillTimer(h, 1);
+                W.KillTimer(h, 2);
                 // (scripted checks post mouse messages without a real pointer, which would read as an instant leave)
                 if (!App.Test) Cmd("script-message-to", "fluxosc", "flux-leave"); // the controls hide like on YouTube when the pointer leaves
                 return 0;
             }
             case W.WM_TIMER:
+                if (w == 2)
+                {
+                    Loupe.Poll();
+                    return 0;
+                }
                 if (!_cursorHidden && Environment.TickCount64 - _lastMove > 1600 && !MpvPlayer.Instance.Paused)
                 {
                     _cursorHidden = true;
@@ -553,6 +561,11 @@ internal static unsafe class VideoHost
             case W.WM_MOUSEWHEEL:
             {
                 var delta = (short)((w >> 16) & 0xFFFF) / 120f;
+                if (W.AsyncKeyDown(W.VK_CONTROL))
+                {
+                    Loupe.AdjustZoom(delta > 0 ? 0.4f : -0.4f);
+                    return 0;
+                }
                 // Wheel over ANY video (normal video or Shorts) ALWAYS adjusts volume!
                 if (!Pip.Active && Shell.Current is FluxTube.Pages.ShortsPage sp)
                 {

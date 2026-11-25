@@ -168,15 +168,31 @@ public static class Shell
         _ => RootPage(t.Arg),
     };
 
+    // Exact live playback position per video tab so switching between running/paused tabs
+    // always resumes at the exact second without DB lag or 10-second cutoff resets.
+    private static readonly Dictionary<string, double> _tabPos = new();
+
+    public static double? GetSavedTabPos(string videoId)
+        => _tabPos.TryGetValue(videoId, out var p) && p > 0.3 ? p : null;
+
+    private static double CurrentLivePos()
+    {
+        var live = P.IsReady ? P.GetDouble("time-pos") : 0;
+        return live > 0.1 ? live : P.TimePos;
+    }
+
     /// <summary>
     /// If another open tab owns the video currently playing (unpaused) in the main player,
     /// seamlessly hand it off to a lightweight audio-only BgPlayer before the main player switches to newVideoId.
-    /// Paused videos are never handed off (zero wasted RAM/CPU — their resume position is already in DB).
+    /// Paused videos are never handed off (zero wasted RAM/CPU — their exact position is kept in memory + DB).
     /// </summary>
     private static void MaybeHandoffToBg(string newVideoId)
     {
         var cur = T.Current;
-        if (cur == null || cur.VideoId == newVideoId || !P.HasMedia || P.Paused || T.CurrentSource == "shorts") return;
+        if (cur == null || cur.VideoId == newVideoId || !P.HasMedia || T.CurrentSource == "shorts") return;
+        var pos = CurrentLivePos();
+        if (pos > 0.3) _tabPos[cur.VideoId] = pos;
+        if (P.Paused) return;
         // Only keep playing in background if that video is open in another tab
         bool inAnotherTab = false;
         for (int i = 0; i < _tabs.Count; i++)
@@ -188,7 +204,6 @@ public static class Shell
             }
         }
         if (!inAnotherTab) return;
-        var pos = P.TimePos;
         BgPlayers.Play(cur.VideoId, pos);
     }
 
@@ -196,25 +211,23 @@ public static class Shell
     {
         if (i < 0 || i >= _tabs.Count || i == _tab) return;
         var target = _tabs[i];
-        // If leaving a playing video tab to another video tab, hand off the previous video to BgPlayers automatically!
+        // Save exact live position of the tab we are leaving, and if it is playing + we're moving to another video tab, hand it off to BgPlayers!
         if (_tab >= 0 && _tab < _tabs.Count)
         {
             var prev = _tabs[_tab];
-            if (prev.Kind == "video" && target.Kind == "video" && target.Arg != prev.Arg
-                && T.Current?.VideoId == prev.Arg && P.HasMedia && !P.Paused)
+            if (prev.Kind == "video" && T.Current?.VideoId == prev.Arg && P.HasMedia)
             {
-                BgPlayers.Play(prev.Arg, P.TimePos);
+                var pos = CurrentLivePos();
+                if (pos > 0.3) _tabPos[prev.Arg] = pos;
+                if (target.Kind == "video" && target.Arg != prev.Arg && !P.Paused)
+                    BgPlayers.Play(prev.Arg, pos);
             }
         }
-        // If target video tab is currently playing in background, seamlessly hand its position back to the main player
+        // If target video tab is currently playing in background, capture its exact live position before switching
         if (target.Kind == "video" && BgPlayers.Has(target.Arg))
         {
-            var pos = BgPlayers.Stop(target.Arg);
-            if (pos > 2)
-            {
-                var sid = Db.StartWatch(new VideoItem { VideoId = target.Arg, Title = target.Title, Channel = target.Sub }, "tab");
-                Db.UpdateWatch(sid, null, null, pos, 0, 0);
-            }
+            var pos = BgPlayers.Stop(target.Arg, saveToDb: false);
+            if (pos > 0.3) _tabPos[target.Arg] = pos;
         }
         _tab = i;
         _back.Clear(); // the pages of the tab we just left go with it
@@ -227,7 +240,11 @@ public static class Shell
     {
         if (i < 0 || i >= _tabs.Count) return;
         var removed = _tabs[i];
-        if (removed.Kind == "video") BgPlayers.Stop(removed.Arg);
+        if (removed.Kind == "video")
+        {
+            BgPlayers.Stop(removed.Arg);
+            _tabPos.Remove(removed.Arg);
+        }
         _closedTabs.Add(new Tab { Kind = removed.Kind, Arg = removed.Arg, Title = removed.Title, Sub = removed.Sub });
         if (_closedTabs.Count > 12) _closedTabs.RemoveAt(0);
 
@@ -745,22 +762,23 @@ public static class Shell
     {
         // If another tab's video is currently playing (unpaused) in the main player, keep it playing in background!
         MaybeHandoffToBg(v.VideoId);
-        // If the video we're about to play on screen was playing in background, stop the bg copy so audio doesn't double
+        // Capture exact resume position from background player or in-memory tab position map
+        double? exactStart = null;
         if (BgPlayers.Has(v.VideoId))
         {
-            var pos = BgPlayers.Stop(v.VideoId);
-            if (pos > 2)
-            {
-                var sid = Db.StartWatch(v, source);
-                Db.UpdateWatch(sid, null, null, pos, 0, 0);
-            }
+            var pos = BgPlayers.Stop(v.VideoId, saveToDb: false);
+            if (pos > 0.3) exactStart = pos;
+        }
+        else if (!v.IsShort && _tabPos.TryGetValue(v.VideoId, out var savedPos) && savedPos > 0.3)
+        {
+            exactStart = savedPos;
         }
         WarmPlayer().Wait();
         VideoReady = false;
         // a short repeats until you move on; the repeat button of a normal video holds for that video only
         if (v.IsShort && source == "shorts") P.Command("set", "loop-file", "inf");
         else if (T.Current?.VideoId != v.VideoId || T.CurrentSource == "shorts") P.Command("set", "loop-file", "no");
-        T.Play(v, source);
+        T.Play(v, source, exactStart);
     }
 
     public static void PlayFile(DownloadItem d)
