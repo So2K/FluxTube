@@ -769,7 +769,7 @@ public sealed class WatchPage : IPage
     private List<VideoItem> _related = [];
     private readonly HashSet<string> _seen = [];
     private readonly Cards.HoverPrefetch _hover = new();
-    private bool _infoLoading, _descOpen, _theater;
+    private bool _infoLoading, _descOpen;
     private string _dislikes = "—", _likes = "—", _speed = "1×";
     private string? _note;
     private readonly int _infoScroll, _relScroll;
@@ -875,7 +875,7 @@ public sealed class WatchPage : IPage
         return $"https://www.youtube.com/watch?v={Video.VideoId}&list={_list.Id}" + (at > 1 ? "&t=" + at : "");
     }
     public string Speed => _speed;
-    public void ToggleTheater() { _theater = !_theater; App.Invalidate(); }
+    public void ToggleTheater() { AppSettings.Current.TheaterMode = !AppSettings.Current.TheaterMode; AppSettings.Current.Save(); App.Invalidate(); }
 
     public void Shown()
     {
@@ -1147,7 +1147,7 @@ public sealed class WatchPage : IPage
     {
         // while the share panel is open nothing behind it reacts
         if (SharePanel.Open) UI.Modal = new R(0, 0, 0, 0);
-        var side = !_theater && r.W >= 980;
+        var side = !AppSettings.Current.TheaterMode && r.W >= 980;
         // the side list glides away in theater mode and back, the video grows into the space
         var sideT = UI.Smooth(UI.Id(_relScroll, 5), side ? 1 : 0, 14);
         float sideW = MathF.Min(410, r.W * 0.3f) * sideT;
@@ -1230,7 +1230,7 @@ public sealed class WatchPage : IPage
         float bx = x0 + mainW, by = y + 4;
         const float ph = 36;
         bx -= 40;
-        if (UI.IconButton(UI.Id("theater", _infoScroll), new R(bx, by, 36, 36), Th.Theater, 16, _theater ? Th.Brand : Th.Text)) _theater = !_theater;
+        if (UI.IconButton(UI.Id("theater", _infoScroll), new R(bx, by, 36, 36), Th.Theater, 16, AppSettings.Current.TheaterMode ? Th.Brand : Th.Text)) ToggleTheater();
         bx -= 42;
         if (UI.IconButton(UI.Id("pip", _infoScroll), new R(bx, by, 36, 36), "\uE8A7", 16, Pip.Active ? Th.Brand : Th.Text)) App.Post(Pip.Toggle);
         bx -= 42;

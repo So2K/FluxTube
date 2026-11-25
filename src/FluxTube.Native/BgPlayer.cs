@@ -46,7 +46,9 @@ public static class BgPlayers
             Opt("cache-pause-initial", "no");
             Opt("network-timeout", "15");
             Opt("ad-lavc-threads", "1");
-            Opt("volume", AppSettings.Current.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            var liveVol = MpvPlayer.Instance.IsReady ? MpvPlayer.Instance.GetDouble("volume") : 0;
+            var vol = liveVol > 1 ? liveVol : Math.Clamp(AppSettings.Current.Volume, 1, 150);
+            Opt("volume", vol.ToString("0", System.Globalization.CultureInfo.InvariantCulture));
             if (App.Mute) Opt("mute", "yes");
             var proxy = AppSettings.Current.Proxy;
             if (!string.IsNullOrWhiteSpace(proxy)) Opt("http-proxy", proxy);
@@ -238,14 +240,14 @@ public static class BgPlayers
         return pos;
     }
 
-    /// <summary>Frees any background player that has been paused for >45 seconds (its position stays saved in DB).</summary>
+    /// <summary>Frees any background player that has been paused for >15 seconds (its position stays saved in DB).</summary>
     public static void ReapIdle()
     {
         var now = Environment.TickCount64;
         foreach (var kv in _all)
         {
             var inst = kv.Value;
-            if (!inst.Loading && inst.Paused && inst.PausedSince > 0 && now - inst.PausedSince > 45_000)
+            if (!inst.Loading && inst.Paused && inst.PausedSince > 0 && now - inst.PausedSince > 15_000)
                 Stop(kv.Key);
         }
     }

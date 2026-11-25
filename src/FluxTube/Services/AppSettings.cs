@@ -54,6 +54,8 @@ public sealed class AppSettings
     public string AudioLanguage { get; set; } = "";
     /// <summary>When Shorts side panel is hidden: true = show channel/title as hover overlay on the video; false = show clean text block beside the video.</summary>
     public bool ShortsInfoOverlay { get; set; } = false;
+    /// <summary>Theater mode on WatchPage (hides the right-side recommendations column), persisted across videos and restarts.</summary>
+    public bool TheaterMode { get; set; } = false;
 
     public string PlayerFormat => FormatFor(PlayerQuality);
     public string DownloadFormat => FormatFor(DownloadQuality);
