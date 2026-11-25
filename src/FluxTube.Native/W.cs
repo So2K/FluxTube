@@ -143,6 +143,9 @@ internal static unsafe partial class W
     [LibraryImport("shell32.dll", StringMarshalling = StringMarshalling.Utf16)] public static partial nint ShellExecuteW(nint h, string? op, string file, string? args, string? dir, int show);
     [LibraryImport("shell32.dll")] public static partial uint DragQueryFileW(nint hDrop, uint iFile, char* lpszFile, uint cch);
     [LibraryImport("ole32.dll")] public static partial int CoInitializeEx(nint reserved, uint coinit);
+    [LibraryImport("ole32.dll")] public static partial void CoUninitialize();
+    [LibraryImport("ole32.dll")] public static partial int CoCreateInstance(Guid* rclsid, nint pUnkOuter, uint dwClsContext, Guid* riid, void** ppv);
+    [LibraryImport("ole32.dll")] public static partial void CoTaskMemFree(void* pv);
     [LibraryImport("ole32.dll")] public static partial int OleInitialize(nint reserved);
     [LibraryImport("ole32.dll")] public static partial void OleUninitialize();
     [LibraryImport("ole32.dll")] public static partial int RegisterDragDrop(nint hwnd, nint dropTarget);

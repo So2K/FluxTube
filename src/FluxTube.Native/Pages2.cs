@@ -648,7 +648,17 @@ public sealed class SettingsPage : IPage
                 }, check: a.Code == s.AudioLanguage, icon: Th.Volume)).ToList());
             }
         }
-        ToggleRow("audio8d", "8D Аудио и реверберация в плеере", s.PlayerAudio8D, v => s.PlayerAudio8D = v, "Плавный 8D-эффект вращения звука и глубокая реверберация на видео и музыку (включается на лету)");
+        var dspRow = Row("DSP Студия: Эквалайзер, Nightcore, Реверб, Бас",
+            $"10 полос EQ, Nightcore / Slowed+Reverb, многоступенчатый реверб, Exciter и лимитер (Ctrl+E). Сейчас: {AudioDsp.DisplayPresetName(s)}", 58, 220);
+        if (Visible(dspRow.Y, dspRow.H))
+        {
+            var dw = UI.PillWidth(Th.Headphones, "Открыть студию…");
+            if (UI.Pill(UI.Id("set:dsp"), dspRow.Right - dw - 14, dspRow.Y + 12, 34, Th.Headphones, "Открыть студию…", out _, accent: s.AudioFxEnabled))
+                AudioStudioPanel.Show();
+        }
+        ToggleRow("audio8d", "8D Аудио и реверберация в плеере", s.PlayerAudio8D, v => { s.PlayerAudio8D = v; BgPlayers.ApplyAudioDsp(); }, "Плавный 8D-эффект вращения звука и глубокая реверберация на видео и музыку (включается на лету)");
+        ToggleRow("audioonly", "Режим «Только звук» (волны вместо видео, 0% GPU)", s.AudioOnlyMode, v => { s.AudioOnlyMode = v; MpvPlayer.Instance.SetVideoEnabled(!v); }, "Полностью отключает декодирование видео и показывает живые аудиоволны поверх обложки");
+        ToggleRow("suspvid", "Не декодировать видео при сворачивании и в фоне", s.AutoSuspendVideoWhenHidden, v => s.AutoSuspendVideoWhenHidden = v, "Когда окно свёрнуто или открыта другая вкладка, видео не рендерится (0% GPU), звук продолжает играть");
         ToggleRow("shov", "Подпись Shorts поверх видео при наведении", s.ShortsInfoOverlay, v => { s.ShortsInfoOverlay = v; Shell.PushPlayerState(); }, "Включено: когда панель Shorts скрыта, канал и название появляются поверх видео при наведении. Выключено: аккуратный блок текста сбоку.");
         ToggleRow("sb", "SponsorBlock", s.SponsorBlock, v => s.SponsorBlock = v, "Пропускать рекламные вставки авторов (выделяются жирной зелёной полосой на таймлайне)");
         var cr = Row("Что пропускать", null, 50, 560);

@@ -587,6 +587,9 @@ public static unsafe class Gfx
     public static void Circle(float cx, float cy, float radius, uint color)
         => DC.FillEllipse(new Ellipse(new Vector2(cx, cy), radius, radius), Scratch(color));
 
+    public static void Line(float x1, float y1, float x2, float y2, uint color, float width = 1.5f)
+        => DC.DrawLine(new Vector2(x1, y1), new Vector2(x2, y2), Scratch(color), width);
+
     /// <summary>Hardware-accelerated Direct2D radial Gaussian-like light glow with per-zone COM brush caching (zero per-frame allocs when steady).</summary>
     public static void RadialGlow(float cx, float cy, float rx, float ry, float r, float g, float b, float alpha, int slot = 0)
     {

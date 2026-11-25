@@ -1620,9 +1620,11 @@ public sealed class WatchPage : IPage
 
         void DrawVideoBox(R video, R? clip)
         {
-            Ambient.Draw(video, id, isShort: false);
+            var sOpt = AppSettings.Current;
+            bool audioStage = sOpt.AudioOnlyMode && !Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id;
+            if (!audioStage) Ambient.Draw(video, id, isShort: false);
             Gfx.Fill(video, 0xFF0A0A0E, 12);
-            Shell.WantVideo(video, id, clip, radius: 12);
+            if (!audioStage) Shell.WantVideo(video, id, clip, radius: 12);
             if (Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id)
             {
                 Gfx.Fill(video, 0xFF0A0A0C, 12);
@@ -1654,6 +1656,10 @@ public sealed class WatchPage : IPage
                 if (UI.Pill(UI.Id("pipswap", _infoScroll), bx0 + b1w + 10, by0, 38, Th.Mini, "Заменить в мини-окне", out _, Gfx.Fade(0xFF1E1E26, 0.90f), 0xFFFFFFFF))
                     App.Post(() => Shell.Play(Video, _source, startPaused: false, forceReplacePip: true));
             }
+            else if (audioStage)
+            {
+                DrawMusicStage(video);
+            }
             else if (!Shell.VideoShown(id))
             {
                 var pw = MathF.Min(video.W, video.H * 16 / 9);
@@ -1662,6 +1668,91 @@ public sealed class WatchPage : IPage
                 if (img != null) { Gfx.Image(img.Bmp!, pr, 0.55f * Images.Alpha(img)); Gfx.RoundOff(video, 12, Th.Bg); }
                 UI.Spinner(video.X + video.W / 2, video.Y + video.H / 2, 16, 0xFFFFFFFF);
             }
+        }
+
+        void DrawMusicStage(R video)
+        {
+            var mpv = MpvPlayer.Instance;
+            var sOpt = AppSettings.Current;
+            Gfx.PushClip(video);
+            Gfx.FillFrosted(video, Th.Panel, 12, opacity: 0.92f, border: true);
+
+            // Soft bass-reactive studio light bloom behind cover art
+            AudioAnalyzer.RequestFrame();
+            float bass = AudioAnalyzer.BassEnergy;
+            float br = ((Th.Brand >> 16) & 255) / 255f;
+            float bg = ((Th.Brand >> 8) & 255) / 255f;
+            float bb = (Th.Brand & 255) / 255f;
+            Gfx.RadialGlow(video.X + video.W * 0.5f, video.Y + video.H * 0.42f,
+                video.W * (0.34f + bass * 0.12f), video.H * (0.42f + bass * 0.14f),
+                br, bg, bb, (Th.Light ? 0.12f : 0.22f) + bass * 0.18f, slot: 4);
+
+            // Live real-time audio waves & spectrum across the stage
+            var vizR = new R(video.X + 18, video.Y + video.H * 0.34f, video.W - 36, video.H * 0.50f);
+            AudioAnalyzer.DrawStageVisualizer(vizR, sOpt.VisualizerStyle == "off" ? "bars_wave" : sOpt.VisualizerStyle, opacity: 0.92f);
+
+            // Top status badge ("Только звук · 0% GPU" + active DSP preset)
+            var chipTxt = sOpt.AudioFxEnabled
+                ? $"Только звук · GPU 0%  ·  FX: {AudioDsp.DisplayPresetName(sOpt)}"
+                : "Только звук · Видео отключено (GPU 0%)";
+            var cr = Gfx.Text(chipTxt, 11.5f, 600);
+            var cb = new R(video.X + 16, video.Y + 14, cr.W + 22, 26);
+            Gfx.FillFrosted(cb, Th.Card, 13, opacity: 0.78f, border: true);
+            Gfx.Draw(cr, cb.X + 11, cb.Y + (cb.H - cr.H) / 2, Th.Text);
+
+            // Top-right quick buttons: EQ Studio + Return Video
+            float topRx = video.Right - 16;
+            var showVidW = UI.PillWidth(Th.Play, "Показать видео");
+            topRx -= showVidW;
+            if (UI.Pill(UI.Id("ms:vid", _infoScroll), topRx, video.Y + 12, 30, Th.Play, "Показать видео", out _))
+                App.Post(Shell.ToggleAudioOnlyMode);
+            topRx -= 8;
+            var eqW = UI.PillWidth(Th.Headphones, "EQ / FX");
+            topRx -= eqW;
+            if (UI.Pill(UI.Id("ms:eq", _infoScroll), topRx, video.Y + 12, 30, Th.Headphones, "EQ / FX", out _, accent: sOpt.AudioFxEnabled))
+                App.Post(AudioStudioPanel.Toggle);
+
+            // Centered cover art card with subtle bass-beat pulse
+            float baseArtW = MathF.Min(290, video.W * 0.34f);
+            float pulse = 1f + bass * 0.032f;
+            float artW = baseArtW * pulse, artH = artW * 9f / 16f;
+            var artR = new R(Gfx.Snap(video.X + (video.W - artW) / 2), Gfx.Snap(video.Y + video.H * 0.18f + (baseArtW * 9f / 16f - artH) * 0.5f), artW, artH);
+            Gfx.Fill(artR.Inset(-3), Gfx.Fade(0xFF000000, 0.34f), 14);
+            var img = Images.Get(Video.Thumb720, 640, 360);
+            if (img != null) { Gfx.Image(img.Bmp!, artR, Images.Alpha(img)); Gfx.RoundOff(artR, 12, Th.Panel); }
+            else Gfx.Fill(artR, Th.Card, 12);
+            Gfx.Stroke(artR, Gfx.Fade(Th.Brand, 0.25f + bass * 0.45f), 12, 1.4f);
+
+            // Clean bottom transport strip right inside the Music Stage
+            var barR = new R(video.X + 16, video.Bottom - 54, video.W - 32, 42);
+            Gfx.FillFrosted(barR, Th.Menu, 12, opacity: 0.86f, border: true);
+            float cx = barR.X + 8;
+            if (UI.IconButton(UI.Id("ms:play", _infoScroll), new R(cx, barR.Y + 3, 36, 36), mpv.Paused ? Th.Play : Th.Pause, 15, Th.Brand)) mpv.TogglePause();
+            cx += 38;
+            if (UI.IconButton(UI.Id("ms:rew", _infoScroll), new R(cx, barR.Y + 3, 32, 36), Th.Rewind, 13)) mpv.Command("seek", "-10");
+            cx += 34;
+            if (UI.IconButton(UI.Id("ms:fwd", _infoScroll), new R(cx, barR.Y + 3, 32, 36), Th.Forward, 13)) mpv.Command("seek", "10");
+            cx += 40;
+
+            var dur = mpv.Duration;
+            var timeStr = $"{Fmt.Time(mpv.TimePos)} / {Fmt.Time(dur)}";
+            var tr = Gfx.Text(timeStr, 11.5f, 500);
+            Gfx.Draw(tr, barR.Right - tr.W - 14, barR.Y + (barR.H - tr.H) / 2, Th.Sub);
+
+            float sw = barR.Right - tr.W - 28 - cx;
+            if (sw > 60)
+            {
+                var sHit = new R(cx, barR.Y + 6, sw, 30);
+                bool sHot = dur > 0 && UI.Hover(sHit);
+                if (dur > 0 && UI.Pressed && sHot)
+                    mpv.SeekAbsolute(dur * Math.Clamp((UI.MX - cx) / sw, 0, 1));
+                if (sHot) UI.Hand();
+                double frac = dur > 0 ? Math.Clamp(mpv.TimePos / dur, 0, 1) : 0;
+                UI.Progress(new R(cx, barR.Y + 19, sw, sHot ? 6f : 4f), frac, Th.A(0.22f), Th.Brand);
+                Gfx.Circle(cx + (float)(sw * frac), barR.Y + 21, sHot ? 6f : 4.5f, 0xFFFFFFFF);
+            }
+
+            Gfx.PopClip();
         }
 
         // ---- info column ----
@@ -1694,10 +1785,15 @@ public sealed class WatchPage : IPage
         bx -= 42;
         if (UI.IconButton(UI.Id("pip", _infoScroll), new R(bx, by, 36, 36), "\uE8A7", 16, Pip.Active ? Th.Brand : Th.Text)) App.Post(Pip.Toggle);
         bx -= 42;
+        if (UI.IconButton(UI.Id("audioonly", _infoScroll), new R(bx, by, 36, 36), Th.Headphones, 16, AppSettings.Current.AudioOnlyMode ? Th.Brand : Th.Text)) App.Post(Shell.ToggleAudioOnlyMode);
+        bx -= 42;
         if (UI.IconButton(UI.Id("more", _infoScroll), new R(bx, by, 36, 36), Th.More)) MoreMenu();
+        var s = AppSettings.Current;
+        var eqLbl = s.AudioFxEnabled ? AudioDsp.DisplayPresetName(s) : "EQ";
+        bx -= UI.PillWidth(null, eqLbl) + 8;
+        if (UI.Pill(UI.Id("eq", _infoScroll), bx, by, ph, null, eqLbl, out _, accent: s.AudioFxEnabled)) App.Post(AudioStudioPanel.Toggle);
         bx -= UI.PillWidth(Th.Share, "Поделиться") + 8;
         if (UI.Pill(UI.Id("share", _infoScroll), bx, by, ph, Th.Share, "Поделиться", out _)) OpenShare();
-        var s = AppSettings.Current;
         var ql = Cards.QualityName(s.PlayerQuality);
         bx -= UI.PillWidth(null, ql) + 8;
         if (UI.Pill(UI.Id("q", _infoScroll), bx, by, ph, null, ql, out _)) QualityMenu();

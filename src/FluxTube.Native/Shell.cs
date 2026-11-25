@@ -61,9 +61,54 @@ public static class Shell
     private static long _helperExitedAt;
     private static long _lastVolSfxAt, _volSaveDueAt, _suppressVolSfxUntil;
     private static bool _userMuted, _handoffMute;
+    private static long _videoHiddenSince;
     public static bool UserMuted => _userMuted;
     public static string? MainTabKey => _mainTabKey;
     public static string? ActiveTabKey => _tab >= 0 && _tab < _tabs.Count ? _tabs[_tab].Key : null;
+
+    /// <summary>Toggles zero-GPU Audio-Only Music Mode (suspends mpv video decoder immediately while keeping audio & waves).</summary>
+    public static void ToggleAudioOnlyMode()
+    {
+        var s = AppSettings.Current;
+        s.AudioOnlyMode = !s.AudioOnlyMode;
+        s.Save();
+        if (s.AudioOnlyMode)
+        {
+            if (Pip.Active) Pip.Exit();
+            P.SetVideoEnabled(false);
+            Toast("Режим «Только звук» включён — видео не декодируется (0% GPU)", Th.Good, 2400);
+        }
+        else
+        {
+            P.SetVideoEnabled(true);
+            Toast("Видео возвращено", Th.Sub, 1600);
+        }
+        App.Invalidate();
+    }
+
+    private static void UpdateVideoSuspension()
+    {
+        if (!P.IsReady || !P.HasMedia) return;
+        var s = AppSettings.Current;
+        if (s.AudioOnlyMode && !Pip.Active)
+        {
+            _videoHiddenSince = 0;
+            if (P.VideoEnabled) P.SetVideoEnabled(false);
+            return;
+        }
+        bool visibleNow = Pip.Active || (_videoWanted && !W.IsIconic(App.Hwnd) && !Gfx.Occluded);
+        if (visibleNow)
+        {
+            _videoHiddenSince = 0;
+            if (!P.VideoEnabled) P.SetVideoEnabled(true);
+        }
+        else if (s.AutoSuspendVideoWhenHidden)
+        {
+            var now = Environment.TickCount64;
+            if (_videoHiddenSince == 0) _videoHiddenSince = now;
+            else if (P.VideoEnabled && now - _videoHiddenSince >= 1500) P.SetVideoEnabled(false);
+        }
+    }
     private static string[] _args = [];
     private static int _benchStep = -1;
     private static double _testNextAt = -1, _testClickAt = -1;
@@ -999,6 +1044,7 @@ public static class Shell
                 case "--test-autoplay": AppSettings.Current.Autoplay = v == "1"; break;
                 case "--theme": AppSettings.Current.Theme = v; Themes.Load(); break;
                 case "--test-menu": App.After(int.Parse(v), () => AccountMenu.Toggle(Gfx.W - 46 * 3 - 8, TopH - 2)); break;
+                case "--test-dsp": App.After(int.Parse(v), AudioStudioPanel.Show); break;
                 case "--test-pip": App.After(int.Parse(v), Pip.Enter); break;
                 case "--test-pip-lock": App.After(int.Parse(v), () => { Pip.Enter(); App.After(1500, () => Pip.SetLocked(true)); }); break;
                 case "--test-scroll": App.After(2500, () => UI.ScrollBy(_cur?.MainScroll ?? 0, float.Parse(v, System.Globalization.CultureInfo.InvariantCulture))); break;
@@ -1540,7 +1586,7 @@ public static class Shell
     public static bool OverVideo(float x, float y)
     {
         if (Pip.Active || !_hostVisible || !_hostRect.Contains(x, y)) return false;
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open) return false;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open) return false;
         if (_tabPreviewRect.W > 0 && _tabPreviewRect.Contains(x, y)) return false;
         if (_toastRect.W > 0 && _toastRect.Contains(x, y)) return false;
         return true;
@@ -1552,7 +1598,7 @@ public static class Shell
         _videoWanted = false;
         _miniVideoRect = null;
         _toastRect = default;
-        if (Menus.Open || AccountMenu.Open || ThemeCodeEditor.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
+        if (Menus.Open || AccountMenu.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
         var cur = T.Current;
 
         if (_fullscreen)
@@ -1651,6 +1697,21 @@ public static class Shell
             if (UI.Pill(UI.Id("acc"), accLeft, 9, 34, Th.Account, "Войти", out _, Th.A(0.08f))) AccountMenu.Toggle(rightEdge, TopH - 2);
         }
 
+        var fxBtnLbl = AppSettings.Current.AudioFxEnabled ? AudioDsp.DisplayPresetName(AppSettings.Current) : "EQ";
+        var fxBtnW = UI.PillWidth(Th.Headphones, fxBtnLbl);
+        var fxBtnX = accLeft - fxBtnW - 8;
+        if (fxBtnX > _searchBox.Right + 10)
+        {
+            _topHits.Add(new R(fxBtnX, 9, fxBtnW, 34));
+            if (UI.Pill(UI.Id("top:eq"), fxBtnX, 9, 34, Th.Headphones, fxBtnLbl, out _,
+                AppSettings.Current.AudioFxEnabled ? Th.Brand : Th.A(0.08f),
+                AppSettings.Current.AudioFxEnabled ? Th.OnBrand : Th.Text))
+            {
+                AudioStudioPanel.Toggle();
+            }
+            accLeft = fxBtnX;
+        }
+
         if (Updater.HasUpdate || Updater.Downloading)
         {
             var upLabel = Updater.Downloading ? $"{(int)(Updater.Progress * 100)}%" : $"Обновить {Updater.AvailableVersion}";
@@ -1708,6 +1769,7 @@ public static class Shell
         UI.Modal = null;
         DrawTabPreview();
         ThemeCodeEditor.Draw();
+        AudioStudioPanel.Draw();
         AccountMenu.Draw();
         Menus.Draw();
     }
@@ -1896,16 +1958,21 @@ public static class Shell
         Cards.Thumb(thumb, cur, false, 7, badge: false, behind: Th.Panel);
         if (UI.Click(UI.Id("np:thumb"), thumb)) App.Post(OpenCurrentVideo);
 
-        // Right controls: optional inline volume slider + transport buttons
+        // Right controls: optional inline volume slider + EQ button + transport buttons
         bool showVol = r.W > 740;
         float volW = showVol ? 132 : 0;
-        float bx = r.Right - 14 - 5 * 40;
+        float bx = r.Right - 14 - 6 * 40;
         float volX = bx - volW - (showVol ? 10 : 0);
         float tx = thumb.Right + 12, tw = (showVol ? volX : bx) - tx - 14;
 
+        bool showWaves = !P.Paused && !P.Muted && AppSettings.Current.VisualizerStyle != "off" && tw > 140;
+        float waveW = showWaves ? 30 : 0;
+        if (showWaves)
+            AudioAnalyzer.DrawMiniWaves(new R(tx, r.Y + 11, 24, 15));
+
         var titleText = string.IsNullOrEmpty(cur.Title) ? "Видео" : cur.Title;
-        var titleRun = Gfx.Text(titleText, 14, 600, MathF.Max(40, tw));
-        var titleR = new R(tx, r.Y + 8, MathF.Min(titleRun.W, MathF.Max(40, tw)), titleRun.H + 2);
+        var titleRun = Gfx.Text(titleText, 14, 600, MathF.Max(40, tw - waveW));
+        var titleR = new R(tx + waveW, r.Y + 8, MathF.Min(titleRun.W, MathF.Max(40, tw - waveW)), titleRun.H + 2);
         Gfx.Draw(titleRun, titleR.X, titleR.Y, UI.Hover(titleR) ? Th.Brand : Th.Text);
         if (UI.Click(UI.Id("np:title"), titleR)) App.Post(OpenCurrentVideo);
 
@@ -1986,11 +2053,12 @@ public static class Shell
             Gfx.Circle(vtx + vtw * Math.Clamp(vol / 100f, 0, 1), by + 18, vHot ? 5.5f : 4f, muted ? Th.Sub : Th.Text);
         }
 
-        if (UI.IconButton(UI.Id("np:b"), new R(bx, by, 36, 36), Th.Rewind)) P.Command("seek", "-10");
-        if (UI.IconButton(UI.Id("np:p"), new R(bx + 40, by, 36, 36), P.Paused ? Th.Play : Th.Pause)) P.TogglePause();
-        if (UI.IconButton(UI.Id("np:f"), new R(bx + 80, by, 36, 36), Th.Forward)) P.Command("seek", "10");
-        if (UI.IconButton(UI.Id("np:o"), new R(bx + 120, by, 36, 36), Th.Expand)) App.Post(OpenCurrentVideo);
-        if (UI.IconButton(UI.Id("np:x"), new R(bx + 160, by, 36, 36), Th.Close)) App.Post(() => { if (Pip.Active) Pip.Exit(); T.Stop(); _mainTabKey = null; VideoReady = false; });
+        if (UI.IconButton(UI.Id("np:eq"), new R(bx, by, 36, 36), Th.Headphones, 15, AppSettings.Current.AudioFxEnabled ? Th.Brand : Th.Text)) AudioStudioPanel.Toggle();
+        if (UI.IconButton(UI.Id("np:b"), new R(bx + 40, by, 36, 36), Th.Rewind)) P.Command("seek", "-10");
+        if (UI.IconButton(UI.Id("np:p"), new R(bx + 80, by, 36, 36), P.Paused ? Th.Play : Th.Pause)) P.TogglePause();
+        if (UI.IconButton(UI.Id("np:f"), new R(bx + 120, by, 36, 36), Th.Forward)) P.Command("seek", "10");
+        if (UI.IconButton(UI.Id("np:o"), new R(bx + 160, by, 36, 36), Th.Expand)) App.Post(OpenCurrentVideo);
+        if (UI.IconButton(UI.Id("np:x"), new R(bx + 200, by, 36, 36), Th.Close)) App.Post(() => { if (Pip.Active) Pip.Exit(); T.Stop(); _mainTabKey = null; VideoReady = false; });
     }
 
     private static void DrawToast(float w, float bottom)
@@ -2150,6 +2218,7 @@ public static class Shell
         }
         PreviewPlayer.AfterFrame(_miniVideoRect, _toastRect);
         Edit.AfterFrame();
+        UpdateVideoSuspension();
     }
 
     // ---------------- hold Space for 2x speed (YouTube-style) ----------------
@@ -2159,7 +2228,7 @@ public static class Shell
 
     public static bool SpaceDown(bool repeat)
     {
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open) return false;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open) return false;
         if (T.Current == null || !P.HasMedia) return false;
         if (!repeat)
         {
@@ -2242,6 +2311,7 @@ public static class Shell
         if (vk == W.VK_ESCAPE)
         {
             if (UI.AutoScrollActive) UI.StopAutoScroll();
+            else if (AudioStudioPanel.Open) AudioStudioPanel.Close();
             else if (ThemeCodeEditor.Open) ThemeCodeEditor.Close();
             else if (AccountMenu.Open) AccountMenu.Close();
             else if (SharePanel.Open) SharePanel.Close();
@@ -2249,8 +2319,9 @@ public static class Shell
             else if (_cur is WatchPage || _cur is ChannelPage || _cur is ShortsPage { Tag: "" } || _cur is FeedPage { Tag: "" }) Back();
             return true;
         }
+        if (ctrl && !alt && vk == 'E' && !Edit.AnyFocused) { AudioStudioPanel.Toggle(); return true; }
         // Block navigation/player hotkeys while an overlay panel is open
-        if (AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open) return false;
+        if (AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open) return false;
 
         // Global Ctrl+V anywhere outside Edit boxes -> immediately paste link or text into search!
         if (ctrl && !alt && vk == 'V' && !Edit.AnyFocused)
@@ -2499,6 +2570,7 @@ public static class Shell
 
         Storyboard.Idle();
         BgPlayers.ReapIdle();
+        UpdateVideoSuspension();
 
         // links sent from the helper's "download this video" button
         try
@@ -2560,6 +2632,7 @@ public static class Shell
             Downloader.Instance.Shutdown();
             Loupe.Shutdown();
             PreviewPlayer.Shutdown();
+            AudioAnalyzer.Shutdown();
             Sfx.Shutdown();
             BgPlayers.DisposeAll();
             AppSettings.Current.Save();

@@ -176,7 +176,7 @@ public static class PreviewPlayer
     public static void Want(string videoId, R rect, R clip, float radius)
     {
         if (_disposed || App.Test || Hwnd == 0) return;
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || Shell.TabPreviewRect.W > 0 || UI.AutoScrollActive) return;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || Shell.TabPreviewRect.W > 0 || UI.AutoScrollActive) return;
 
         _wantId = videoId;
         _wantRect = rect;
@@ -227,7 +227,7 @@ public static class PreviewPlayer
     public static void AfterFrame(R? miniVideoRect, R toastRect)
     {
         if (_disposed || Hwnd == 0) return;
-        bool blocked = Shell.IsFullscreen || Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open
+        bool blocked = Shell.IsFullscreen || Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open
             || Shell.TabPreviewRect.W > 0 || UI.AutoScrollActive || W.IsIconic(App.Hwnd);
 
         bool activeThisFrame = !blocked && _wantFrame == Gfx.Frame && _wantId != null;

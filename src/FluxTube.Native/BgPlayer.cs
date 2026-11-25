@@ -107,8 +107,12 @@ public static class BgPlayers
                 }
                 Opt(ctx, "volume", vol.ToString(CultureInfo.InvariantCulture));
                 if (muted) Opt(ctx, "mute", "yes");
-                if (AppSettings.Current.PlayerAudio8D)
-                    Opt(ctx, "af", "lavfi=[apulsator=hz=0.14:width=1:amount=0.85,aecho=0.82:0.84:48|82:0.28|0.18]");
+                var s = AppSettings.Current;
+                var af = AudioDsp.BuildFilterGraph(s);
+                if (!string.IsNullOrEmpty(af)) Opt(ctx, "af", af);
+                Opt(ctx, "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
+                if (s.AudioFxEnabled && MathF.Abs(s.FxSpeed - 1f) > 0.01f)
+                    Opt(ctx, "speed", s.FxSpeed.ToString("0.###", CultureInfo.InvariantCulture));
                 Opt(ctx, "ytdl", "yes");
                 Opt(ctx, "ytdl-format", "ba/b");
                 Opt(ctx, "script-opts", "ytdl_hook-ytdl_path=" + Paths.YtDlp.Replace('\\', '/'));
@@ -447,6 +451,20 @@ public static class BgPlayers
             var inst = kv.Value;
             if (!inst.Loading && inst.Paused && inst.PausedSince > 0 && now - inst.PausedSince > 15_000)
                 Stop(kv.Key);
+        }
+    }
+
+    public static void ApplyAudioDsp(bool syncSpeed = false)
+    {
+        var s = AppSettings.Current;
+        var af = AudioDsp.BuildFilterGraph(s);
+        var pitchCorr = (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes";
+        var spd = (s.AudioFxEnabled ? Math.Clamp(s.FxSpeed, 0.5f, 2.0f) : 1.0f).ToString("0.###", CultureInfo.InvariantCulture);
+        foreach (var inst in _all.Values)
+        {
+            inst.Cmd("set", "af", af);
+            inst.Cmd("set", "audio-pitch-correction", pitchCorr);
+            if (syncSpeed) inst.Cmd("set", "speed", spd);
         }
     }
 

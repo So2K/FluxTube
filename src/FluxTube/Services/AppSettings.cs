@@ -97,6 +97,36 @@ public sealed class AppSettings
     public bool UiSoundsReverb8D { get; set; } = false;
     /// <summary>8D spatial audio & reverb filter on video/music playback in mpv.</summary>
     public bool PlayerAudio8D { get; set; } = false;
+    /// <summary>Master enable for Reaper-style DSP Studio (10-band EQ, reverb, Nightcore/Slowed, exciter, limiter).</summary>
+    public bool AudioFxEnabled { get; set; } = false;
+    /// <summary>Active audio DSP preset id ("Flat", "Juicy", "Nightcore", "NightcoreUltra", "SlowedReverb", "BassBoost", "Phonk", "Space8D", "Lofi", "Vocal", "Custom").</summary>
+    public string AudioPreset { get; set; } = "Flat";
+    /// <summary>10-band graphic EQ gains in dB (-12..+12): 31, 62, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz.</summary>
+    public float[] EqBands { get; set; } = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    /// <summary>Studio multi-tap reverb wetness (0..100).</summary>
+    public float FxReverb { get; set; } = 0f;
+    /// <summary>Reverb space profile ("room", "plate", "hall", "cathedral").</summary>
+    public string FxReverbRoom { get; set; } = "hall";
+    /// <summary>Clean sub-bass punch boost (0..100).</summary>
+    public float FxBass { get; set; } = 0f;
+    /// <summary>Harmonic brilliance exciter + studio glue compression (0..100).</summary>
+    public float FxExciter { get; set; } = 0f;
+    /// <summary>Mid/Side 3D stereo soundstage width (0..100).</summary>
+    public float FxStereo { get; set; } = 0f;
+    /// <summary>Playback speed used by DSP presets such as Nightcore / Slowed+Reverb (0.70..1.45).</summary>
+    public float FxSpeed { get; set; } = 1.0f;
+    /// <summary>True = vinyl/tape pitch shift locked to speed (authentic Nightcore & Slowed+Reverb).</summary>
+    public bool FxTapePitch { get; set; } = false;
+    /// <summary>Independent formant-preserving pitch shift in semitones (-6..+6) when FxTapePitch is off.</summary>
+    public float FxPitchSemitones { get; set; } = 0f;
+    /// <summary>Transparent master bus limiter to keep heavy bass & exciter punchy with zero clipping.</summary>
+    public bool FxLimiter { get; set; } = true;
+    /// <summary>Audio-only music stage on WatchPage: suspends mpv video decoding (0% GPU) and shows live audio waves.</summary>
+    public bool AudioOnlyMode { get; set; } = false;
+    /// <summary>Automatically suspends mpv video decoding (vid=no) whenever FluxTube is minimized or viewing another tab.</summary>
+    public bool AutoSuspendVideoWhenHidden { get; set; } = true;
+    /// <summary>Live audio visualizer style ("bars_wave", "ribbon", "bars", "off").</summary>
+    public string VisualizerStyle { get; set; } = "bars_wave";
     /// <summary>Tactile frosted/matte textured glass backdrop ("off", "soft", "matte").</summary>
     public string FrostedGlass { get; set; } = "matte";
     /// <summary>Optional custom sound display names per UI sound slot (normalized WAV copies stored in .fluxtube/sfx).</summary>

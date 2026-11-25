@@ -31,6 +31,7 @@ public sealed class MpvPlayer : IDisposable
     public double Volume { get; private set; } = AppSettings.Current.Volume;
     public bool Muted { get; private set; }
     public double Speed { get; private set; } = 1.0;
+    public bool VideoEnabled { get; private set; } = true;
     public string? CurrentVideoId { get; private set; }
     public string? CurrentUrl { get; private set; }
     public bool HasMedia => CurrentUrl != null;
@@ -152,12 +153,16 @@ public sealed class MpvPlayer : IDisposable
             mpv_set_option_string(ctx, "ytdl-raw-options-append", kv);
         // Streams are served to mpv over loopback; StreamProxy handles the upstream proxy.
         mpv_set_option_string(ctx, "http-proxy", "");
-        mpv_set_option_string(ctx, "af", s.PlayerAudio8D ? Audio8DFilter : "");
+        mpv_set_option_string(ctx, "af", AudioDsp.BuildFilterGraph(s));
+        mpv_set_option_string(ctx, "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
+        if (s.AudioFxEnabled && MathF.Abs(s.FxSpeed - 1f) > 0.01f)
+        {
+            Speed = s.FxSpeed;
+            mpv_set_option_string(ctx, "speed", s.FxSpeed.ToString("0.###", CultureInfo.InvariantCulture));
+        }
     }
 
-    private const string Audio8DFilter = "lavfi=[apulsator=hz=0.14:width=1:amount=0.85,aecho=0.82:0.84:48|82:0.28|0.18]";
-
-    /// <summary>Pushes current settings (quality, cookies, proxy, 8D audio...) into mpv asynchronously.</summary>
+    /// <summary>Pushes current settings (quality, cookies, proxy, DSP EQ/FX...) into mpv asynchronously.</summary>
     public void ApplySettings()
     {
         if (!IsReady) return;
@@ -170,7 +175,30 @@ public sealed class MpvPlayer : IDisposable
         foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
             Command("set", "ytdl-raw-options-append", kv);
         Set("http-proxy", "");
-        Set("af", s.PlayerAudio8D ? Audio8DFilter : "");
+        ApplyAudioDsp(syncSpeed: false);
+    }
+
+    /// <summary>Live-applies the Reaper-style DSP EQ/reverb/pitch chain without restarting playback.</summary>
+    public void ApplyAudioDsp(bool syncSpeed = false)
+    {
+        if (!IsReady) return;
+        var s = AppSettings.Current;
+        Set("af", AudioDsp.BuildFilterGraph(s));
+        Set("audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
+        if (syncSpeed)
+            SetSpeed(s.AudioFxEnabled ? Math.Clamp(s.FxSpeed, 0.5f, 2.0f) : 1.0);
+    }
+
+    /// <summary>
+    /// Suspends or restores hardware/software video decoding (vid=no vs vid=auto) while audio keeps playing seamlessly.
+    /// Drops GPU/CPU usage to near-zero when the window is minimized, video is off-screen, or Audio-Only Music Mode is on.
+    /// </summary>
+    public void SetVideoEnabled(bool enabled)
+    {
+        if (VideoEnabled == enabled) return;
+        VideoEnabled = enabled;
+        if (!IsReady) return;
+        Set("vid", enabled ? "auto" : "no");
     }
 
     /// <summary>Smoothly ramps mpv volume to target (0..150) over ~100ms instead of a harsh step jump.</summary>
@@ -222,8 +250,9 @@ public sealed class MpvPlayer : IDisposable
         CurrentVideoId = videoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         if (startPaused) { Paused = true; Set("pause", "yes"); }
-        var opts = startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", CultureInfo.InvariantCulture)}" : "start=0";
-        Command("loadfile", url, "replace", "-1", opts);
+        var opts = new List<string> { startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", CultureInfo.InvariantCulture)}" : "start=0" };
+        if (!VideoEnabled) opts.Add("vid=no");
+        Command("loadfile", url, "replace", "-1", string.Join(',', opts));
         if (!startPaused) Set("pause", "no");
     }
 
@@ -237,6 +266,7 @@ public sealed class MpvPlayer : IDisposable
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         if (keepPause) { Paused = true; Set("pause", "yes"); }
         var opts = new List<string> { "start=" + (startSeconds > 0.3 ? startSeconds.ToString("0.00", CultureInfo.InvariantCulture) : "0") };
+        if (!VideoEnabled) opts.Add("vid=no");
         if (s.Audio != null) opts.Add("audio-file=" + Escaped(s.Audio));
         var t = string.IsNullOrEmpty(title) ? s.Title : title;
         if (!string.IsNullOrEmpty(t)) opts.Add("force-media-title=" + Escaped(t));
