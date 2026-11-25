@@ -413,6 +413,41 @@ public sealed class SettingsPage : IPage
         ToggleRow("side", "Скрыть боковую панель", s.SidebarCollapsed, v => s.SidebarCollapsed = v, "Также переключается кнопкой меню сверху слева или Ctrl+B");
         ToggleRow("ambient", "Подсветка видео (Ambient Mode)", s.AmbientMode, v => s.AmbientMode = v, "Мягкое GPU-свечение вокруг плеера в цветах текущей сцены (обычные видео и Shorts)");
         ToggleRow("sfx", "Звуки интерфейса (Silent Hill / MGS)", s.UiSounds, v => { s.UiSounds = v; if (v) Sfx.Tab(); }, "Тихие тактильные звуки кликов, переключателей и ползунков в духе PS1/PS2 (в 4 раза тише видео)");
+        var sfxCustomRow = Row("Свои звуки интерфейса (WAV / MP3 / OGG / FLAC)",
+            s.CustomSfx.Count > 0 ? $"Заменено звуков: {s.CustomSfx.Count} из {Sfx.Slots.Length}" : "Можно заменить любой звук на свой аудиофайл", 58);
+        float sfxX = sfxCustomRow.Right - 14;
+        if (s.CustomSfx.Count > 0)
+        {
+            var rsw = UI.PillWidth(Th.Restart, "Сбросить");
+            sfxX -= rsw;
+            if (UI.Pill(UI.Id("set:sfxreset"), sfxX, sfxCustomRow.Y + 12, 34, Th.Restart, "Сбросить", out _)) App.Post(Sfx.ResetAll);
+            sfxX -= 8;
+        }
+        var csw = UI.PillWidth(Th.Folder, "Заменить звуки…");
+        sfxX -= csw;
+        if (UI.Pill(UI.Id("set:sfxpick"), sfxX, sfxCustomRow.Y + 12, 34, Th.Folder, "Заменить звуки…", out _))
+        {
+            const string audioFilter = "Аудиофайлы (WAV, MP3, OGG, FLAC, M4A)\0*.wav;*.mp3;*.ogg;*.flac;*.m4a;*.opus;*.aac\0Все файлы\0*.*\0\0";
+            var menu = new List<MenuItem>();
+            foreach (var (slotKey, slotLabel) in Sfx.Slots)
+            {
+                var k = slotKey;
+                var hasCustom = s.CustomSfx.TryGetValue(k, out var cname) && !string.IsNullOrEmpty(cname);
+                var sub = new List<MenuItem>
+                {
+                    new("Выбрать свой файл…", () => App.Post(() => { if (Dialogs.PickFile(audioFilter) is { } f) Sfx.SetCustom(k, f); }), icon: Th.Folder),
+                    new("Прослушать", () => Sfx.Preview(k), icon: Th.Play),
+                };
+                if (hasCustom) sub.Add(new("Сбросить на стандартный", () => Sfx.ResetSlot(k), icon: Th.Restart, danger: true));
+                menu.Add(new(hasCustom ? $"{slotLabel}  ·  {cname}" : slotLabel, null, sub, check: hasCustom, icon: Th.Volume));
+            }
+            if (s.CustomSfx.Count > 0)
+            {
+                menu.Add(MenuItem.Sep);
+                menu.Add(new("Сбросить все на стандартные", Sfx.ResetAll, icon: Th.Restart, danger: true));
+            }
+            Menus.Popup(menu);
+        }
         var effRow = Row("Сезонные эффекты (на любую тему)", "Снежинки с гирляндой или падающие тыквы поверх любой выбранной темы", 58);
         var effects = new (string Key, string Label)[] { ("none", "Выкл"), ("newyear", "❄ Новый год"), ("halloween", "🎃 Хэллоуин") };
         float ex = effRow.Right - 14;

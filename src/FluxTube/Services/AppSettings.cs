@@ -60,6 +60,8 @@ public sealed class AppSettings
     public string SeasonalEffect { get; set; } = "none";
     /// <summary>Subtle PS1/PS2-style UI sound effects (Silent Hill / Metal Gear Solid inspired) on clicks, toggles, and sliders.</summary>
     public bool UiSounds { get; set; } = false;
+    /// <summary>Optional custom sound display names per UI sound slot (normalized WAV copies stored in .fluxtube/sfx).</summary>
+    public Dictionary<string, string> CustomSfx { get; set; } = new();
 
     public string PlayerFormat => FormatFor(PlayerQuality);
     public string DownloadFormat => FormatFor(DownloadQuality);

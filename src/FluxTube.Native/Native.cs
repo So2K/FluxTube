@@ -119,6 +119,11 @@ public sealed unsafe class Edit
         {
             if (m == W.WM_KEYDOWN)
             {
+                if ((int)w == 'A' && W.KeyDown(W.VK_CONTROL))
+                {
+                    W.SendMessageW(h, 0x00B1 /*EM_SETSEL*/, 0, -1);
+                    return 0;
+                }
                 switch ((int)w)
                 {
                     case W.VK_RETURN: e.Enter?.Invoke(); return 0;
@@ -127,7 +132,26 @@ public sealed unsafe class Edit
                     case W.VK_DOWN: if (e.Arrow?.Invoke(1) == true) return 0; break;
                 }
             }
-            else if (m == W.WM_CHAR && (w == 13 || w == 27)) return 0; // no beep
+            else if (m == W.WM_CHAR)
+            {
+                if (w == 13 || w == 27 || w == 1) return 0; // no beep / no control char
+                if (w == 0x7F) // Ctrl+Backspace: delete previous word instead of inserting a tofu square
+                {
+                    uint sel0 = 0, sel1 = 0;
+                    W.SendMessageW(h, 0x00B0 /*EM_GETSEL*/, (nuint)(&sel0), (nint)(&sel1));
+                    int a = (int)sel0, b = (int)sel1;
+                    if (a == b && a > 0)
+                    {
+                        var txt = W.GetText(h);
+                        int p = Math.Min(a, txt.Length);
+                        while (p > 0 && char.IsWhiteSpace(txt[p - 1])) p--;
+                        while (p > 0 && !char.IsWhiteSpace(txt[p - 1])) p--;
+                        W.SendMessageW(h, 0x00B1 /*EM_SETSEL*/, (nuint)p, a);
+                    }
+                    fixed (char* empty = "") W.SendMessageW(h, 0x00C2 /*EM_REPLACESEL*/, 1, (nint)empty);
+                    return 0;
+                }
+            }
             else if (m == W.WM_KILLFOCUS) { Suggest.Hide(); App.Invalidate(); }
             else if (m == W.WM_SETFOCUS) App.Invalidate();
         }
