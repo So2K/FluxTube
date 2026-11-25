@@ -286,6 +286,15 @@ public sealed class SettingsPage : IPage
         ("noir", "Нуар / Хоррор", "Noir / Horror"),
         ("orbital", "Орбита (Космос)", "Orbital Space"),
     ];
+    private static readonly (string Key, string Ru, string En)[] GlassShaders =
+    [
+        ("acrylic", "Матовое стекло (Stencil)", "Frosted Glass (Stencil)"),
+        ("liquid", "Жидкое стекло", "Liquid Refraction"),
+        ("toon", "Тун-шейдер (Аниме)", "Toon Cel + Ink"),
+        ("poster", "Постеризация", "Posterize Pop"),
+        ("sketch", "Рисованный (Штрих)", "Hand-Drawn Sketch"),
+        ("off", "Выкл (Классика)", "Off (Classic)"),
+    ];
     private static readonly (string Key, string Ru, string En)[] CornerStyles =
         [("sharp", "Острые (0px)", "Sharp (0px)"), ("normal", "Обычные", "Normal"), ("round", "Мягкие", "Rounded")];
     private static readonly (string Key, string Ru, string En)[] CardStyles =
@@ -576,6 +585,10 @@ public sealed class SettingsPage : IPage
         PillGridRow("frost", L.T("Стиль фона и стекла", "Backdrop & glass style"),
             L.T("Запекается на GPU один раз (~0.04 мс/кадр). Комбинируется с обоями и узорами.", "Pre-baked once on GPU (~0.04 ms/frame). Stacks freely with wallpapers & patterns."),
             FrostedModes, s.FrostedGlass, v => s.FrostedGlass = v);
+
+        PillGridRow("gshader", L.T("Шейдер стекла и графики (GPU)", "Glass & graphics shader (GPU)"),
+            L.T("Живой Stencil-блюр под панелями, преломление жидкого стекла, тун-шейдер с контуром, постеризация или штриховка (~0.15 мс GPU)", "Live stencil-masked panel blur, liquid glass refraction, anime toon cel+ink, posterize, or hand-drawn sketch (~0.15 ms GPU)"),
+            GlassShaders, s.UiGlassShader, v => s.UiGlassShader = v);
 
         PillGridRow("bgpat", L.T("Узор (паттерн) на фон", "Background pattern"),
             L.T("Бесшовный векторный GPU-тайл (~0.02 мс/кадр, 0% CPU). Работает на стекле, обоях и чистом фоне.", "Seamless vector GPU tile (~0.02 ms/frame, 0% CPU). Works on glass, wallpapers, and solid backgrounds."),

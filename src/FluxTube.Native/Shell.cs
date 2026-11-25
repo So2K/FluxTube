@@ -1131,6 +1131,8 @@ public static class Shell
                 case "--test-pip-alpha": Pip.TestAlpha = int.Parse(v); break;
                 case "--test-autoplay": AppSettings.Current.Autoplay = v == "1"; break;
                 case "--theme": Themes.Apply(theme: v, save: !App.Test); break;
+                case "--test-shader": if (App.Test) AppSettings.Current.UiGlassShader = v; break;
+                case "--test-effect": if (App.Test) AppSettings.Current.SeasonalEffect = v; break;
                 case "--test-menu": App.After(int.Parse(v), () => AccountMenu.Toggle(Gfx.W - 46 * 3 - 8, TopH - 2)); break;
                 case "--test-dsp": App.After(int.Parse(v), AudioStudioPanel.Show); break;
                 case "--test-login": App.After(int.Parse(v), () => LoginModal.Show()); break;
@@ -1736,8 +1738,10 @@ public static class Shell
         bool musicBounceOn = AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && _cur is not ShortsPage && P.HasMedia && !P.Paused && !P.Muted && !App.Test;
         MusicBounce.Update(musicBounceOn, (float)UI.Dt);
 
-        // Tactile frosted/matte glass backdrop behind the entire window
+        // Tactile frosted/matte glass backdrop behind the entire window + GPU stylization & stencil glass pass 1
         Gfx.DrawFrostedBackdrop(w, h);
+        Gfx.StylizeBackdropIfNeeded();
+        Gfx.CaptureGlassLayer();
 
         var playing = cur != null && P.HasMedia;
         var onWatch = (_cur is WatchPage wp && wp.Video.VideoId == cur?.VideoId)
@@ -1758,6 +1762,8 @@ public static class Shell
         bool navMb = Gfx.PushMotionBlur(contentR, 0f, navVelY);
         _cur?.Draw(new R(sideW, TopH + tabsH + slide, w - sideW, h - TopH - tabsH - barH - slide));
         Gfx.PopMotionBlur(navMb);
+        // Pass 2: capture live blurred/stylized page content (scrolling thumbnails, artwork, aurora) strictly under chrome!
+        Gfx.CaptureGlassLayer();
         DrawTabs(new R(sideW, TopH, w - sideW, TabH));
 
         if (navT < 1)
@@ -1810,21 +1816,22 @@ public static class Shell
         var sw = Math.Clamp(MathF.Min(w - 720, maxSearchW), MathF.Min(140, maxSearchW), MathF.Min(600, maxSearchW));
         float contentCenter = sideW + (w - sideW) * 0.5f;
         float searchX = Math.Clamp(contentCenter - sw * 0.5f, logo.Right + 16, MathF.Max(logo.Right + 16, rightEdge - sw - accReserve));
-        _searchBox = new R(Gfx.Snap(searchX), 8, sw, 36);
-        float searchRad = Gfx.Corner(18);
-        Gfx.Fill(_searchBox, Th.Card, searchRad);
+        _searchBox = new R(Gfx.Snap(searchX), 10, sw, 34);
+        float searchRad = Gfx.Corner(17);
+        Gfx.FillFrosted(_searchBox, Th.Card, searchRad, opacity: 0.76f);
         if (_search.Focused)
         {
             if (AppSettings.Current.UiNeonGlow) Gfx.NeonGlow(_searchBox, searchRad, Th.Brand, 0.9f);
             else Gfx.Stroke(_searchBox, Gfx.Fade(Th.Brand, 0.85f), searchRad, 1.35f);
         }
-        else if (AppSettings.Current.UiCardStyle == "dashed") Gfx.StrokeDashed(_searchBox, Gfx.Fade(Th.Brand, 0.36f), searchRad, 1.2f);
+        else if (AppSettings.Current.UiCardStyle == "dashed") Gfx.StrokeDashed(_searchBox, Gfx.Fade(Th.Brand, 0.42f), searchRad, 1.25f);
         else if (AppSettings.Current.UiCardStyle == "brutal") Gfx.Stroke(_searchBox, Gfx.Fade(Th.Ink, 0.7f), searchRad, 1.4f);
         else if (AppSettings.Current.UiCardStyle == "framed") Gfx.Stroke(_searchBox, Th.Line, searchRad, 1f);
         else if (AppSettings.Current.UiCardStyle == "neon" && AppSettings.Current.UiNeonGlow) Gfx.Stroke(_searchBox, Gfx.Fade(Th.Brand2, 0.42f), searchRad, 1f);
+        else Gfx.Stroke(_searchBox, Th.A(0.14f), searchRad, 1f);
         _topHits.Add(_searchBox);
         _search.Place(_searchBox, 18, 44);
-        if (UI.IconButton(UI.Id("go"), new R(_searchBox.Right - 40, 10, 34, 32), Th.Search, 14, Th.Sub)) App.Post(() => Submit(_search.Text));
+        if (UI.IconButton(UI.Id("go"), new R(_searchBox.Right - 39, 11, 32, 32), Th.Search, 14, Th.Sub)) App.Post(() => Submit(_search.Text));
 
         float accLeft;
         if (logged)
@@ -1945,6 +1952,8 @@ public static class Shell
         else if (eff == "neon") DrawNeonAmbient(w, h);
         UI.DrawAutoScrollIndicator();
         UI.Modal = null;
+        // Pass 3: only when a popup/modal/tab preview is visible, re-capture full scene so floating glass blurs chrome too!
+        if (AnyModalOpen || (_hoverTab >= 0 && !_draggingTab)) Gfx.CaptureGlassLayer();
         DrawTabPreview();
         ThemeCodeEditor.Draw();
         AudioStudioPanel.Draw();
@@ -2036,21 +2045,21 @@ public static class Shell
         return arr;
     }
 
-    /// <summary>Full-width draped festive fairy-light garland stopping cleanly before window controls with smooth anti-aliased wire.</summary>
+    /// <summary>Full-width draped festive fairy-light garland tucked cleanly above the search bar &amp; stopping before window controls.</summary>
     private static void DrawFullWidthGarland(float w, float t, uint[] palette, float twinkleSpeed)
     {
         const float span = 112f;
         const float step = 28f;
         // Stop cleanly before the right-hand window caption buttons (min / max / close) so bulbs never clash with them!
-        float maxW = MathF.Max(120f, w - 152f);
-        float prevX = 0f, prevY = 1.5f;
+        float maxW = MathF.Max(120f, w - 154f);
+        float prevX = 0f, prevY = 1.0f;
         for (float x = 8f; x <= maxW; x += 8f)
         {
             float u = (x % span) / span;
-            float sag = MathF.Sin(u * MathF.PI) * 5.0f;
-            float ny = 1.5f + sag;
+            float sag = MathF.Sin(u * MathF.PI) * 3.1f;
+            float ny = 1.0f + sag;
             float fade = x > maxW - 44f ? Math.Clamp((maxW - x) / 44f, 0f, 1f) : 1f;
-            Gfx.Line(prevX, prevY, x, ny, Gfx.Fade(Th.Ink, 0.20f * fade), 1.15f);
+            Gfx.Line(prevX, prevY, x, ny, Gfx.Fade(Th.Ink, 0.22f * fade), 1.05f);
             prevX = x; prevY = ny;
         }
 
@@ -2058,21 +2067,21 @@ public static class Shell
         for (float gx = 14f; gx < maxW - 10f; gx += step, idx++)
         {
             float u = (gx % span) / span;
-            float sag = MathF.Sin(u * MathF.PI) * 5.0f;
-            float cy = 4.2f + sag;
+            float sag = MathF.Sin(u * MathF.PI) * 3.1f;
+            float cy = 2.8f + sag;
             float fade = gx > maxW - 44f ? Math.Clamp((maxW - gx) / 44f, 0f, 1f) : 1f;
             float wave = (0.5f + 0.5f * MathF.Sin(t * twinkleSpeed + idx * 1.15f)) * fade;
-            float tw = 0.42f + 0.58f * wave;
+            float tw = 0.44f + 0.56f * wave;
             var col = palette[idx % palette.Length];
 
             // Tiny socket cap hanging from the cord
-            Gfx.Fill(new R(gx - 1.3f, cy - 3.2f, 2.6f, 2.2f), Gfx.Fade(0xFF1A1E28, 0.72f), 0.8f);
-            // Outer atmospheric glow halo
-            Gfx.Circle(gx, cy + 0.5f, 9.5f, Gfx.Fade(col, 0.10f * tw));
-            Gfx.Circle(gx, cy + 0.5f, 5.2f, Gfx.Fade(col, 0.24f * tw));
-            // Glowing bulb body + bright specular core
-            Gfx.Circle(gx, cy + 0.6f, 2.6f, Gfx.Fade(col, 0.92f * tw));
-            Gfx.Circle(gx - 0.5f, cy, 1.0f, Gfx.Fade(0xFFFFFFFF, 0.78f * tw));
+            Gfx.Fill(new R(gx - 1.1f, cy - 2.4f, 2.2f, 1.8f), Gfx.Fade(0xFF1A1E28, 0.72f), 0.7f);
+            // Soft outer glow halo (sized cleanly so bulbs stay tucked above the search bar border at Y=10)
+            Gfx.Circle(gx, cy + 0.4f, 6.2f, Gfx.Fade(col, 0.11f * tw));
+            Gfx.Circle(gx, cy + 0.4f, 3.8f, Gfx.Fade(col, 0.24f * tw));
+            // Crisp jewel bulb body + specular core
+            Gfx.Circle(gx, cy + 0.5f, 2.1f, Gfx.Fade(col, 0.94f * tw));
+            Gfx.Circle(gx - 0.45f, cy, 0.85f, Gfx.Fade(0xFFFFFFFF, 0.82f * tw));
         }
     }
 

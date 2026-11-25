@@ -89,6 +89,10 @@ public static unsafe class Gfx
     private static ID2D1BitmapBrush? _grainBrush;
     private static ID2D1Bitmap1? _sheenBmp;
     private static ID2D1BitmapBrush? _sheenBrush;
+    private static ID2D1Bitmap1? _halftoneBmp;
+    private static ID2D1BitmapBrush? _halftoneBrush;
+    private static ID2D1Bitmap1? _sketchBmp;
+    private static ID2D1BitmapBrush? _sketchBrush;
     private static ID2D1Bitmap1? _backdropBmp;
     private static uint _backdropBg, _backdropBrand, _backdropBrand2;
     private static bool _backdropLight;
@@ -96,6 +100,21 @@ public static unsafe class Gfx
     private static long _backdropBakedAt;
     private static ID2D1StrokeStyle? _dashStyle;
     private static ID2D1BitmapBrush? _imgBrush;
+    // Hardware Direct2D 1.1 Stencil-Masked Adaptive Frosted Glass & GPU Stylization Shader resources
+    private static ID2D1Bitmap1? _sceneBmp;
+    private static ID2D1Bitmap1? _activeTarget;
+    private static ID2D1Bitmap1? _glassDownBmp;
+    private static ID2D1Bitmap1? _glassBlurBmp;
+    private static ID2D1BitmapBrush? _glassBrush;
+    private static ID2D1Effect? _glassBlurFx;
+    private static ID2D1Effect? _glassSatFx;
+    private static ID2D1Effect? _glassPostFx;
+    private static ID2D1Effect? _glassEdgeFx;
+    private static ID2D1Effect? _glassTurbFx;
+    private static ID2D1Effect? _glassDispFx;
+    private static int _sceneW, _sceneH, _glassW, _glassH;
+    private static float _sceneScale;
+    private static bool _glassReady;
     // Hardware-accelerated Direct2D DirectionalBlur resources (lazily allocated only when UI Motion Blur triggers)
     private static ID2D1Bitmap1? _mbBmp;
     private static ID2D1Effect? _mbEffect;
@@ -173,6 +192,8 @@ public static unsafe class Gfx
         _scratchBrush = DC.CreateSolidColorBrush(new Color4(1, 1, 1, 1));
         CreateGrainTexture();
         CreateSheenTexture();
+        CreateHalftoneTexture();
+        CreateSketchTexture();
         CreateTarget();
         DeviceGeneration++;
         Occluded = false;
@@ -297,6 +318,78 @@ public static unsafe class Gfx
         _sheenBrush = DC.CreateBitmapBrush(_sheenBmp, new BitmapBrushProperties(ExtendMode.Wrap, ExtendMode.Clamp, BitmapInterpolationMode.Linear));
     }
 
+    /// <summary>Pre-bakes a crisp 16×16 manga/anime Ben-Day halftone dot screen tile for Toon glass surfaces.</summary>
+    private static void CreateHalftoneTexture()
+    {
+        _halftoneBrush?.Dispose();
+        _halftoneBmp?.Dispose();
+        const int sz = 16;
+        var px = new byte[sz * sz * 4];
+        for (int y = 0; y < sz; y++)
+        {
+            for (int x = 0; x < sz; x++)
+            {
+                // Staggered 45° halftone dot lattice
+                float dx1 = (x + 0.5f) - 4f, dy1 = (y + 0.5f) - 4f;
+                float dx2 = (x + 0.5f) - 12f, dy2 = (y + 0.5f) - 12f;
+                float d = MathF.Min(MathF.Sqrt(dx1 * dx1 + dy1 * dy1), MathF.Sqrt(dx2 * dx2 + dy2 * dy2));
+                float a = Math.Clamp(1.65f - d, 0f, 1f);
+                if (a > 0.01f)
+                {
+                    int o = (y * sz + x) * 4;
+                    byte v = (byte)(a * 255f);
+                    px[o] = v; px[o + 1] = v; px[o + 2] = v; px[o + 3] = v;
+                }
+            }
+        }
+        fixed (byte* p = px)
+        {
+            _halftoneBmp = DC.CreateBitmap(new SizeI(sz, sz), (nint)p, sz * 4,
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.None));
+        }
+        _halftoneBrush = DC.CreateBitmapBrush(_halftoneBmp, new BitmapBrushProperties(ExtendMode.Wrap, ExtendMode.Wrap, BitmapInterpolationMode.Linear));
+    }
+
+    /// <summary>Pre-bakes a seamless 128×128 hand-drawn cross-hatch + watercolor paper tooth texture for Sketch shader.</summary>
+    private static void CreateSketchTexture()
+    {
+        _sketchBrush?.Dispose();
+        _sketchBmp?.Dispose();
+        const int sz = 128;
+        var px = new byte[sz * sz * 4];
+        uint rng = 0x517CC1B7u;
+        for (int y = 0; y < sz; y++)
+        {
+            for (int x = 0; x < sz; x++)
+            {
+                rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+                float n = ((rng & 0xFFFF) * (1f / 65535f) - 0.5f) * 2f;
+                // Diagonal graphite pencil hatch strokes + subtle counter-hatch + organic paper fiber
+                float d1 = MathF.Abs(((x + y) % 8) - 3.5f);
+                float h1 = Math.Clamp(1.1f - d1, 0f, 1f) * (0.55f + 0.45f * MathF.Sin(x * 0.19f - y * 0.13f));
+                float d2 = MathF.Abs((((x - y) & 15) - 7.5f));
+                float h2 = Math.Clamp(0.95f - d2, 0f, 1f) * 0.48f * (0.5f + 0.5f * MathF.Cos(x * 0.11f + y * 0.23f));
+                float paper = n * 0.35f;
+                float val = Math.Clamp(h1 * 0.55f + h2 * 0.42f + MathF.Max(0f, paper) * 0.45f, 0f, 1f);
+                if (val > 0.02f)
+                {
+                    int o = (y * sz + x) * 4;
+                    byte r = (byte)(val * 245f);
+                    byte g = (byte)(val * 240f);
+                    byte b = (byte)(val * 232f);
+                    byte a = (byte)(val * 255f);
+                    px[o] = b; px[o + 1] = g; px[o + 2] = r; px[o + 3] = a;
+                }
+            }
+        }
+        fixed (byte* p = px)
+        {
+            _sketchBmp = DC.CreateBitmap(new SizeI(sz, sz), (nint)p, sz * 4,
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.None));
+        }
+        _sketchBrush = DC.CreateBitmapBrush(_sketchBmp, new BitmapBrushProperties(ExtendMode.Wrap, ExtendMode.Wrap, BitmapInterpolationMode.Linear));
+    }
+
     public static string ActiveFontName() => Services.AppSettings.Current.UiFont switch
     {
         "serif" => "Georgia",
@@ -314,6 +407,10 @@ public static unsafe class Gfx
         _ => baseRadius,
     };
 
+    /// <summary>Clamps any corner radius to <= min(W, H)/2 so Direct2D ALWAYS draws true circular arcs, never squashed ovals.</summary>
+    private static float ClampRad(R r, float radius)
+        => radius <= 0f ? 0f : MathF.Min(radius, MathF.Min(MathF.Max(0f, r.W), MathF.Max(0f, r.H)) * 0.5f);
+
     private static ID2D1StrokeStyle DashStyle()
         => _dashStyle ??= _d2dFactory.CreateStrokeStyle(new StrokeStyleProperties
         {
@@ -321,7 +418,8 @@ public static unsafe class Gfx
             DashCap = CapStyle.Round,
             StartCap = CapStyle.Round,
             EndCap = CapStyle.Round,
-        }, [3.5f, 3.2f]);
+            LineJoin = LineJoin.Round,
+        }, [4.4f, 3.8f]);
 
     /// <summary>Pre-bakes a 384×240 linear-light studio backdrop ONCE per theme/mode change (~2ms CPU once, 0.04ms GPU/frame).</summary>
     private static void EnsureBackdropBaked(string mode)
@@ -446,12 +544,12 @@ public static unsafe class Gfx
                 }
                 else if (mode == "kawaii")
                 {
-                    // Dreamy cotton-candy / strawberry-milk pastel clouds (works on both Light & Dark kawaii!)
-                    float l1 = MathF.Exp(-((u - 0.15f) * (u - 0.15f) * 2.2f + (v - 0.15f) * (v - 0.15f) * 2.6f));
-                    float l2 = MathF.Exp(-((u - 0.86f) * (u - 0.86f) * 2.0f + (v - 0.25f) * (v - 0.25f) * 2.4f));
-                    float l3 = MathF.Exp(-((u - 0.55f) * (u - 0.55f) * 1.9f + (v - 0.92f) * (v - 0.92f) * 2.5f));
                     if (light)
                     {
+                        // Dreamy cotton-candy / strawberry-milk pastel clouds on light kawaii
+                        float l1 = MathF.Exp(-((u - 0.15f) * (u - 0.15f) * 2.2f + (v - 0.15f) * (v - 0.15f) * 2.6f));
+                        float l2 = MathF.Exp(-((u - 0.86f) * (u - 0.86f) * 2.0f + (v - 0.25f) * (v - 0.25f) * 2.4f));
+                        float l3 = MathF.Exp(-((u - 0.55f) * (u - 0.55f) * 1.9f + (v - 0.92f) * (v - 0.92f) * 2.5f));
                         float k1 = 0.09f * l1, k2 = 0.085f * l2, k3 = 0.07f * l3;
                         r = lBgR * (1f - k1 - k2 - k3) + (ar * ar * 0.45f + 0.55f) * k1 + (b2r * b2r * 0.45f + 0.55f) * k2 + (ar * ar * 0.3f + 0.7f) * k3;
                         g = lBgG * (1f - k1 - k2 - k3) + (ag * ag * 0.45f + 0.55f) * k1 + (b2g * b2g * 0.45f + 0.55f) * k2 + (ag * ag * 0.3f + 0.7f) * k3;
@@ -459,9 +557,17 @@ public static unsafe class Gfx
                     }
                     else
                     {
-                        r = lBgR + ar * ar * (0.10f * l1 + 0.06f * l3) + b2r * b2r * 0.09f * l2;
-                        g = lBgG + ag * ag * (0.10f * l1 + 0.06f * l3) + b2g * b2g * 0.09f * l2;
-                        b = lBgB + ab * ab * (0.10f * l1 + 0.06f * l3) + b2b * b2b * 0.09f * l2;
+                        // Ultra-black obsidian dark kawaii: keeps center deep pitch black with subtle neon edge wisps (no muddy purple wash!)
+                        float bgLum = lBgR * 0.299f + lBgG * 0.587f + lBgB * 0.114f;
+                        bool pitchBlack = bgLum < 0.004f;
+                        float spread = pitchBlack ? 5.6f : 3.0f;
+                        float l1 = MathF.Exp(-((u - 0.04f) * (u - 0.04f) * spread + (v - 0.06f) * (v - 0.06f) * spread));
+                        float l2 = MathF.Exp(-((u - 0.96f) * (u - 0.96f) * spread + (v - 0.14f) * (v - 0.14f) * spread));
+                        float l3 = MathF.Exp(-((u - 0.52f) * (u - 0.52f) * (spread * 0.85f) + (v - 1.02f) * (v - 1.02f) * spread));
+                        float k = pitchBlack ? 0.015f : 0.055f;
+                        r = lBgR + ar * ar * (k * l1 + k * 0.65f * l3) + b2r * b2r * (k * 0.85f * l2);
+                        g = lBgG + ag * ag * (k * l1 + k * 0.65f * l3) + b2g * b2g * (k * 0.85f * l2);
+                        b = lBgB + ab * ab * (k * l1 + k * 0.65f * l3) + b2b * b2b * (k * 0.85f * l2);
                     }
                 }
                 else if (mode == "mesh")
@@ -500,8 +606,10 @@ public static unsafe class Gfx
                     }
                     else
                     {
-                        float s1 = 0.046f * mul * l1, s2 = 0.036f * mul * l2, sc = 0.017f * mul * caustic, s3 = 0.022f * mul * l3;
-                        float top = 0.012f * mul * topGrazing;
+                        float bgLum = lBgR * 0.299f + lBgG * 0.587f + lBgB * 0.114f;
+                        float darkScale = bgLum < 0.004f ? 0.32f : 1.0f;
+                        float s1 = 0.046f * mul * darkScale * l1, s2 = 0.036f * mul * darkScale * l2, sc = 0.017f * mul * darkScale * caustic, s3 = 0.022f * mul * darkScale * l3;
+                        float top = 0.012f * mul * darkScale * topGrazing;
                         r = lBgR * vig + keyR * s1 + rimR * s2 + silkR * sc + (keyR + rimR) * 0.5f * s3 + top;
                         g = lBgG * vig + keyG * s1 + rimG * s2 + silkG * sc + (keyG + rimG) * 0.5f * s3 + top;
                         b = lBgB * vig + keyB * s1 + rimB * s2 + silkB * sc + (keyB + rimB) * 0.5f * s3 + top * 1.15f;
@@ -552,6 +660,14 @@ public static unsafe class Gfx
         _sheenBrush = null;
         _sheenBmp?.Dispose();
         _sheenBmp = null;
+        _halftoneBrush?.Dispose();
+        _halftoneBrush = null;
+        _halftoneBmp?.Dispose();
+        _halftoneBmp = null;
+        _sketchBrush?.Dispose();
+        _sketchBrush = null;
+        _sketchBmp?.Dispose();
+        _sketchBmp = null;
         _backdropBmp?.Dispose();
         _backdropBmp = null;
         _backdropBg = 0;
@@ -561,6 +677,7 @@ public static unsafe class Gfx
         _imgBrush = null;
         BgEngine.DisposeGpuResources();
         DisposeMotionBlurResources();
+        DisposeGlassResources();
         foreach (var s in _radials) s.Dispose();
         ClearTextCache();
         while (_prewarmed.TryDequeue(out var p)) p.Run.Layout?.Dispose();
@@ -690,7 +807,7 @@ public static unsafe class Gfx
         DC.PopAxisAlignedClip();
         for (int i = _mbSavedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
 
-        DC.Target = _target;
+        DC.Target = _activeTarget ?? _target;
 
         for (int i = 0; i < _mbSavedClips; i++)
             DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
@@ -735,6 +852,7 @@ public static unsafe class Gfx
         _target = null;
         _mbBmp?.Dispose();
         _mbBmp = null;
+        DisposeGlassTargets();
         ClearTextCache();
         CreateTarget();
         App.Invalidate();
@@ -753,6 +871,7 @@ public static unsafe class Gfx
         _target = null;
         _mbBmp?.Dispose();
         _mbBmp = null;
+        DisposeGlassTargets();
         var hr = _swap.ResizeBuffers(0, (uint)w, (uint)h, Format.Unknown, SwapChainFlags.None);
         if (hr.Failure && IsDeviceLost(hr.Code))
         {
@@ -765,9 +884,310 @@ public static unsafe class Gfx
         CreateTarget();
     }
 
+    private static bool NeedsSceneBuffer()
+    {
+        var sh = Services.AppSettings.Current.UiGlassShader;
+        return !string.IsNullOrEmpty(sh) && sh != "off";
+    }
+
+    private static void DisposeGlassTargets()
+    {
+        _activeTarget = null;
+        _glassReady = false;
+        _glassBrush?.Dispose(); _glassBrush = null;
+        _glassBlurBmp?.Dispose(); _glassBlurBmp = null;
+        _glassDownBmp?.Dispose(); _glassDownBmp = null;
+        _sceneBmp?.Dispose(); _sceneBmp = null;
+        _sceneW = _sceneH = _glassW = _glassH = 0;
+        _sceneScale = 0;
+    }
+
+    private static void DisposeGlassResources()
+    {
+        DisposeGlassTargets();
+        _glassBlurFx?.Dispose(); _glassBlurFx = null;
+        _glassSatFx?.Dispose(); _glassSatFx = null;
+        _glassPostFx?.Dispose(); _glassPostFx = null;
+        _glassEdgeFx?.Dispose(); _glassEdgeFx = null;
+        _glassTurbFx?.Dispose(); _glassTurbFx = null;
+        _glassDispFx?.Dispose(); _glassDispFx = null;
+    }
+
+    private static void EnsureGlassResources()
+    {
+        if (PxW <= 0 || PxH <= 0) return;
+        if (_sceneBmp == null || _sceneW != PxW || _sceneH != PxH || MathF.Abs(_sceneScale - Scale) > 0.001f)
+        {
+            DisposeGlassTargets();
+            _sceneBmp = DC.CreateBitmap(new SizeI(PxW, PxH),
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96 * Scale, 96 * Scale, BitmapOptions.Target));
+            _sceneW = PxW; _sceneH = PxH; _sceneScale = Scale;
+            _glassW = Math.Max(64, PxW / 4);
+            _glassH = Math.Max(64, PxH / 4);
+            _glassDownBmp = DC.CreateBitmap(new SizeI(_glassW, _glassH),
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.Target));
+            _glassBlurBmp = DC.CreateBitmap(new SizeI(_glassW, _glassH),
+                new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.Target));
+            _glassBrush = DC.CreateBitmapBrush(_glassBlurBmp, new BitmapBrushProperties(ExtendMode.Clamp, ExtendMode.Clamp, BitmapInterpolationMode.Linear));
+        }
+        if (_glassBlurFx == null) { var p = DC.CreateEffect(EffectGuids.GaussianBlur); if (p != 0) _glassBlurFx = new ID2D1Effect(p); }
+        if (_glassSatFx == null) { var p = DC.CreateEffect(EffectGuids.Saturation); if (p != 0) _glassSatFx = new ID2D1Effect(p); }
+    }
+
+    private static ID2D1Effect? EnsureEffect(ref ID2D1Effect? slot, Guid guid)
+    {
+        if (slot != null) return slot;
+        var p = DC.CreateEffect(guid);
+        if (p != 0) slot = new ID2D1Effect(p);
+        return slot;
+    }
+
+    /// <summary>
+    /// Applies real hardware Direct2D GPU stylization shaders (Toon Cel + Sobel Ink, Pop Posterize, or Graphite Sketch)
+    /// directly onto the rendered backdrop layer inside _sceneBmp BEFORE sharp vector UI text is drawn on top.
+    /// </summary>
+    public static void StylizeBackdropIfNeeded()
+    {
+        if (_activeTarget != _sceneBmp || _sceneBmp == null || _glassDownBmp == null || _mbDepth > 0) return;
+        var sh = Services.AppSettings.Current.UiGlassShader;
+        if (sh is not ("toon" or "poster" or "sketch")) return;
+
+        var savedTf = DC.Transform;
+        int savedClips = _clipDepth;
+        for (int i = savedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
+        try
+        {
+            DC.Transform = Matrix3x2.Identity;
+            DC.SetDpi(96, 96);
+            // Copy backdrop into quarter-res scratch so shader cost is ~0.08ms and never reads/writes the same target
+            DC.Target = _glassDownBmp;
+            DC.DrawBitmap(_sceneBmp, new Vortice.RawRectF(0, 0, _glassW, _glassH), 1f, Vortice.Direct2D1.InterpolationMode.Linear, null, null);
+
+            if (sh == "toon")
+            {
+                var post = EnsureEffect(ref _glassPostFx, EffectGuids.Posterize);
+                var edge = EnsureEffect(ref _glassEdgeFx, EffectGuids.EdgeDetection);
+                if (post != null)
+                {
+                    uint levels = 6;
+                    post.SetInput(0, _glassDownBmp, true);
+                    post.SetValue((uint)PosterizeProperties.RedValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+                    post.SetValue((uint)PosterizeProperties.GreenValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+                    post.SetValue((uint)PosterizeProperties.BlueValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+
+                    DC.Target = _sceneBmp;
+                    DC.Transform = Matrix3x2.CreateScale(PxW / (float)_glassW, PxH / (float)_glassH);
+                    using var postOut = post.Output;
+                    DC.DrawImage(postOut, Vector2.Zero, new Vortice.RawRectF(0, 0, _glassW, _glassH),
+                        Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+
+                    if (edge != null)
+                    {
+                        float strength = 0.55f, br = 0.5f;
+                        uint mode = 0, overlay = 1, alphaMode = 0;
+                        edge.SetInputEffect(0, post, true);
+                        edge.SetValue((uint)EdgeDetectionProperties.Strength, PropertyType.Float, &strength, sizeof(float));
+                        edge.SetValue((uint)EdgeDetectionProperties.BlurRadius, PropertyType.Float, &br, sizeof(float));
+                        edge.SetValue((uint)EdgeDetectionProperties.Mode, PropertyType.Enum, &mode, sizeof(uint));
+                        edge.SetValue((uint)EdgeDetectionProperties.OverlayEdges, PropertyType.Bool, &overlay, sizeof(uint));
+                        edge.SetValue((uint)EdgeDetectionProperties.AlphaMode, PropertyType.Enum, &alphaMode, sizeof(uint));
+                        using var edgeOut = edge.Output;
+                        DC.DrawImage(edgeOut, Vector2.Zero, new Vortice.RawRectF(0, 0, _glassW, _glassH),
+                            Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+                    }
+                }
+            }
+            else if (sh == "poster")
+            {
+                var post = EnsureEffect(ref _glassPostFx, EffectGuids.Posterize);
+                if (post != null && _glassSatFx != null)
+                {
+                    uint levels = 5;
+                    post.SetInput(0, _glassDownBmp, true);
+                    post.SetValue((uint)PosterizeProperties.RedValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+                    post.SetValue((uint)PosterizeProperties.GreenValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+                    post.SetValue((uint)PosterizeProperties.BlueValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+                    float sat = 1.38f;
+                    _glassSatFx.SetInputEffect(0, post, true);
+                    _glassSatFx.SetValue((uint)SaturationProperties.Saturation, PropertyType.Float, &sat, sizeof(float));
+
+                    DC.Target = _sceneBmp;
+                    DC.Transform = Matrix3x2.CreateScale(PxW / (float)_glassW, PxH / (float)_glassH);
+                    using var satOut = _glassSatFx.Output;
+                    DC.DrawImage(satOut, Vector2.Zero, new Vortice.RawRectF(0, 0, _glassW, _glassH),
+                        Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+                }
+            }
+            else if (sh == "sketch")
+            {
+                var edge = EnsureEffect(ref _glassEdgeFx, EffectGuids.EdgeDetection);
+                if (edge != null)
+                {
+                    float strength = 0.65f, br = 0.35f;
+                    uint mode = 1 /*Prewitt*/, overlay = 1, alphaMode = 0;
+                    edge.SetInput(0, _glassDownBmp, true);
+                    edge.SetValue((uint)EdgeDetectionProperties.Strength, PropertyType.Float, &strength, sizeof(float));
+                    edge.SetValue((uint)EdgeDetectionProperties.BlurRadius, PropertyType.Float, &br, sizeof(float));
+                    edge.SetValue((uint)EdgeDetectionProperties.Mode, PropertyType.Enum, &mode, sizeof(uint));
+                    edge.SetValue((uint)EdgeDetectionProperties.OverlayEdges, PropertyType.Bool, &overlay, sizeof(uint));
+                    edge.SetValue((uint)EdgeDetectionProperties.AlphaMode, PropertyType.Enum, &alphaMode, sizeof(uint));
+
+                    DC.Target = _sceneBmp;
+                    DC.Transform = Matrix3x2.CreateScale(PxW / (float)_glassW, PxH / (float)_glassH);
+                    using var edgeOut = edge.Output;
+                    DC.DrawImage(edgeOut, Vector2.Zero, new Vortice.RawRectF(0, 0, _glassW, _glassH),
+                        Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+                }
+            }
+        }
+        catch { }
+        finally
+        {
+            DC.Target = _activeTarget;
+            DC.SetDpi(96 * Scale, 96 * Scale);
+            DC.Transform = savedTf;
+            for (int i = 0; i < savedClips; i++) DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
+        }
+
+        // Subtle graphic texture finish on backdrop (manga Ben-Day dots for Toon, pencil cross-hatch for Sketch)
+        if (sh == "toon" && _halftoneBrush != null)
+        {
+            _halftoneBrush.Transform = Matrix3x2.CreateScale(0.65f / MathF.Max(0.5f, Scale));
+            _halftoneBrush.Opacity = Th.Light ? 0.045f : 0.032f;
+            DC.FillRectangle(new Vortice.RawRectF(0, 0, W, H), _halftoneBrush);
+        }
+        else if (sh == "sketch" && _sketchBrush != null)
+        {
+            _sketchBrush.Transform = Matrix3x2.CreateScale(0.85f / MathF.Max(0.5f, Scale));
+            _sketchBrush.Opacity = Th.Light ? 0.085f : 0.062f;
+            DC.FillRectangle(new Vortice.RawRectF(0, 0, W, H), _sketchBrush);
+        }
+    }
+
+    /// <summary>
+    /// Captures the live rendered scene behind upcoming glass chrome/modals into a quarter-res hardware GPU blurred &amp;
+    /// shader-stylized surface (~0.12 ms GPU). Subsequent FillFrosted() calls stencil-mask this texture strictly inside
+    /// their exact rounded geometry so thumbnails, artwork, and aurora bleed &amp; adapt dynamically under every glass panel!
+    /// </summary>
+    public static void CaptureGlassLayer()
+    {
+        if (_activeTarget != _sceneBmp || _sceneBmp == null || _glassDownBmp == null || _glassBlurBmp == null || _glassBlurFx == null || _mbDepth > 0)
+            return;
+
+        var sh = Services.AppSettings.Current.UiGlassShader;
+        if (string.IsNullOrEmpty(sh) || sh == "off") { _glassReady = false; return; }
+
+        var savedTf = DC.Transform;
+        int savedClips = _clipDepth;
+        for (int i = savedClips - 1; i >= 0; i--) DC.PopAxisAlignedClip();
+        try
+        {
+            DC.Transform = Matrix3x2.Identity;
+            DC.SetDpi(96, 96);
+
+            // 1. Quarter-res downsample of current scene (16x fewer pixels -> blistering fast GPU blur!)
+            DC.Target = _glassDownBmp;
+            DC.DrawBitmap(_sceneBmp, new Vortice.RawRectF(0, 0, _glassW, _glassH), 1f, Vortice.Direct2D1.InterpolationMode.Linear, null, null);
+
+            // 2. Hardware GPU Blur + active glass shader graph into _glassBlurBmp
+            DC.Target = _glassBlurBmp;
+            float stdDev = sh switch
+            {
+                "liquid" => 3.2f,
+                "toon" => 2.8f,
+                "poster" => 3.4f,
+                "sketch" => 3.8f,
+                _ => 5.4f, // "acrylic": silky ~22px full-res frosted glass blur!
+            };
+            uint opt = (uint)GaussianBlurOptimization.Speed;
+            uint bm = (uint)BorderMode.Hard;
+            _glassBlurFx.SetInput(0, _glassDownBmp, true);
+            _glassBlurFx.SetValue((uint)GaussianBlurProperties.StandardDeviation, PropertyType.Float, &stdDev, sizeof(float));
+            _glassBlurFx.SetValue((uint)GaussianBlurProperties.Optimization, PropertyType.Enum, &opt, sizeof(uint));
+            _glassBlurFx.SetValue((uint)GaussianBlurProperties.BorderMode, PropertyType.Enum, &bm, sizeof(uint));
+
+            ID2D1Effect tail = _glassBlurFx;
+
+            if (_glassSatFx != null)
+            {
+                float sat = sh switch { "liquid" => 1.44f, "toon" or "poster" => 1.48f, "sketch" => 0.72f, _ => 1.32f };
+                _glassSatFx.SetInputEffect(0, tail, true);
+                _glassSatFx.SetValue((uint)SaturationProperties.Saturation, PropertyType.Float, &sat, sizeof(float));
+                tail = _glassSatFx;
+            }
+
+            if (sh == "liquid")
+            {
+                var turb = EnsureEffect(ref _glassTurbFx, EffectGuids.Turbulence);
+                var disp = EnsureEffect(ref _glassDispFx, EffectGuids.DisplacementMap);
+                if (turb != null && disp != null)
+                {
+                    var freq = new Vector2(0.022f, 0.028f);
+                    var sz = new Vector2(_glassW, _glassH);
+                    uint oct = 2, noise = 0;
+                    int seed = 7;
+                    turb.SetValue((uint)TurbulenceProperties.BaseFrequency, PropertyType.Vector2, &freq, (uint)sizeof(Vector2));
+                    turb.SetValue((uint)TurbulenceProperties.Size, PropertyType.Vector2, &sz, (uint)sizeof(Vector2));
+                    turb.SetValue((uint)TurbulenceProperties.NumOctaves, PropertyType.UInt32, &oct, sizeof(uint));
+                    turb.SetValue((uint)TurbulenceProperties.Seed, PropertyType.Int32, &seed, sizeof(int));
+                    turb.SetValue((uint)TurbulenceProperties.Noise, PropertyType.Enum, &noise, sizeof(uint));
+
+                    float scale = 12.5f;
+                    uint xc = 0, yc = 1;
+                    disp.SetInputEffect(0, tail, true);
+                    disp.SetInputEffect(1, turb, true);
+                    disp.SetValue((uint)DisplacementMapProperties.Scale, PropertyType.Float, &scale, sizeof(float));
+                    disp.SetValue((uint)DisplacementMapProperties.XChannelSelect, PropertyType.Enum, &xc, sizeof(uint));
+                    disp.SetValue((uint)DisplacementMapProperties.YChannelSelect, PropertyType.Enum, &yc, sizeof(uint));
+                    tail = disp;
+                }
+            }
+            else if (sh is "toon" or "poster")
+            {
+                var post = EnsureEffect(ref _glassPostFx, EffectGuids.Posterize);
+                if (post != null)
+                {
+                    uint levels = sh == "poster" ? 4u : 5u;
+                    post.SetInputEffect(0, tail, true);
+                    post.SetValue((uint)PosterizeProperties.RedValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+                    post.SetValue((uint)PosterizeProperties.GreenValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+                    post.SetValue((uint)PosterizeProperties.BlueValueCount, PropertyType.UInt32, &levels, sizeof(uint));
+                    tail = post;
+                }
+            }
+
+            using var outImg = tail.Output;
+            DC.DrawImage(outImg, Vector2.Zero, new Vortice.RawRectF(0, 0, _glassW, _glassH),
+                Vortice.Direct2D1.InterpolationMode.Linear, CompositeMode.SourceOver);
+            _glassReady = true;
+        }
+        catch
+        {
+            _glassReady = false;
+        }
+        finally
+        {
+            DC.Target = _activeTarget;
+            DC.SetDpi(96 * Scale, 96 * Scale);
+            DC.Transform = savedTf;
+            for (int i = 0; i < savedClips; i++) DC.PushAxisAlignedClip(Raw(_clips[i]), AntialiasMode.Aliased);
+        }
+    }
+
     public static void Begin(uint clear)
     {
         Frame++;
+        _glassReady = false;
+        if (NeedsSceneBuffer())
+        {
+            EnsureGlassResources();
+            _activeTarget = _sceneBmp ?? _target;
+        }
+        else
+        {
+            _activeTarget = _target;
+        }
+        DC.Target = _activeTarget;
         DC.BeginDraw();
         DC.Clear(ToColor(clear));
         _clipDepth = 0;
@@ -783,6 +1203,15 @@ public static unsafe class Gfx
     public static bool End()
     {
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_activeTarget == _sceneBmp && _sceneBmp != null && _target != null)
+        {
+            for (int i = _clipDepth - 1; i >= 0; i--) DC.PopAxisAlignedClip();
+            _clipDepth = 0;
+            DC.Transform = Matrix3x2.Identity;
+            DC.Target = _target;
+            // Bit-exact 1:1 physical pixel blit preserves razor-sharp DirectWrite vector text!
+            DC.DrawBitmap(_sceneBmp, new Vortice.RawRectF(0, 0, W, H), 1f, Vortice.Direct2D1.InterpolationMode.NearestNeighbor, null, null);
+        }
         var hr = DC.EndDraw();
         FlushMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
         if (hr.Success) hr = _swap.Present(1, PresentFlags.None);
@@ -836,43 +1265,58 @@ public static unsafe class Gfx
 
     public static void Fill(R r, uint color, float radius)
     {
-        if (radius <= 0) { Fill(r, color); return; }
-        var rr = new RoundedRectangle { Rect = Raw(r), RadiusX = radius, RadiusY = radius };
+        float cr = ClampRad(r, radius);
+        if (cr <= 0) { Fill(r, color); return; }
+        var rr = new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr };
         DC.FillRoundedRectangle(rr, Scratch(color));
     }
 
     public static void Stroke(R r, uint color, float radius, float width = 1)
     {
-        var rr = new RoundedRectangle { Rect = Raw(r.Inset(width / 2)), RadiusX = radius, RadiusY = radius };
+        var ir = r.Inset(width * 0.5f);
+        float cr = ClampRad(ir, radius - width * 0.5f);
+        var rr = new RoundedRectangle { Rect = Raw(ir), RadiusX = cr, RadiusY = cr };
         DC.DrawRoundedRectangle(rr, Scratch(color), width);
     }
 
     public static void StrokeDashed(R r, uint color, float radius, float width = 1.25f)
     {
-        var rr = new RoundedRectangle { Rect = Raw(r.Inset(width / 2)), RadiusX = radius, RadiusY = radius };
+        var ir = r.Inset(width * 0.5f);
+        float cr = ClampRad(ir, radius - width * 0.5f);
+        var rr = new RoundedRectangle { Rect = Raw(ir), RadiusX = cr, RadiusY = cr };
         DC.DrawRoundedRectangle(rr, Scratch(color), width, DashStyle());
     }
 
     /// <summary>Ultra-cheap 2-stroke GPU neon bloom halo (~0.01ms, zero blur pass).</summary>
     public static void NeonGlow(R r, float radius, uint color, float strength = 1f)
     {
-        var halo = new RoundedRectangle { Rect = Raw(r.Inset(-1.2f)), RadiusX = radius + 1.2f, RadiusY = radius + 1.2f };
+        float cr = ClampRad(r, radius);
+        var haloR = r.Inset(-1.2f);
+        float hcr = ClampRad(haloR, cr + 1.2f);
+        var halo = new RoundedRectangle { Rect = Raw(haloR), RadiusX = hcr, RadiusY = hcr };
         DC.DrawRoundedRectangle(halo, Scratch(Fade(color, 0.22f * strength)), 4.2f);
-        var rim = new RoundedRectangle { Rect = Raw(r.Inset(0.5f)), RadiusX = radius, RadiusY = radius };
+        var rimR = r.Inset(0.5f);
+        float rcr = ClampRad(rimR, cr - 0.5f);
+        var rim = new RoundedRectangle { Rect = Raw(rimR), RadiusX = rcr, RadiusY = rcr };
         DC.DrawRoundedRectangle(rim, Scratch(Fade(color, 0.82f * strength)), 1.25f);
     }
 
-    /// <summary>Draws modular video/content card frame matching UiCardStyle (clean / framed / dashed / brutal / neon).</summary>
+    /// <summary>Draws modular video/content card frame matching UiCardStyle + active GPU Glass/Graphics Shader.</summary>
     public static void DrawCardFrame(R box, float radius, bool hovered, out uint surfaceBehind)
     {
-        float cr = Corner(radius);
-        var style = Services.AppSettings.Current.UiCardStyle;
+        float cr = ClampRad(box, Corner(radius));
+        var s = Services.AppSettings.Current;
+        var style = s.UiCardStyle;
+        var sh = s.UiGlassShader;
+        bool hasGlass = _glassReady && _glassBrush != null && sh != "off";
+
         switch (style)
         {
             case "dashed":
-                Fill(box, Fade(Th.Card, hovered ? 0.98f : 0.88f), cr);
-                StrokeDashed(box, Fade(Th.Brand, hovered ? 0.65f : 0.34f), cr, 1.35f);
-                if (hovered && Services.AppSettings.Current.UiNeonGlow) NeonGlow(box, cr, Th.Brand, 0.45f);
+                if (hasGlass) FillFrosted(box, Th.Card, radius, hovered ? 0.78f : 0.62f, border: false);
+                else Fill(box, Fade(Th.Card, hovered ? 0.96f : 0.86f), cr);
+                StrokeDashed(box, Fade(Th.Brand, hovered ? 0.78f : 0.42f), cr, 1.3f);
+                if (hovered && s.UiNeonGlow) NeonGlow(box, cr, Th.Brand, 0.48f);
                 surfaceBehind = Th.Card;
                 break;
             case "brutal":
@@ -882,20 +1326,41 @@ public static unsafe class Gfx
                 surfaceBehind = Th.Card;
                 break;
             case "framed":
-                Fill(box, Fade(Th.Card, hovered ? 0.86f : 0.50f), cr);
+                if (hasGlass) FillFrosted(box, Th.Card, radius, hovered ? 0.78f : 0.56f, border: false);
+                else Fill(box, Fade(Th.Card, hovered ? 0.86f : 0.50f), cr);
                 Stroke(box, hovered ? Fade(Th.Text, 0.68f) : Th.Line, cr, 1f);
                 if (hovered) Fill(new R(box.X + 1, box.Y + 1, box.W - 2, 1.2f), Fade(Th.Brand, 0.78f));
                 surfaceBehind = Mix(Th.Bg, Th.Card, hovered ? 0.86f : 0.50f);
                 break;
             case "neon":
-                Fill(box, Fade(Th.Card, hovered ? 0.86f : 0.58f), cr);
+                if (hasGlass) FillFrosted(box, Th.Card, radius, hovered ? 0.78f : 0.56f, border: false);
+                else Fill(box, Fade(Th.Card, hovered ? 0.86f : 0.58f), cr);
                 uint rimCol = hovered ? Th.Brand : (Th.Brand2 != 0 ? Th.Brand2 : Th.Brand);
-                if (hovered || Services.AppSettings.Current.UiNeonGlow) NeonGlow(box, cr, rimCol, hovered ? 0.82f : 0.32f);
+                if (hovered || s.UiNeonGlow) NeonGlow(box, cr, rimCol, hovered ? 0.82f : 0.32f);
                 else Stroke(box, Fade(rimCol, 0.38f), cr, 1f);
                 surfaceBehind = Mix(Th.Bg, Th.Card, hovered ? 0.86f : 0.58f);
                 break;
             default:
-                surfaceBehind = Th.Bg;
+                if (sh is "toon" or "sketch")
+                {
+                    if (sh == "toon")
+                    {
+                        Fill(new R(box.X + 3, box.Y + 3, box.W, box.H), Fade(Th.Light ? 0xFF000000 : Th.Brand, hovered ? 0.42f : 0.20f), cr);
+                        FillFrosted(box, Th.Card, radius, hovered ? 0.76f : 0.56f, border: false);
+                        Stroke(box, Fade(hovered ? Th.Brand : Th.Ink, hovered ? 0.90f : 0.35f), cr, hovered ? 1.8f : 1.3f);
+                    }
+                    else
+                    {
+                        FillFrosted(box, Th.Card, radius, hovered ? 0.74f : 0.54f, border: false);
+                        Stroke(box, Fade(Th.Ink, hovered ? 0.55f : 0.25f), cr, 1.1f);
+                        Stroke(box.Inset(1.5f), Fade(Th.Brand, hovered ? 0.36f : 0.14f), MathF.Max(0, cr - 1.5f), 0.9f);
+                    }
+                    surfaceBehind = Th.Card;
+                }
+                else
+                {
+                    surfaceBehind = Th.Bg;
+                }
                 break;
         }
     }
@@ -987,66 +1452,118 @@ public static unsafe class Gfx
         }
     }
 
-    /// <summary>Draws a modular surface honoring FrostedGlass, UiCornerStyle, UiCardStyle &amp; UiNeonGlow.</summary>
+    /// <summary>
+    /// Draws a true hardware stencil-masked adaptive frosted glass surface (real-time GPU blurred/refracted/stylized
+    /// live backdrop strictly clipped to the panel's exact rounded geometry + Fresnel sheen + tactile micro-texture + modular rim).
+    /// </summary>
     public static void FillFrosted(R r, uint baseColor, float radius = 0, float opacity = 0.80f, bool border = false)
     {
+        if (r.W <= 0 || r.H <= 0) return;
         var s = Services.AppSettings.Current;
         var mode = s.FrostedGlass;
-        float cr = radius > 0 ? Corner(radius) : 0f;
+        var sh = s.UiGlassShader;
+        float cr = ClampRad(r, radius > 0 ? Corner(radius) : 0f);
         bool hasWallOrPat = !string.IsNullOrEmpty(s.BgImagePath) || (s.BgPattern != "none" && !string.IsNullOrEmpty(s.BgPattern));
+        bool realGlass = _glassReady && _glassBrush != null && !string.IsNullOrEmpty(sh) && sh != "off";
 
-        if (mode == "off" && !hasWallOrPat)
+        if (!realGlass && mode == "off" && !hasWallOrPat)
         {
             Fill(r, baseColor, cr);
             if (border)
             {
-                if (s.UiCardStyle == "dashed") StrokeDashed(r, Fade(Th.Brand, 0.34f), cr, 1.25f);
+                if (s.UiCardStyle == "dashed") StrokeDashed(r, Fade(Th.Brand, 0.38f), cr, 1.25f);
                 else if (s.UiCardStyle == "brutal") Stroke(r, Fade(Th.Ink, 0.72f), cr, 1.5f);
                 else Stroke(r, Th.Line, cr);
             }
             return;
         }
+
+        // 0. True Hardware Stencil-Masked Adaptive Blurred/Refracted/Stylized Backdrop strictly inside panel shape!
+        if (realGlass && _glassBrush != null && _glassW > 0 && _glassH > 0)
+        {
+            float baseAlpha = (baseColor >> 24) / 255f;
+            _glassBrush.Transform = Matrix3x2.CreateScale(W / _glassW, H / _glassH);
+            _glassBrush.Opacity = Math.Clamp(baseAlpha, 0f, 1f);
+            if (cr > 0)
+                DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr }, _glassBrush);
+            else
+                DC.FillRectangle(Raw(r), _glassBrush);
+        }
+
         bool strong = mode != "soft" && mode != "off";
-        float effOp = strong ? MathF.Max(0.52f, opacity * 0.92f) : MathF.Min(0.92f, opacity + 0.05f);
+        // Let live blurred/refracted colors breathe naturally through glass panels while keeping small labels effortlessly legible even over bright thumbnails!
+        float effOp = realGlass
+            ? (sh == "liquid" ? Math.Clamp(opacity * 0.72f, 0.48f, 0.78f)
+             : sh == "toon"   ? Math.Clamp(opacity * 0.76f, 0.50f, 0.80f)
+             : Math.Clamp(opacity * 0.78f, 0.52f, 0.82f))
+            : (strong ? MathF.Max(0.52f, opacity * 0.92f) : MathF.Min(0.92f, opacity + 0.05f));
         Fill(r, Fade(baseColor, effOp), cr);
 
-        // 1. Pre-baked vertical Fresnel studio sheen
-        if (mode != "off" && _sheenBrush != null && r.H > 2)
+        // 1. Pre-baked vertical Fresnel studio catch-light sheen
+        if ((mode != "off" || realGlass) && _sheenBrush != null && r.H > 2)
         {
             _sheenBrush.Transform = Matrix3x2.CreateScale(1f, r.H / 128f) * Matrix3x2.CreateTranslation(0f, r.Y);
-            _sheenBrush.Opacity = strong ? (Th.Light ? 0.80f : 0.95f) : 0.50f;
+            _sheenBrush.Opacity = sh == "liquid" ? 1.0f : (strong ? (Th.Light ? 0.82f : 0.95f) : 0.55f);
             if (cr > 0)
                 DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr }, _sheenBrush);
             else
                 DC.FillRectangle(Raw(r), _sheenBrush);
         }
 
-        // 2. 1:1 physical-pixel high-pass satin frost grain
-        if (mode != "off" && _grainBrush != null)
+        // 2. Surface micro-texture matched to active GPU shader (satin frost / manga halftone / pencil cross-hatch)
+        if (sh == "toon" && _halftoneBrush != null)
+        {
+            _halftoneBrush.Transform = Matrix3x2.CreateScale(0.65f / MathF.Max(0.5f, Scale));
+            _halftoneBrush.Opacity = Th.Light ? 0.065f : 0.042f;
+            if (cr > 0) DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr }, _halftoneBrush);
+            else DC.FillRectangle(Raw(r), _halftoneBrush);
+        }
+        else if (sh == "sketch" && _sketchBrush != null)
+        {
+            _sketchBrush.Transform = Matrix3x2.CreateScale(0.8f / MathF.Max(0.5f, Scale));
+            _sketchBrush.Opacity = Th.Light ? 0.11f : 0.075f;
+            if (cr > 0) DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr }, _sketchBrush);
+            else DC.FillRectangle(Raw(r), _sketchBrush);
+        }
+        else if ((mode != "off" || realGlass) && _grainBrush != null)
         {
             _grainBrush.Transform = Matrix3x2.CreateScale(1f / MathF.Max(0.5f, Scale));
-            _grainBrush.Opacity = (Th.Light ? 0.036f : 0.048f) * (strong ? 1f : 0.55f);
+            _grainBrush.Opacity = (Th.Light ? 0.036f : 0.046f) * (strong || realGlass ? 1f : 0.55f);
             if (cr > 0)
                 DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr }, _grainBrush);
             else
                 DC.FillRectangle(Raw(r), _grainBrush);
         }
 
-        // 3. Modular border style (dashed kawaii / brutalist ink / neon rim / subtle studio rim)
+        // 2b. Subtle liquid-glass top specular bevel highlight when rounded & real glass is active
+        if (realGlass && cr >= 6f && r.W > cr * 2 + 12)
+        {
+            float specA = sh == "liquid" ? (Th.Light ? 0.42f : 0.24f) : (Th.Light ? 0.24f : 0.13f);
+            Fill(new R(r.X + cr * 0.78f, r.Y + 0.6f, r.W - cr * 1.56f, 1.0f), Th.A(specA));
+        }
+
+        // 3. Modular border style (dashed kawaii / brutalist ink / neon rim / toon cel ink / sketch double-line / glass rim)
         if (border)
         {
             if (s.UiCardStyle == "dashed")
-                StrokeDashed(r, Fade(Th.Brand, 0.34f), cr, 1.25f);
+                StrokeDashed(r, Fade(Th.Brand, 0.40f), cr, 1.25f);
             else if (s.UiCardStyle == "brutal")
                 Stroke(r, Fade(Th.Ink, 0.72f), cr, 1.5f);
+            else if (sh == "toon")
+                Stroke(r, Fade(Th.Light ? 0xFF000000 : Th.Brand, 0.62f), cr, 1.6f);
+            else if (sh == "sketch")
+            {
+                Stroke(r, Fade(Th.Ink, 0.34f), cr, 1.1f);
+                Stroke(r.Inset(1.5f), Fade(Th.Brand, 0.20f), MathF.Max(0, cr - 1.5f), 0.9f);
+            }
             else if (s.UiCardStyle == "neon" && s.UiNeonGlow)
-                Stroke(r, Fade(Th.Brand2 != 0 ? Th.Brand2 : Th.Brand, 0.36f), cr, 1.1f);
+                Stroke(r, Fade(Th.Brand2 != 0 ? Th.Brand2 : Th.Brand, 0.38f), cr, 1.1f);
             else
             {
-                Stroke(r, Th.A(Th.Light ? 0.16f : 0.14f), cr, 1f);
+                Stroke(r, Th.A(sh == "liquid" ? 0.24f : (Th.Light ? 0.16f : 0.15f)), cr, 1f);
                 float inset = MathF.Max(cr * 0.72f, 6f);
                 if (r.W > inset * 2 + 8)
-                    Fill(new R(r.X + inset, r.Y + 0.5f, r.W - inset * 2, 1f), Th.A(Th.Light ? 0.24f : 0.16f));
+                    Fill(new R(r.X + inset, r.Y + 0.5f, r.W - inset * 2, 1f), Th.A(Th.Light ? 0.24f : 0.18f));
             }
         }
     }
@@ -1057,14 +1574,15 @@ public static unsafe class Gfx
     /// <summary>Hardware anti-aliased rounded image using a single reusable GPU bitmap brush — zero corner halo artifacts on any backdrop, pattern, or dashed border!</summary>
     public static void ImageRounded(ID2D1Bitmap bmp, R dest, float radius, float opacity = 1f)
     {
-        if (radius <= 0.5f) { Image(bmp, dest, opacity); return; }
+        float cr = ClampRad(dest, radius);
+        if (cr <= 0.5f) { Image(bmp, dest, opacity); return; }
         var sz = bmp.Size;
         if (sz.Width <= 0 || sz.Height <= 0 || dest.W <= 0 || dest.H <= 0) return;
         var b = _imgBrush ??= DC.CreateBitmapBrush(bmp, new BitmapBrushProperties(ExtendMode.Clamp, ExtendMode.Clamp, Vortice.Direct2D1.BitmapInterpolationMode.Linear));
         b.Bitmap = bmp;
         b.Transform = Matrix3x2.CreateScale(dest.W / sz.Width, dest.H / sz.Height) * Matrix3x2.CreateTranslation(dest.X, dest.Y);
         b.Opacity = opacity;
-        DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(dest), RadiusX = radius, RadiusY = radius }, b);
+        DC.FillRoundedRectangle(new RoundedRectangle { Rect = Raw(dest), RadiusX = cr, RadiusY = cr }, b);
         b.Bitmap = null;
     }
 

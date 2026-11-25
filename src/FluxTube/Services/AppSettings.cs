@@ -129,6 +129,8 @@ public sealed class AppSettings
     public string VisualizerStyle { get; set; } = "bars_wave";
     /// <summary>Backdrop &amp; frosted glass style ("off", "soft", "matte", "mesh", "kawaii", "neon").</summary>
     public string FrostedGlass { get; set; } = "matte";
+    /// <summary>Hardware Direct2D GPU stencil glass &amp; stylization shader ("acrylic", "liquid", "toon", "poster", "sketch", "off").</summary>
+    public string UiGlassShader { get; set; } = "acrylic";
     /// <summary>Seamless GPU background pattern overlay ("none", "paws", "lines", "grid", "dots", "waves", "hex", "hearts", "stars", "circuit", "sakura").</summary>
     public string BgPattern { get; set; } = "none";
     /// <summary>Background pattern opacity (0.04..0.55).</summary>

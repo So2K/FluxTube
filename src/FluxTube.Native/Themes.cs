@@ -34,7 +34,7 @@ public static class Themes
         new("AMOLED", "Свои", false, 0xFF000000, 0xFF0A0A0A, 0xFF151515, 0xFFEDEDED, 0xFF9A9A9A, 0xFF5E5E5E, 0xFFFF3355, 0xFFFFFFFF, 0xFF9B6CFF),
 
         new("Ультра Кавай", "Эстетика", true, 0xFFFFF6FA, 0xFFFFD8EA, 0xFFFFFFFF, 0xFF47203F, 0xFF8F5983, 0xFFBE92B4, 0xFFFF5FA2, 0xFFFFFFFF, 0xFFA78BFA, "kawaii", "paws", false, "dual", "round", "dashed", "soft"),
-        new("Ультра Кавай Чёрный", "Эстетика", false, 0xFF09060D, 0xFF220B26, 0xFF110B17, 0xFFFFF2FB, 0xFFD9A3CA, 0xFF8C5F84, 0xFFFF4FBF, 0xFFFFFFFF, 0xFFC084FC, "kawaii", "paws", true, "dual", "round", "dashed", "soft"),
+        new("Ультра Кавай Чёрный", "Эстетика", false, 0xFF040406, 0xFF08080C, 0xFF0E0D13, 0xFFFFF5FC, 0xFFCFA6C4, 0xFF7D5D76, 0xFFFF4DA6, 0xFFFFFFFF, 0xFFB87BFF, "kawaii", "paws", true, "dual", "round", "dashed", "soft"),
         new("Кавай Ночь", "Эстетика", false, 0xFF160D1E, 0xFF21132E, 0xFF2B1A3D, 0xFFFFF0FA, 0xFFCFA7C7, 0xFF8A6585, 0xFFFF6EC7, 0xFF1A0816, 0xFF7DE2FC, "kawaii", "paws", true, "dual", "round", "dashed", "soft"),
         new("Сакура", "Эстетика", true, 0xFFFDF5F7, 0xFFF9E0E8, 0xFFFFFFFF, 0xFF3E212C, 0xFF8A5D6E, 0xFFB8909F, 0xFFEC5E8C, 0xFFFFFFFF, 0xFFFFAD8F, "kawaii", "sakura", false, "dual", "round", "dashed", "soft"),
         new("Ультра Неон", "Эстетика", false, 0xFF05040C, 0xFF0B091A, 0xFF130F29, 0xFFF4F6FF, 0xFFA6A9D6, 0xFF636794, 0xFFFF00B8, 0xFFFFFFFF, 0xFF00F5FF, "neon", "circuit", true, "dual", "normal", "neon", "mono"),
