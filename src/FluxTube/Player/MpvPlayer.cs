@@ -39,6 +39,42 @@ public sealed class MpvPlayer : IDisposable
     public string? CurrentAudioUrl { get; private set; }
     public bool HasMedia => CurrentUrl != null;
 
+    // Live audio stream telemetry observed asynchronously from libmpv (zero UI stalls!)
+    public string AudioCodec { get; private set; } = "";
+    public int AudioSampleRate { get; private set; }
+    public int AudioBitrateKbps { get; private set; }
+    public bool IsLosslessAudio => AudioCodec is "flac" or "alac" or "wav" or "ape" or "wv" || AudioCodec.StartsWith("pcm", StringComparison.OrdinalIgnoreCase) || AudioCodec.StartsWith("dsd", StringComparison.OrdinalIgnoreCase);
+    public bool IsHiFiAudio => IsLosslessAudio || AudioBitrateKbps >= 220;
+
+    public string AudioQualityBadge
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(AudioCodec) && AudioSampleRate <= 0 && AudioBitrateKbps <= 0) return "HD";
+            string codec = AudioCodec switch
+            {
+                "opus" => "OPUS",
+                "aac" => "AAC",
+                "flac" => "FLAC",
+                "alac" => "ALAC",
+                "vorbis" => "OGG",
+                "mp3" => "MP3",
+                var c when c.StartsWith("pcm", StringComparison.OrdinalIgnoreCase) => "PCM",
+                var c when !string.IsNullOrEmpty(c) => c.ToUpperInvariant(),
+                _ => "AUDIO",
+            };
+            string sr = AudioSampleRate >= 1000
+                ? (AudioSampleRate % 1000 == 0 ? $"{AudioSampleRate / 1000} kHz" : $"{AudioSampleRate / 1000.0:0.0} kHz")
+                : "";
+            string br = AudioBitrateKbps > 0 ? $"{AudioBitrateKbps} kbps" : "";
+            string prefix = IsLosslessAudio ? "LOSSLESS " : (AudioBitrateKbps >= 220 ? "HI-FI " : "");
+            if (sr.Length > 0 && br.Length > 0) return $"{prefix}{codec} · {sr} · {br}";
+            if (br.Length > 0) return $"{prefix}{codec} · {br}";
+            if (sr.Length > 0) return $"{prefix}{codec} · {sr}";
+            return $"{prefix}{codec}";
+        }
+    }
+
     public event Action<double>? TimeChanged;
     public event Action<double>? DurationChanged;
     public event Action<bool>? PauseChanged;
@@ -139,6 +175,9 @@ public sealed class MpvPlayer : IDisposable
             mpv_observe_property(ctx, 7, "mute", Format.Flag);
             mpv_observe_property(ctx, 8, "speed", Format.Double);
             mpv_observe_property(ctx, 9, "paused-for-cache", Format.Flag);
+            mpv_observe_property(ctx, 10, "audio-codec-name", Format.String);
+            mpv_observe_property(ctx, 11, "audio-params/samplerate", Format.Int64);
+            mpv_observe_property(ctx, 12, "audio-bitrate", Format.Double);
 
             // Publish _ctx only after full initialization so other threads never touch an uninitialized handle
             Volatile.Write(ref _ctx, ctx);
@@ -294,6 +333,7 @@ public sealed class MpvPlayer : IDisposable
         CurrentAudioUrl = url;
         CurrentVideoId = videoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
+        AudioCodec = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
         if (startPaused) { Paused = true; Set("pause", "yes"); }
         // Keep vid strictly as a global property (never a sticky per-file loadfile option, which races with SetVideoEnabled(true)!)
         Set("vid", VideoEnabled ? "auto" : "no");
@@ -311,6 +351,7 @@ public sealed class MpvPlayer : IDisposable
         CurrentAudioUrl = s.Audio ?? s.Video;
         CurrentVideoId = s.VideoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
+        AudioCodec = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
         if (keepPause) { Paused = true; Set("pause", "yes"); }
         // Direct HLS manifests (live streams) bypass StreamProxy, so pass the user's proxy directly when non-loopback
         bool directRemote = s.Video.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !s.Video.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)
@@ -608,6 +649,33 @@ public sealed class MpvPlayer : IDisposable
                                 Buffering = v;
                                 var gen = Volatile.Read(ref _loadGen);
                                 Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) BufferingChanged?.Invoke(v); });
+                            }
+                            break;
+                        }
+                        case 10:
+                        {
+                            var strPtr = Marshal.ReadIntPtr(p.data);
+                            var next = strPtr != IntPtr.Zero ? (PtrToUtf8(strPtr) ?? "").Trim().ToLowerInvariant() : "";
+                            if (next != AudioCodec) { AudioCodec = next; Ui(() => { }); }
+                            break;
+                        }
+                        case 11:
+                        {
+                            int sr = (int)Math.Clamp(Marshal.ReadInt64(p.data), 0, 768000);
+                            if (sr != AudioSampleRate) { AudioSampleRate = sr; Ui(() => { }); }
+                            break;
+                        }
+                        case 12:
+                        {
+                            var bps = Marshal.PtrToStructure<double>(p.data);
+                            if (bps > 1000 && bps < 50_000_000)
+                            {
+                                int kbps = (int)Math.Round(bps / 1000.0);
+                                if (Math.Abs(kbps - AudioBitrateKbps) >= 4)
+                                {
+                                    AudioBitrateKbps = kbps;
+                                    Ui(() => { });
+                                }
                             }
                             break;
                         }

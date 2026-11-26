@@ -1992,15 +1992,19 @@ public sealed class WatchPage : IPage
             float maxChipW = topRx - (video.X + 26);
             if (maxChipW > 90)
             {
+                string liveAudioInfo = isThisStagePlaying ? mpv.AudioQualityBadge : "";
                 var chipTxt = sOpt.AudioFxEnabled
                     ? L.T($"Только звук · FX: {AudioDsp.DisplayPresetName(sOpt)}", $"Audio only · FX: {AudioDsp.DisplayPresetName(sOpt)}")
-                    : L.T("Только звук · Видео отключено", "Audio only · Video disabled");
+                    : (liveAudioInfo.Length > 0 && liveAudioInfo != "HD"
+                        ? L.T($"Только звук · {liveAudioInfo}", $"Audio only · {liveAudioInfo}")
+                        : L.T("Только звук · Видео отключено", "Audio only · Video disabled"));
                 var chip = Gfx.Text(chipTxt, 11.5f, 600, maxChipW - 22);
                 var cb = new R(video.X + 16, video.Y + 14, MathF.Min(maxChipW, chip.W + 22), 26);
                 var tfCb = MusicBounce.Push(cb, 6, amp: 0.65f, rotAmp: 0.30f, textSafe: true);
-                Gfx.Fill(cb, darkPill, 13);
-                Gfx.Stroke(cb, Gfx.Fade(0xFFFFFFFF, 0.14f), 13, 1f);
-                Gfx.Draw(chip, cb.X + 11, cb.Y + (cb.H - chip.H) / 2, 0xFFF2F2F7);
+                bool hiFiChip = isThisStagePlaying && mpv.IsHiFiAudio;
+                Gfx.Fill(cb, hiFiChip ? Gfx.Fade(0xFF281D0A, 0.84f) : darkPill, 13);
+                Gfx.Stroke(cb, hiFiChip ? Gfx.Fade(0xFFFFD166, 0.65f) : Gfx.Fade(0xFFFFFFFF, 0.14f), 13, 1f);
+                Gfx.Draw(chip, cb.X + 11, cb.Y + (cb.H - chip.H) / 2, hiFiChip ? 0xFFFFE18A : 0xFFF2F2F7);
                 MusicBounce.Pop(tfCb);
             }
 
@@ -2064,11 +2068,14 @@ public sealed class WatchPage : IPage
                 float titleX = Gfx.Snap(centerX - MathF.Min(titleMeas.W, txtMaxW) * 0.5f);
                 DrawWaveText(Title, titleX, titleY, titleSize, 0xFFFFFFFF, 700, txtMaxW, maxLines: 1, shadow: true, accentColor: dom1);
 
-                // Centered Row below Title: Play/Pause + Channel + HD/FX badge
+                // Centered Row below Title: Play/Pause + Channel + Live Codec/Bitrate/FX badge
                 float rowY = Gfx.Snap(titleY + titleMeas.H + 8f);
                 float playSz = 34f;
-                var chMeas = Gfx.Text(chText, 13.5f, 500, MathF.Min(360f, txtMaxW - 120f), 1);
-                var badgeTxt = sOpt.AudioFxEnabled ? AudioDsp.DisplayPresetName(sOpt) : "HD";
+                var chMeas = Gfx.Text(chText, 13.5f, 500, MathF.Min(320f, txtMaxW - 180f), 1);
+                string liveBadge = isThisStagePlaying ? mpv.AudioQualityBadge : "HD";
+                var badgeTxt = sOpt.AudioFxEnabled
+                    ? $"{AudioDsp.DisplayPresetName(sOpt)} · {liveBadge}"
+                    : liveBadge;
                 var bdRun = Gfx.Text(badgeTxt, 10.5f, 700);
                 float bdW = bdRun.W + 12f;
                 float rowTotalW = playSz + 12f + chMeas.W + 10f + bdW;
