@@ -411,12 +411,12 @@ float4 PS_Synthwave(VSOut i) : SV_Target
     return float4(c * a, a);
 }
 
-// ==================== 6. HD ISOTROPIC WATER RIPPLES + CAUSTICS (640x360, 2x Sub-steps, 9-pt Laplacian, Scharr 3x3 Normals) ====================
+// ==================== 6. HD ISOTROPIC WATER RIPPLES + CAUSTICS (640x360, 2x Sub-steps, True Aspect, Crisp 3x3 Normals) ====================
 float4 PS_WaterStep(VSOut i) : SV_Target
 {
-    // Aspect-compensated isotropic stencil so ripples stay perfectly circular at ANY window aspect ratio!
-    float ax = clamp((16.0 / 9.0) / max(aspect, 0.45), 0.55, 1.95);
-    float2 dx = float2(texel.x * ax, 0.0);
+    // Exact integer-texel taps (zero bilinear blur damping!) with aspect-compensated wave speeds
+    // so ripples stay perfectly circular at ANY window aspect ratio without losing energy.
+    float2 dx = float2(texel.x, 0.0);
     float2 dy = float2(0.0, texel.y);
 
     float2 c = tex0.Sample(linClamp, i.uv).rg;
@@ -429,43 +429,41 @@ float4 PS_WaterStep(VSOut i) : SV_Target
     float bl = tex0.Sample(linClamp, i.uv - dx + dy).r;
     float br = tex0.Sample(linClamp, i.uv + dx + dy).r;
 
-    // 9-point isotropic Laplacian (eliminates diamond/chewed grid artifacts completely)
-    float avg = (l + r + t + b) * 0.20 + (tl + tr + bl + br) * 0.05;
-    float lap = avg - c.r;
-    float damp = 0.986 + 0.008 * calm;
-    float h = (2.0 * c.r - c.g + lap * 1.18) * damp;
+    // Exact wave speed ratio: gridAspect / stageAspect => wx + wy = 1.0 (strictly CFL-stable!)
+    float ar = clamp((16.0 / 9.0) / max(aspect, 0.5), 0.55, 1.85);
+    float ar2 = ar * ar;
+    float wx = ar2 / (1.0 + ar2);
+    float wy = 1.0 - wx;
 
-    // Inject audio droplets only on the primary sub-step (extra > 0.5) to keep impulses crisp & un-doubled
+    // 9-point isotropic weighted average (sum of weights = 1.0)
+    float diag    = (tl + tr + bl + br) * 0.25;
+    float avgNorm = (wx * (l + r) * 0.5 + wy * (t + b) * 0.5) * 0.85 + diag * 0.15;
+    float h = (2.0 * avgNorm - c.g) * (0.985 + 0.008 * calm);
+
+    // Inject full-strength audio droplets on the primary sub-step
     if (extra > 0.5)
     {
-        float2 p0 = float2(0.5 + 0.33 * sin(time * 0.85) + pan * 0.10, 0.5 + 0.28 * cos(time * 1.12));
-        float2 p1 = float2(0.5 - 0.35 * cos(time * 0.72 + 1.3), 0.5 + 0.26 * sin(time * 0.94));
-        float2 p2 = float2(0.5 + 0.26 * cos(time * 1.28 - 0.6), 0.5 - 0.30 * sin(time * 0.88 + 0.9));
+        float2 p0 = float2(0.5 + 0.34 * sin(time * 0.85) + pan * 0.10, 0.5 + 0.28 * cos(time * 1.12));
+        float2 p1 = float2(0.5 - 0.36 * cos(time * 0.72 + 1.3), 0.5 + 0.26 * sin(time * 0.94));
         float2 d0 = (i.uv - p0) * float2(aspect, 1.0);
         float2 d1 = (i.uv - p1) * float2(aspect, 1.0);
-        float2 d2 = (i.uv - p2) * float2(aspect, 1.0);
-        h += exp(-dot(d0, d0) / 0.0014) * (0.11 + bass * 0.30 + hit * 0.24) * calm * sin(time * 16.0);
-        h += exp(-dot(d1, d1) / 0.0011) * (0.08 + mid * 0.26 + high * 0.18) * calm * cos(time * 14.0);
-        h += exp(-dot(d2, d2) / 0.00075) * (0.05 + high * 0.22 + mid * 0.10) * calm * sin(time * 21.0 + 1.1);
+        h += exp(-dot(d0, d0) / 0.0014) * (0.16 + bass * 0.44 + hit * 0.36) * calm * sin(time * 18.0);
+        h += exp(-dot(d1, d1) / 0.0011) * (0.12 + mid * 0.38 + high * 0.26) * calm * cos(time * 15.0);
         if (beat > 0.5)
         {
             float2 db = (i.uv - float2(param0, param1)) * float2(aspect, 1.0);
-            h += exp(-dot(db, db) / 0.0032) * (0.38 + bass * 0.44) * calm;
+            h += exp(-dot(db, db) / 0.0032) * (0.58 + bass * 0.68) * calm;
         }
     }
 
-    // Smooth C-infinity rational soft-clip (prevents flat blown-out circular pancakes on heavy bass!)
-    h = (1.65 * h) / (1.65 + abs(h) * 0.52);
-    return float4(h, c.r, 0, 1);
+    return float4(clamp(h, -1.85, 1.85), c.r, 0, 1);
 }
 
 float4 PS_WaterDisplay(VSOut i) : SV_Target
 {
-    float ax = clamp((16.0 / 9.0) / max(aspect, 0.45), 0.55, 1.95);
-    float2 dx = float2(texel.x * ax * 1.15, 0.0);
-    float2 dy = float2(0.0, texel.y * 1.15);
+    float2 dx = float2(texel.x, 0.0);
+    float2 dy = float2(0.0, texel.y);
 
-    // 3x3 Scharr gradient filter for razor-smooth, artifact-free 3D water normals
     float tl = tex0.Sample(linClamp, i.uv - dx - dy).r;
     float t  = tex0.Sample(linClamp, i.uv - dy).r;
     float tr = tex0.Sample(linClamp, i.uv + dx - dy).r;
@@ -476,26 +474,21 @@ float4 PS_WaterDisplay(VSOut i) : SV_Target
     float b  = tex0.Sample(linClamp, i.uv + dy).r;
     float br = tex0.Sample(linClamp, i.uv + dx + dy).r;
 
-    float gx = (3.0 * tl + 10.0 * l + 3.0 * bl - 3.0 * tr - 10.0 * r - 3.0 * br) * (1.0 / 16.0);
-    float gy = (3.0 * tl + 10.0 * t + 3.0 * tr - 3.0 * bl - 10.0 * b - 3.0 * br) * (1.0 / 16.0);
-    float3 n = normalize(float3(gx * 4.2, gy * 4.2, 1.0));
+    // Smooth 3x3 Sobel/Scharr normal with FULL crisp amplitude (aspect-compensated)
+    float ar = clamp((16.0 / 9.0) / max(aspect, 0.5), 0.55, 1.85);
+    float gx = ((l - r) * 3.6 + (tl + bl - tr - br) * 1.1) * ar;
+    float gy = ((t - b) * 3.6 + (tl + tr - bl - br) * 1.1);
+    float3 n = normalize(float3(gx, gy, 1.0));
 
-    // Dual-light studio reflection + glass Fresnel + multi-layer refractive caustics
-    float ndl1 = max(0.0, dot(n, normalize(float3(-0.36, -0.54, 0.76))));
-    float ndl2 = max(0.0, dot(n, normalize(float3(0.48, 0.32, 0.82))));
-    float spec = pow(ndl1, 34.0) * 1.10 + pow(ndl2, 22.0) * 0.42;
+    float ndl = max(0.0, dot(n, normalize(float3(-0.35, -0.55, 0.75))));
+    float spec = pow(ndl, 28.0) * 1.20;
+    float caustic = pow(clamp(1.0 - abs(n.x) - abs(n.y), 0.0, 1.0), 4.0) * abs(h) * 2.45;
+    float fresnel = pow(1.0 - n.z, 2.4);
 
-    float slope = length(n.xy);
-    float caustic = pow(clamp(1.0 - slope * 1.15, 0.0, 1.0), 3.6) * abs(h) * 2.35;
-    float crest = smoothstep(0.10, 0.75, slope) * (0.45 + abs(h) * 0.55);
-    float fresnel = pow(1.0 - n.z, 2.3);
-
-    float3 waterCol = lerp(col0, col1, clamp(0.5 + n.x * 1.45 + n.y * 0.85, 0.0, 1.0));
-    float3 c = waterCol * (caustic * 0.82 + fresnel * 1.40 + crest * 0.42 + abs(h) * 0.50)
-             + spec * lerp(waterCol, float3(1.0, 1.0, 1.0), 0.78);
-    // Filmic shoulder tone-mapping so bright crests stay glossy & dimensional instead of clipping flat
-    c = c / (1.0 + 0.38 * c);
-    float a = clamp(max(c.r, max(c.g, c.b)) * 1.16, 0.0, 0.88) * edgeFade(i.uv);
+    float3 waterCol = lerp(col0, col1, clamp(0.5 + n.x * 1.4 + n.y * 0.8, 0.0, 1.0));
+    float3 c = waterCol * (caustic * 0.90 + fresnel * 1.45 + abs(h) * 0.60) + spec * lerp(waterCol, float3(1, 1, 1), 0.75);
+    c = c / (1.0 + 0.35 * c);
+    float a = clamp(max(c.r, max(c.g, c.b)) * 1.18, 0.0, 0.90) * edgeFade(i.uv);
     return float4(c * a, a);
 }
 
