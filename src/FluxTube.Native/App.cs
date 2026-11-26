@@ -359,7 +359,9 @@ public static unsafe class App
                     else if (Gfx.DC != null)
                     {
                         Gfx.Resize();
-                        Invalidate();
+                        // Synchronous present inside WM_SIZE eliminates black resize gutters completely!
+                        Frame();
+                        W.ValidateRect(h, null);
                     }
                     return 0;
                 case W.WM_DPICHANGED:
@@ -384,7 +386,7 @@ public static unsafe class App
                         W.TrackMouseEvent(&tme);
                         _tracking = true;
                     }
-                    Invalidate();
+                    if (!_animating) Invalidate();
                     return 0;
                 case W.WM_MOUSELEAVE:
                     _tracking = false;
@@ -586,7 +588,11 @@ public static unsafe class App
                     Suggest.Hide();
                     Edit.RepaintAll();
                     break;
+                case W.WM_ENTERSIZEMOVE:
+                    Gfx.IsLiveResizing = true;
+                    break;
                 case W.WM_EXITSIZEMOVE:
+                    Gfx.IsLiveResizing = false;
                     Edit.RepaintAll();
                     Invalidate();
                     break;

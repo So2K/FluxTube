@@ -38,7 +38,7 @@ public static class Cards
     public static void Avatar(float x, float y, float size, string? url, string name)
     {
         var img = Images.Get(url, size, size, round: true);
-        if (img != null) { Gfx.Image(img.Bmp!, new R(x, y, size, size), Images.Alpha(img)); return; }
+        if (img != null) { Gfx.ImageRounded(img.Bmp!, new R(x, y, size, size), size * 0.5f, Images.Alpha(img)); return; }
         Gfx.Circle(x + size / 2, y + size / 2, size / 2, Th.Track);
         if (name.Length > 0)
         {

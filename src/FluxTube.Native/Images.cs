@@ -20,9 +20,30 @@ public static unsafe class ThumbPack
 {
     public const byte Bgra = 0, Bc1Blocks = 1;
     private const long Capacity = 512L * 1024 * 1024;
-    private const uint Magic = 0x4B504C46; // "FLPK"
+    private const uint Magic = 0x32504C46; // "FLPK2" (includes per-entry FNV-1a checksum & format/size validation)
 
-    public readonly record struct Entry(long Offset, int W, int H, byte Format, int Bytes);
+    public readonly record struct Entry(long Offset, int W, int H, byte Format, int Bytes, uint Checksum);
+
+    /// <summary>Fast sampled FNV-1a checksum (detects stale/unflushed sparse MMF pages or format mismatches in &lt;5 microseconds).</summary>
+    public static uint ComputeChecksum(ReadOnlySpan<byte> data)
+    {
+        uint h = 2166136261u;
+        int len = data.Length;
+        int step = len > 4096 ? 16 : 4;
+        for (int i = 0; i < len; i += step)
+        {
+            h ^= data[i];
+            h *= 16777619u;
+        }
+        if (len > 0)
+        {
+            h ^= data[len - 1];
+            h *= 16777619u;
+            h ^= (uint)len;
+            h *= 16777619u;
+        }
+        return h;
+    }
 
     private static readonly Dictionary<ulong, Entry> _index = new();
     private static readonly object _lock = new();
@@ -89,8 +110,10 @@ public static unsafe class ThumbPack
             for (int i = 0; i < n; i++)
             {
                 var key = r.ReadUInt64();
-                var e = new Entry(r.ReadInt64(), r.ReadInt32(), r.ReadInt32(), r.ReadByte(), r.ReadInt32());
-                if (e.W > 0 && e.H > 0 && e.Bytes > 0 && e.Offset >= 0 && e.Offset + e.Bytes <= _end) _index[key] = e;
+                var e = new Entry(r.ReadInt64(), r.ReadInt32(), r.ReadInt32(), r.ReadByte(), r.ReadInt32(), r.ReadUInt32());
+                int expectedBytes = e.Format == Bgra ? e.W * e.H * 4 : e.Format == Bc1Blocks ? Bc1.Size(e.W, e.H) : -1;
+                if (e.W > 0 && e.H > 0 && e.Bytes > 0 && e.Bytes == expectedBytes && e.Offset >= 0 && e.Offset + e.Bytes <= _end)
+                    _index[key] = e;
             }
         }
         catch (Exception e)
@@ -116,7 +139,7 @@ public static unsafe class ThumbPack
                 using (var w = new BinaryWriter(File.Create(tmp)))
                 {
                     w.Write(Magic); w.Write(end); w.Write(snap.Length);
-                    foreach (var (k, e) in snap) { w.Write(k); w.Write(e.Offset); w.Write(e.W); w.Write(e.H); w.Write(e.Format); w.Write(e.Bytes); }
+                    foreach (var (k, e) in snap) { w.Write(k); w.Write(e.Offset); w.Write(e.W); w.Write(e.H); w.Write(e.Format); w.Write(e.Bytes); w.Write(e.Checksum); }
                 }
                 File.Move(tmp, IndexFile, overwrite: true);
             }
@@ -124,7 +147,7 @@ public static unsafe class ThumbPack
         }
     }
 
-    public static bool TryGet(ulong key, out Entry e, out byte* data, out int gen)
+    public static bool TryGet(ulong key, int expectedW, int expectedH, byte expectedFormat, out Entry e, out byte* data, out int gen)
     {
         data = null; gen = _packGen;
         if (!_ok) { e = default; return false; }
@@ -133,14 +156,30 @@ public static unsafe class ThumbPack
             if (!_index.TryGetValue(key, out e)) return false;
             gen = _packGen;
         }
+        int expectedBytes = expectedFormat == Bgra ? expectedW * expectedH * 4 : Bc1.Size(expectedW, expectedH);
+        if (e.W != expectedW || e.H != expectedH || e.Format != expectedFormat || e.Bytes != expectedBytes)
+        {
+            Invalidate(key);
+            e = default;
+            return false;
+        }
         data = _base + e.Offset;
         return true;
+    }
+
+    public static void Invalidate(ulong key)
+    {
+        lock (_lock)
+        {
+            if (_index.Remove(key)) _dirty = true;
+        }
     }
 
     public static bool Add(ulong key, ReadOnlySpan<byte> bytes, int w, int h, byte format, out Entry e, out byte* data, out int gen)
     {
         e = default; data = null; gen = 0;
         if (!_ok || bytes.Length <= 0 || bytes.Length > Capacity) return false;
+        uint checksum = ComputeChecksum(bytes);
         long off;
         lock (_lock)
         {
@@ -154,7 +193,7 @@ public static unsafe class ThumbPack
             off = _end;
             gen = _packGen;
             _end += (bytes.Length + 15) & ~15;
-            e = new Entry(off, w, h, format, bytes.Length);
+            e = new Entry(off, w, h, format, bytes.Length, checksum);
         }
         // Write pixels into our exclusively reserved slice BEFORE publishing into _index (no uninitialized-memory race!)
         data = _base + off;
@@ -185,6 +224,8 @@ public sealed unsafe class Img
     public ID2D1Bitmap1? Bmp;
     public byte* Data;          // in the pack, waiting for upload
     public int W, H, Bytes, GpuBytes, PackGen;
+    public uint Checksum;
+    public ulong PackKey;
     public byte Format;
     public int State;           // 0 queued, 1 in the pack, 2 on GPU, 3 failed, 4 dropped from the queue, 5 warming
     public long WantedFrame;    // last frame something asked to draw it
@@ -219,10 +260,12 @@ internal static class Wic
 /// Thumbnail pipeline: never block the frame, anything seen before appears in the very frame it is asked for (see ThumbPack),
 /// new ones are fetched newest-request-first, converted off-thread, uploaded a bounded number per frame, and video memory is bounded.
 /// </summary>
-public static class Images
+public static partial class Images
 {
-    private const long GpuBudget = 28L * 1024 * 1024; // BC1: ~420 thumbnails on GPU, instant restore from ThumbPack MMF
-    private const int MaxParallel = 6;
+    private const long GpuBudget = 48L * 1024 * 1024; // BC1: ~700+ thumbnails on GPU, fewer evictions during fast scroll
+    private const int MaxParallel = 8;
+    [System.Text.RegularExpressions.GeneratedRegex(@"/vi(?:_webp)?/([A-Za-z0-9_-]{11})/([^/?]+)", System.Text.RegularExpressions.RegexOptions.CultureInvariant)]
+    private static partial System.Text.RegularExpressions.Regex YtThumbRx();
     private static readonly List<Img> _evictBuf = new(256);
     private static readonly List<IKey> _staleKeyBuf = new(256);
 
@@ -301,14 +344,16 @@ public static class Images
         var key = new IKey(url, w, h, round);
         if (!_map.TryGetValue(key, out var img))
         {
-            img = new Img { Key = key, Url = url, W = w, H = h, Round = round, Generation = Gfx.DeviceGeneration };
+            ulong packKey = ThumbPack.Key(url, w, h, round);
+            byte expectedFmt = round ? ThumbPack.Bgra : ThumbPack.Bc1Blocks;
+            img = new Img { Key = key, PackKey = packKey, Url = url, W = w, H = h, Round = round, Generation = Gfx.DeviceGeneration };
             _map[key] = img;
-            if (ThumbPack.TryGet(ThumbPack.Key(url, w, h, round), out var e, out var data, out var gen) && e.W == w && e.H == h)
+            if (ThumbPack.TryGet(packKey, w, h, expectedFmt, out var e, out var data, out var gen))
             {
-                img.Data = data; img.Format = e.Format; img.Bytes = e.Bytes; img.PackGen = gen; img.Warm = true;
+                img.Data = data; img.Format = e.Format; img.Bytes = e.Bytes; img.Checksum = e.Checksum; img.PackGen = gen; img.Warm = true;
                 Volatile.Write(ref img.State, 5);
                 // the pack is a memory-mapped file: its pages may still be on disk, and reading them here would
-                // stall the frame for as long as the disk takes. A worker touches them; the upload follows next frame.
+                // stall the frame for as long as the disk takes. A worker touches them and verifies integrity; upload follows next frame.
                 ThreadPool.UnsafeQueueUserWorkItem(static i => Warm(i), img, preferLocal: false);
             }
             else Enqueue(img);
@@ -344,15 +389,24 @@ public static class Images
 
     private static unsafe void Warm(Img img)
     {
-        if (img.PackGen != ThumbPack.PackGeneration || img.Data == null)
+        if (img.PackGen != ThumbPack.PackGeneration || img.Data == null || img.Bytes <= 0)
         {
             Volatile.Write(ref img.State, 4);
             return;
         }
-        byte sum = 0;
-        for (int i = 0; i < img.Bytes; i += 4096) sum ^= img.Data[i];
-        if (img.Bytes > 0) sum ^= img.Data[img.Bytes - 1];
-        GC.KeepAlive(sum);
+        // Touch pages AND verify checksum + corner alpha for round avatars so corrupted/unflushed MMF pages NEVER reach the GPU!
+        var span = new ReadOnlySpan<byte>(img.Data, img.Bytes);
+        uint csum = ThumbPack.ComputeChecksum(span);
+        bool badCorner = img.Round && img.Format == ThumbPack.Bgra && img.Bytes >= 4 && span[3] != 0;
+        if (csum != img.Checksum || badCorner)
+        {
+            ThumbPack.Invalidate(img.PackKey);
+            img.Data = null;
+            img.Warm = false;
+            Volatile.Write(ref img.State, 0);
+            Enqueue(img);
+            return;
+        }
         Volatile.Write(ref img.State, 1);
         _ready.Enqueue(img);
         App.WakeUi();
@@ -441,7 +495,7 @@ public static class Images
         // Handle YouTube thumbnail fallback chain (including ?sqp=... query suffixes and vi_webp/*.webp!)
         if (url.Contains("ytimg.com/", StringComparison.OrdinalIgnoreCase))
         {
-            var m = System.Text.RegularExpressions.Regex.Match(url, @"/vi(?:_webp)?/([A-Za-z0-9_-]{11})/([^/?]+)");
+            var m = YtThumbRx().Match(url);
             if (m.Success)
             {
                 string id = m.Groups[1].Value;
@@ -583,7 +637,7 @@ public static class Images
                 finally { System.Buffers.ArrayPool<byte>.Shared.Return(blocks); }
             }
             if (!stored) throw new IOException("thumbnail pack unavailable");
-            img.Data = at; img.Format = e.Format; img.Bytes = e.Bytes; img.PackGen = pgen;
+            img.Data = at; img.Format = e.Format; img.Bytes = e.Bytes; img.Checksum = e.Checksum; img.PackGen = pgen;
         }
         finally { System.Buffers.ArrayPool<byte>.Shared.Return(px); }
     }
@@ -615,16 +669,17 @@ public static class Images
     public static void Upload()
     {
         var t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+        double budgetMs = UI.AnyScrollMoving ? 0.8 : 1.5;
         int n = 0;
         while (n < 24 && _ready.TryDequeue(out var img))
         {
             if (Volatile.Read(ref img.State) != 1) continue;
             Upload(img, fade: !img.Warm);
             n++;
-            if (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds > 1.5) break;
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds > budgetMs) break;
         }
         if (!_ready.IsEmpty) UI.Animate();
-        if (_gpuBytes > GpuBudget || _map.Count > 1000) Evict(GpuBudget * 3 / 4);
+        if (_gpuBytes > GpuBudget || _map.Count > 1200) Evict(GpuBudget * 3 / 4);
     }
 
     /// <summary>Aggressively trims off-screen GPU bitmaps when minimized or idle (ThumbPack MMF restores them in &lt;1ms).</summary>

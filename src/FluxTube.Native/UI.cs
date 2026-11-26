@@ -44,6 +44,8 @@ public static class UI
     private static bool _animate;
     private static bool _middleOverLink;
     private static int _cursorHand;
+    private static bool _anyScrollMoving;
+    public static bool AnyScrollMoving => _anyScrollMoving;
     public static readonly long StartTick = Environment.TickCount64;
     public static double Dt = 1 / 60.0;
     public static long Now = Environment.TickCount64;
@@ -57,7 +59,7 @@ public static class UI
     public static int Id(string s, int i = 0) => HashCode.Combine(s, i);
     public static int Id(int a, int b) => HashCode.Combine(a, b);
 
-    public static void BeginFrame() { _cursorHand = 0; _middleOverLink = false; Sel.BeginFrame(); }
+    public static void BeginFrame() { _cursorHand = 0; _middleOverLink = false; _anyScrollMoving = false; Sel.BeginFrame(); }
 
     /// <summary>The pointer is over something clickable that is not a plain Click rectangle.</summary>
     public static void Hand() => _cursorHand++;
@@ -334,16 +336,18 @@ public static class UI
         }
         else _pendingBarStack[_scrollDepth] = default;
 
-        // critically damped approach: quick, no overshoot, frame-rate independent
-        var diff = s.Target - s.Pos;
-        bool moving = MathF.Abs(diff) > 0.4f;
+        // critically damped approach: quick, no overshoot, frame-rate independent (sub-0.15px settle eliminates 1px snap jump)
+        float settledTarget = Gfx.Snap(s.Target);
+        var diff = settledTarget - s.Pos;
+        bool moving = MathF.Abs(diff) > 0.15f;
         if (moving)
         {
             s.Pos += diff * (1 - MathF.Exp(-(float)Dt * 24f));
             s.LastTouch = Now;
+            _anyScrollMoving = true;
             Animate();
         }
-        else s.Pos = s.Target;
+        else s.Pos = settledTarget;
 
         // Track smoothed vertical scroll velocity (DIPs/sec) for hardware GPU DirectionalBlur
         if (!moving && _dragScroll != id && _autoScrollId != id)

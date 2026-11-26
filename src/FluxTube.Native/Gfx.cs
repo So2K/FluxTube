@@ -65,6 +65,8 @@ public static unsafe class Gfx
     public static int DeviceGeneration { get; private set; }
     /// <summary>True when DXGI reported DXGI_STATUS_OCCLUDED (covered/locked window); pauses continuous animation spinning.</summary>
     public static bool Occluded { get; private set; }
+    /// <summary>True while the user is actively dragging a window border (enables zero-black-bar synchronous resize).</summary>
+    public static bool IsLiveResizing;
     public static event Action? DeviceLost;
 
     public const string Font = "Segoe UI";
@@ -178,7 +180,8 @@ public static unsafe class Gfx
         if (hr.Failure || dev == null)
             D3D11.D3D11CreateDevice(null, DriverType.Warp, DeviceCreationFlags.BgraSupport, [Vortice.Direct3D.FeatureLevel.Level_11_0], out dev).CheckError();
         _dev = dev!;
-        using var dxgiDev = _dev.QueryInterface<IDXGIDevice>();
+        using var dxgiDev = _dev.QueryInterface<IDXGIDevice1>();
+        dxgiDev.MaximumFrameLatency = 1;
         using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory2>();
         Win.RECT rc;
         Win.GetClientRect(_hwnd, &rc);
@@ -188,7 +191,7 @@ public static unsafe class Gfx
         {
             Width = (uint)PxW, Height = (uint)PxH, Format = Format.B8G8R8A8_UNorm,
             SampleDescription = new SampleDescription(1, 0), BufferUsage = Usage.RenderTargetOutput, BufferCount = 3,
-            Scaling = Scaling.None, SwapEffect = SwapEffect.FlipDiscard, AlphaMode = Vortice.DXGI.AlphaMode.Ignore,
+            Scaling = Scaling.Stretch, SwapEffect = SwapEffect.FlipDiscard, AlphaMode = Vortice.DXGI.AlphaMode.Ignore,
         };
         _swap = factory.CreateSwapChainForHwnd(_dev, _hwnd, desc);
         factory.MakeWindowAssociation(_hwnd, WindowAssociationFlags.IgnoreAll);
@@ -938,6 +941,7 @@ public static unsafe class Gfx
 
     private static bool NeedsSceneBuffer()
     {
+        if (IsLiveResizing) return false;
         var sh = Services.AppSettings.Current.UiGlassShader;
         return !string.IsNullOrEmpty(sh) && sh != "off";
     }
@@ -1270,7 +1274,7 @@ public static unsafe class Gfx
         }
         var hr = DC.EndDraw();
         FlushMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
-        if (hr.Success) hr = _swap.Present(1, PresentFlags.None);
+        if (hr.Success) hr = _swap.Present(IsLiveResizing ? 0u : 1u, PresentFlags.None);
         Occluded = hr.Code == 0x087A0001; // DXGI_STATUS_OCCLUDED
         if (hr.Failure && IsDeviceLost(hr.Code))
         {
