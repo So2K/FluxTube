@@ -207,9 +207,9 @@ public sealed class AppSettings
 
     public static string FormatFor(string q) => q switch
     {
-        "audio" => "ba/b",
-        "best" => "bv*+ba/b",
-        _ => $"bv*[height<=?{q}]+ba/b[height<=?{q}]/b",
+        "audio" => "ba[format_id!*=drc][acodec^=opus]/ba[format_id!*=drc]/ba/b",
+        "best" => "bv*+ba[format_id!*=drc][acodec^=opus]/bv*+ba[format_id!*=drc]/bv*+ba/b",
+        _ => $"bv*[height<=?{q}]+ba[format_id!*=drc][acodec^=opus]/bv*[height<=?{q}]+ba[format_id!*=drc]/bv*[height<=?{q}]+ba/b[height<=?{q}]/b",
     };
 
     public static readonly string[] Qualities = ["best", "2160", "1440", "1080", "720", "480", "360", "audio"];

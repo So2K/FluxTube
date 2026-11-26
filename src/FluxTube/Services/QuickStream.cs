@@ -132,6 +132,18 @@ public static class QuickStream
 
     public static Extras? ExtrasOf(string videoId) => _extras.TryGetValue(videoId, out var e) ? e : null;
 
+    /// <summary>True Hi-Fi audio priority: 256k Opus (774) &gt; 256k AAC (141) &gt; 160k Opus 48kHz (251) &gt; 128k AAC (140) &gt; fallback.</summary>
+    private static int AudioRank(JsonNode? f) => (int)Num(f, "itag") switch
+    {
+        774 => 6, // Opus 256 kbps Hi-Fi
+        141 => 5, // AAC 256 kbps Hi-Fi
+        251 => 4, // Opus ~160 kbps 48 kHz
+        140 => 3, // AAC 128 kbps 44.1 kHz
+        250 => 2, // Opus ~70 kbps
+        249 => 1, // Opus ~50 kbps
+        _ => 0,
+    };
+
     private static void Remember(Client c, string id, JsonNode n)
     {
         if (!c.WholeStream) return; // the other client's links stop after the beginning and it lists no dubs
@@ -142,10 +154,10 @@ public static class QuickStream
                     x.Captions.Add(new CaptionTrack(t.S("languageCode") ?? "", t.P("name").Text() ?? t.S("languageCode") ?? "?", t.S("kind") == "asr", url));
         if (n.P("streamingData", "adaptiveFormats") is JsonArray formats)
         {
-            // one entry per language: Opus when there is one, otherwise the best AAC
+            // one entry per language: highest-bitrate non-DRC Opus/AAC (774/141/251/140)
             foreach (var g in formats.Where(f => IsAudio(f) && f?["audioTrack"] != null && f.S("url") != null && f?["isDrc"] == null).GroupBy(f => f.S("audioTrack", "id") ?? ""))
             {
-                var best = g.OrderByDescending(f => Num(f, "itag") == 251 ? 2 : Num(f, "itag") == 140 ? 1 : 0).ThenByDescending(f => Num(f, "bitrate")).First();
+                var best = g.OrderByDescending(AudioRank).ThenByDescending(f => Num(f, "bitrate")).First();
                 var isDef = best.P("audioTrack", "audioIsDefault") is JsonValue dv && dv.TryGetValue<bool>(out var d) && d;
                 x.Audio.Add(new AudioTrack(g.Key, g.Key.Split('.')[0], best.S("audioTrack", "displayName") ?? g.Key, isDef, best.S("url")!));
             }
@@ -527,7 +539,7 @@ public static class QuickStream
                 preferred = allAudio.Where(f => f?["audioTrack"] == null || (f.P("audioTrack", "audioIsDefault") is JsonValue dv && dv.TryGetValue<bool>(out var isDef) && isDef)).ToList();
             if (preferred.Count == 0) preferred = allAudio;
             audios = preferred
-                .OrderByDescending(f => Num(f, "itag") == 251 ? 2 : Num(f, "itag") == 140 ? 1 : 0).ThenByDescending(f => Num(f, "contentLength") > 0 ? 1 : 0).ThenByDescending(f => Num(f, "bitrate"))
+                .OrderByDescending(AudioRank).ThenByDescending(f => Num(f, "contentLength") > 0 ? 1 : 0).ThenByDescending(f => Num(f, "bitrate"))
                 .Take(2).ToList();
             if (quality == "audio" && previewMaxHeight == 0) videos.Clear();
         }
