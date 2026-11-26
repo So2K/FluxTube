@@ -173,8 +173,9 @@ public sealed class StreamProxy
     /// <summary>
     /// Registers an external lossless FLAC stream (Monochrome / hifi-api) under the dedicated virtual itag (9999)
     /// so it streams through the local proxy and caches seamlessly to MediaCache on disk.
+    /// Optionally seeds the already-downloaded initial head bytes (0..128KB) straight into MediaCache (0 extra round-trips).
     /// </summary>
-    public string RegisterLossless(string url, string videoId, long knownLength = 0, string mime = "audio/flac", Dictionary<string, string>? headers = null)
+    public string RegisterLossless(string url, string videoId, long knownLength = 0, string mime = "audio/flac", Dictionary<string, string>? headers = null, byte[]? initialHead = null)
     {
         Start();
         const int itag = LosslessResolver.LosslessItag;
@@ -185,19 +186,84 @@ public sealed class StreamProxy
             e.Url = url;
             e.AvailableAt = DateTime.UtcNow;
             e.Headers = headers ?? new Dictionary<string, string> { ["User-Agent"] = "FluxTube/9.2" };
-            e.HeadBytes = 128 * 1024; // fast ~100ms header + seektable prefill before mpv attaches
+            e.HeadBytes = 128 * 1024;
             e.Fragile = false;
             e.External = true;
             e.Retries = 4;
-            e.Chunk = 2 * 1024 * 1024; // snappy 2 MB chunks: fast first-byte & seek response on Cloudflare
+            e.Chunk = 2 * 1024 * 1024;
             if (knownLength > 0) e.Length = knownLength;
             e.Mime = string.IsNullOrWhiteSpace(mime) ? "audio/flac" : mime;
             if (e.Cache == null && e.Length > 0) e.Cache = MediaCache.Open(videoId, itag, e.Length, e.Mime);
+            if (initialHead is { Length: > 0 })
+            {
+                if (e.Cache != null && e.Cache.Covered(0) < initialHead.Length)
+                    e.Cache.Write(0, initialHead);
+                else if (e.Cache == null)
+                    e.Head = initialHead;
+            }
             e.Touched = DateTime.UtcNow;
         }
         e.UrlReady.TrySetResult(true);
         Trim();
         return Local(key);
+    }
+
+    /// <summary>
+    /// Silently pre-buffers the FLAC byte window around the current playback timestamp straight into MediaCache
+    /// while YouTube audio is still playing — so switching to FLAC reads from SSD in ~2ms with ZERO audible pause!
+    /// </summary>
+    public async Task PrefillWindowAsync(string localUrl, double currentPosSec, double totalDurationSec, CancellationToken ct = default)
+    {
+        var key = localUrl[(localUrl.LastIndexOf('/') + 1)..];
+        if (!_entries.TryGetValue(key, out var e) || !e.External) return;
+        try
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            limit.CancelAfter(TimeSpan.FromSeconds(8));
+            if (e.Length <= 0) await ProbeLengthAsync(e, limit.Token).ConfigureAwait(false);
+            var cache = e.Cache;
+            if (cache == null || e.Length <= 0 || cache.Complete) return;
+
+            Interlocked.Increment(ref cache.Users);
+            try
+            {
+                // 1. Ensure header (0..128KB) is on disk
+                long headWant = Math.Min(128 * 1024L, e.Length);
+                if (cache.Covered(0) < headWant)
+                {
+                    using var hr = await FetchAsync(e, 0, headWant - 1, limit.Token).ConfigureAwait(false);
+                    if (hr.IsSuccessStatusCode)
+                    {
+                        var hb = await hr.Content.ReadAsByteArrayAsync(limit.Token).ConfigureAwait(false);
+                        if (hb.Length > 0) cache.Write(0, hb);
+                    }
+                }
+
+                // 2. Pre-buffer ~2.2 MB around currentPosSec so mpv seeks & plays instantly from SSD
+                double frac = (totalDurationSec > 1 && currentPosSec > 1)
+                    ? Math.Clamp(currentPosSec / totalDurationSec, 0.0, 0.96)
+                    : 0.0;
+                long target = (long)(e.Length * frac);
+                long from = Math.Max(0, target - 256 * 1024L);
+                long to = Math.Min(e.Length - 1, from + 2_200_000L);
+
+                if (cache.Covered(from) < (to - from + 1))
+                {
+                    long fetchFrom = from + cache.Covered(from);
+                    if (fetchFrom <= to)
+                    {
+                        using var wr = await FetchAsync(e, fetchFrom, to, limit.Token).ConfigureAwait(false);
+                        if (wr.IsSuccessStatusCode)
+                        {
+                            var wb = await wr.Content.ReadAsByteArrayAsync(limit.Token).ConfigureAwait(false);
+                            if (wb.Length > 0) cache.Write(fetchFrom, wb);
+                        }
+                    }
+                }
+            }
+            finally { Interlocked.Decrement(ref cache.Users); }
+        }
+        catch { }
     }
 
     /// <summary>

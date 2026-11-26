@@ -30,7 +30,8 @@ public static partial class LosslessResolver
         double DurationSec,
         double DurationDiffSec,
         bool ExactTiming,
-        int SampleRate);
+        int SampleRate,
+        byte[]? InitialHead = null);
 
     private sealed record SourceHost(string Type, string BaseUrl);
 
@@ -329,16 +330,24 @@ public static partial class LosslessResolver
         var url = $"{cand.BaseUrl}/track/{cand.RefId}";
         for (int attempt = 0; attempt < 2; attempt++)
         {
-            using var req = new HttpRequestMessage(HttpMethod.Head, url);
+            // Single GET Range 0..128KB verifies stream, gets total Content-Range length, AND prefetches FLAC header+seektable in 1 round-trip!
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 128 * 1024 - 1);
             using var resp = await Http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             var code = (int)resp.StatusCode;
             if (code is 200 or 206)
             {
-                long len = resp.Content.Headers.ContentLength ?? 0;
+                long len = resp.Content.Headers.ContentRange?.Length ?? resp.Content.Headers.ContentLength ?? 0;
                 var ctMime = resp.Content.Headers.ContentType?.MediaType;
                 string mime = !string.IsNullOrWhiteSpace(ctMime) && ctMime.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)
                     ? ctMime
                     : "audio/flac";
+                byte[]? head = null;
+                if (code == 206 || (len > 0 && len <= 256 * 1024))
+                {
+                    try { head = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false); }
+                    catch { }
+                }
                 int sr = 44_100;
                 if (len > 0 && cand.DurationSec > 0)
                 {
@@ -349,11 +358,11 @@ public static partial class LosslessResolver
                 return new LosslessMatch(
                     videoId, url, len, mime, "Monochrome",
                     cand.Title, string.Join(", ", cand.Artists),
-                    cand.DurationSec, diffSec, exact, sr);
+                    cand.DurationSec, diffSec, exact, sr, head);
             }
             if (code >= 500 && attempt == 0)
             {
-                await Task.Delay(700, ct).ConfigureAwait(false);
+                await Task.Delay(500, ct).ConfigureAwait(false);
                 continue;
             }
             break;

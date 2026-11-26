@@ -422,7 +422,8 @@ public sealed class MpvPlayer : IDisposable
 
     /// <summary>
     /// Attaches a Lossless FLAC stream to the currently playing media without restarting video or losing playback position.
-    /// When autoSelect is true, mpv switches immediately to the FLAC track; otherwise it stays staged for 1-click A/B switch.
+    /// When autoSelect is true and audio is already playing, performs a silky 180ms dip-crossfade so the transition
+    /// from YouTube Opus to 24-bit/16-bit FLAC is completely seamless with zero audible pop or stutter!
     /// </summary>
     public void AttachLosslessTrack(string localProxyUrl, string sourceLabel, bool autoSelect, bool timingDiff = false, int expectedBitrateKbps = 0)
     {
@@ -432,8 +433,49 @@ public sealed class MpvPlayer : IDisposable
         LosslessSourceLabel = sourceLabel;
         LosslessTimingDiff = timingDiff;
         ExpectedLosslessBitrateKbps = expectedBitrateKbps;
-        if (autoSelect) AudioBitrateKbps = expectedBitrateKbps;
-        Command("audio-add", localProxyUrl, autoSelect ? "select" : "auto", $"FLAC ({sourceLabel})", "flac");
+
+        if (!autoSelect || Paused || Muted || Volume <= 1.0 || TimePos < 0.25)
+        {
+            if (autoSelect) AudioBitrateKbps = expectedBitrateKbps;
+            Command("audio-add", localProxyUrl, autoSelect ? "select" : "auto", $"FLAC ({sourceLabel})", "flac");
+            return;
+        }
+
+        // Smooth studio blend transition: stage FLAC -> soft 70ms dip -> instant SSD switch -> soft 110ms bloom back to full volume!
+        var baseVol = Volume;
+        var loadGen = Volatile.Read(ref _loadGen);
+        var rampGen = Interlocked.Increment(ref _volRampGen);
+        AudioBitrateKbps = expectedBitrateKbps;
+        Command("audio-add", localProxyUrl, "auto", $"FLAC ({sourceLabel})", "flac");
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // Soft dip down to 35% over 4 steps (~64ms)
+                double[] down = [0.80, 0.62, 0.46, 0.35];
+                foreach (var k in down)
+                {
+                    if (loadGen != Volatile.Read(ref _loadGen) || rampGen != Volatile.Read(ref _volRampGen) || !IsReady) return;
+                    Command("set", "volume", (baseVol * k).ToString("0.#", CultureInfo.InvariantCulture));
+                    await Task.Delay(16).ConfigureAwait(false);
+                }
+                if (loadGen != Volatile.Read(ref _loadGen) || !IsReady) return;
+                // Switch to pre-buffered SSD FLAC track right at the quietest point of the dip
+                Set("aid", "2");
+                await Task.Delay(24).ConfigureAwait(false);
+                // Smooth bloom back up to full volume over 6 steps (~96ms)
+                double[] up = [0.48, 0.64, 0.78, 0.89, 0.96, 1.0];
+                foreach (var k in up)
+                {
+                    if (loadGen != Volatile.Read(ref _loadGen) || rampGen != Volatile.Read(ref _volRampGen) || !IsReady) return;
+                    double v = k >= 1.0 ? baseVol : baseVol * k;
+                    Command("set", "volume", v.ToString("0.#", CultureInfo.InvariantCulture));
+                    if (k < 1.0) await Task.Delay(16).ConfigureAwait(false);
+                }
+                Volume = baseVol;
+            }
+            catch { }
+        });
     }
 
     /// <summary>Instant A/B toggle between the attached Lossless FLAC track (aid=2) and the original YouTube audio track (aid=1).</summary>

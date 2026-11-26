@@ -169,6 +169,8 @@ public sealed class PlaybackTracker
             IsLocal = false;
             _clickAt = System.Diagnostics.Stopwatch.GetTimestamp();
             var id = v.VideoId;
+            if (!v.IsShort && !v.IsLive && (AppSettings.Current.LosslessAutoUpgrade || AppSettings.Current.AudioOnlyMode))
+                _ = LosslessResolver.ResolveAsync(id, v.Title, v.Channel, ParseDuration(v.Duration));
             var quality = AppSettings.Current.PlayerQuality;
             MediaCache.Pinned = id;
             IsPreview = false;
@@ -435,12 +437,13 @@ public sealed class PlaybackTracker
                     return;
                 }
 
-                var proxyUrl = StreamProxy.Instance.RegisterLossless(match.Url, id, match.ContentLength, match.Mime);
-                // Pre-buffer the first 512 KB (FLAC header + seektable + opening audio) BEFORE attaching to mpv = zero stutter!
-                await StreamProxy.Instance.PrefillAsync(proxyUrl).ConfigureAwait(false);
+                var proxyUrl = StreamProxy.Instance.RegisterLossless(match.Url, id, match.ContentLength, match.Mime, initialHead: match.InitialHead);
+                // Silently pre-buffer ~2.2 MB around the current playback timestamp while YouTube keeps playing -> ZERO pause on switch!
+                double refDur = match.DurationSec > 1 ? match.DurationSec : durationSec;
+                double curPos = _timeValid ? _p.TimePos : _startPos;
+                await StreamProxy.Instance.PrefillWindowAsync(proxyUrl, curPos, refDur).ConfigureAwait(false);
                 StreamProxy.Instance.StartBackgroundDownload(proxyUrl);
 
-                double refDur = match.DurationSec > 1 ? match.DurationSec : durationSec;
                 int matchKbps = (match.ContentLength > 0 && refDur > 1) ? (int)Math.Round(match.ContentLength * 8.0 / refDur / 1000.0) : 0;
                 UiThread.Post(() =>
                 {
