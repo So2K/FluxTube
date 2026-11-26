@@ -554,15 +554,22 @@ public static class AudioDsp
     /// - At Volume &gt; 100% with FX off: applies clean software gain + transparent lookahead true-peak limiter
     ///   so boosting to 101..150% NEVER causes WASAPI square-wave digital clipping!
     /// </summary>
+    public const string BoostFilterLabel = "boostvol";
+    public const string ConstantBoostFilterGraph = "@boostvol:lavfi=[volume=1.0,alimiter=level_in=1:level_out=0.985:limit=0.965:attack=3:release=45:asc=1]";
+
+    /// <summary>Converts 101..150% UI volume to a clean dB boost string for live FFmpeg volume af-command (zero graph rebuild!).</summary>
+    public static string BoostVolumeArg(double volumePct)
+    {
+        float boostDb = Math.Clamp((float)((volumePct - 100.0) * 0.16), 0.0f, 8.0f);
+        return $"+{F(boostDb)}dB";
+    }
+
     public static string BuildEffectiveFilterGraph(AppSettings s, double volumePct)
     {
         var graph = BuildFilterGraph(s);
         if (graph.Length > 0) return graph;
         if (volumePct > 100.5)
-        {
-            float boostDb = Math.Clamp((float)((volumePct - 100.0) * 0.16), 0.2f, 8.0f);
-            return $"lavfi=[volume=+{F(boostDb)}dB,alimiter=level_in=1:level_out=0.985:limit=0.965:attack=3:release=45:asc=1]";
-        }
+            return ConstantBoostFilterGraph;
         return "";
     }
 }
