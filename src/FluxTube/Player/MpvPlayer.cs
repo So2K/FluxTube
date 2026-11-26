@@ -377,8 +377,9 @@ public sealed class MpvPlayer : IDisposable
         AudioCodec = ""; AudioSampleFormat = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
         HasLosslessTrack = false; LosslessSearching = false; LosslessDownloadPercent = -1; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
         if (startPaused) { Paused = true; Set("pause", "yes"); }
-        // Keep vid strictly as a global property (never a sticky per-file loadfile option, which races with SetVideoEnabled(true)!)
+        // Keep vid/aid strictly clean before loadfile (never let sticky aid=2 from a previous FLAC track starve a new 1-track file when vid=no!)
         Set("vid", VideoEnabled ? "auto" : "no");
+        Set("aid", "auto");
         var opts = new List<string> { startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", CultureInfo.InvariantCulture)}" : "start=0" };
         Command("loadfile", url, "replace", "-1", string.Join(',', opts));
         if (!startPaused) Set("pause", "no");
@@ -400,8 +401,9 @@ public sealed class MpvPlayer : IDisposable
         bool directRemote = s.Video.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !s.Video.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)
             || s.Video.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
         Set("http-proxy", directRemote && !string.IsNullOrWhiteSpace(AppSettings.Current.Proxy) ? AppSettings.Current.Proxy! : "");
-        // Keep vid strictly as a global property so loadfile never overrides SetVideoEnabled(true) into a black screen
+        // Keep vid/aid strictly clean before loadfile (prevents sticky aid=2 + vid=no -> "no audio or video data played" on next track/retry!)
         Set("vid", VideoEnabled ? "auto" : "no");
+        Set("aid", "auto");
         var opts = new List<string> { "start=" + (startSeconds > 0.3 ? startSeconds.ToString("0.00", CultureInfo.InvariantCulture) : "0") };
         if (s.Audio != null) opts.Add("audio-file=" + Escaped(s.Audio));
         var t = string.IsNullOrEmpty(title) ? s.Title : title;
@@ -416,6 +418,7 @@ public sealed class MpvPlayer : IDisposable
     public void Stop()
     {
         Interlocked.Increment(ref _loadGen);
+        Set("aid", "auto");
         Command("stop");
         CurrentUrl = null; CurrentVideoId = null;
         HasLosslessTrack = false; LosslessSearching = false; LosslessDownloadPercent = -1; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
