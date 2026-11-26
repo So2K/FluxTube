@@ -50,6 +50,7 @@ public static unsafe class Gfx
     private static nint _hwnd;
 
     public static ID2D1DeviceContext DC { get; private set; } = null!;
+    internal static ID3D11Device D3DDevice => _dev;
     public static float Scale { get; private set; } = 1;
     public static int PxW { get; private set; }
     public static int PxH { get; private set; }
@@ -693,6 +694,7 @@ public static unsafe class Gfx
         _roundLayer?.Dispose();
         _roundLayer = null;
         _roundClipDepth = 0;
+        GpuFluidEngine.DisposeResources();
         DisposeDanceAtlas();
         BgEngine.DisposeGpuResources();
         MusicArt.OnDeviceLost();
@@ -1237,6 +1239,7 @@ public static unsafe class Gfx
             _activeTarget = _target;
         }
         _linearCursor = 0;
+        GpuFluidEngine.StepBeforeBeginDraw();
         DC.Target = _activeTarget;
         DC.BeginDraw();
         DC.Clear(ToColor(clear));
@@ -2378,9 +2381,9 @@ public static unsafe class Gfx
             uint pInside = ReadPixel((int)(250 * Scale), (int)(200 * Scale));
             byte bCorner = (byte)(pCorner & 255), bInside = (byte)(pInside & 255);
             Assert(bCorner < 20 && bInside > 200, $"PushRoundedClip failed (cornerB={bCorner}, insideB={bInside})");
-            var (flOk, flMs, flLit) = MusicStageEffects.SelfTestFluid();
-            Assert(flOk, $"RGB Fluid self-test failed (ms={flMs:0.00}, lit={flLit})");
-            var msg7 = $"PASS [7/7] PushRoundedClip (cornerB={bCorner}, insideB={bInside}) + RGB Silk Fluid ({flMs:0.00} ms/step, lit={flLit})";
+            var (flOk, flMs, flLit) = GpuFluidEngine.SelfTestGpuFluid();
+            Assert(flOk, $"D3D11 GPU Fluid 1024x576 self-test failed (ms={flMs:0.00}, lit={flLit})");
+            var msg7 = $"PASS [7/7] PushRoundedClip (cornerB={bCorner}, insideB={bInside}) + D3D11 GPU Fluid 1024x576 ({flMs:0.00} ms/step, lit={flLit})";
             Services.Paths.Log("self-test: " + msg7); Console.WriteLine(msg7);
 
             MusicBounce.Update(false, 0.016f);

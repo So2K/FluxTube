@@ -424,6 +424,8 @@ public static unsafe class MusicStageEffects
         }
     }
 
+    internal static (float r, float g, float b) VividPaletteColor(uint argb) => VividColor(argb);
+
     /// <summary>Boosts color purity of cover art dominant colors so flames look rich, refined, and vivid — never milky.</summary>
     private static (float r, float g, float b) VividColor(uint argb)
     {
@@ -840,25 +842,23 @@ public static unsafe class MusicStageEffects
             }
         }
 
-        // ---- 2A. PAVEL-STYLE THEME-ADAPTIVE HIGH-RES 384x216 RGB CURL-VORTICITY SILK FLUID ----
+        // ---- 2A. HARDWARE D3D11 HLSL PAVEL FLUID (256x144 20-iter Jacobi + 1024x576 HDR Dye + 4-level Bloom!) ----
         if (fluidMode)
         {
-            if (UI.Now - _lastFluidSimMs >= 20)
+            bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.34f;
+            if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
+            float burst = _fluidBurstPower;
+            _fluidBurstPower = 0f;
+            GpuFluidEngine.RequestStep(dom1, dom2,
+                AudioAnalyzer.BassEnergy, AudioAnalyzer.MidEnergy, AudioAnalyzer.HighEnergy,
+                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit, burst);
+
+            var gpuBmp = GpuFluidEngine.OutputBitmap;
+            if (gpuBmp != null)
             {
-                _lastFluidSimMs = UI.Now;
-                bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.36f;
-                if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
-                float burst = _fluidBurstPower;
-                _fluidBurstPower = 0f;
-                StepRgbFluidSimulation(t, dom1, dom2,
-                    AudioAnalyzer.BassEnergy, AudioAnalyzer.MidEnergy, AudioAnalyzer.HighEnergy,
-                    AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit, burst, uploadGpu: true);
-            }
-            if (_fluidBmp != null)
-            {
-                float fluidOp = Math.Clamp(0.64f + AudioAnalyzer.BassEnergy * 0.24f + AudioAnalyzer.DropImpact * 0.14f, 0.45f, 0.90f) * Math.Clamp(1f - qDim * 0.75f, 0.18f, 1f);
-                Gfx.DC.DrawBitmap(_fluidBmp, new RawRectF(stage.X, stage.Y, stage.Right, stage.Bottom), fluidOp,
-                    Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
+                float fluidOp = Math.Clamp(0.74f + AudioAnalyzer.BassEnergy * 0.22f + AudioAnalyzer.DropImpact * 0.14f, 0.50f, 0.96f) * Math.Clamp(1f - qDim * 0.72f, 0.18f, 1f);
+                Gfx.DC.DrawBitmap(gpuBmp, new RawRectF(stage.X, stage.Y, stage.Right, stage.Bottom), fluidOp,
+                    Vortice.Direct2D1.InterpolationMode.Linear, null, null);
             }
             UI.Animate();
         }
