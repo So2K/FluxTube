@@ -16,7 +16,7 @@ public static unsafe class XpbdStageFx
     private static readonly float[] _ox = new float[CN], _oy = new float[CN];
     private static readonly float[] _oxPrev = new float[CN], _oyPrev = new float[CN];
     private static readonly uint[] _clothPx = new uint[CW * CH * 4]; // upscaled 2x smooth shading 72x40 -> GPU HighQualityCubic
-    private const int ImgW = 144, ImgH = 80;
+    private const int ImgW = 256, ImgH = 144;
     private static readonly uint[] _clothImg = new uint[ImgW * ImgH];
     private static ID2D1Bitmap1? _clothBmp;
     private static int _clothBmpGen = -1;
@@ -138,28 +138,16 @@ public static unsafe class XpbdStageFx
                     float fresnel = MathF.Pow(1f - Math.Clamp(nz, 0f, 1f), 2.2f);
                     float spec = MathF.Pow(ndl, 10f) * 0.65f;
 
-                    // Iridescent color blend across cloth fold slope
-                    float blend = Math.Clamp(0.5f + nx * 0.85f + h * 0.25f, 0f, 1f);
-                    float cr = (r0 + (r1 - r0) * blend) * (0.28f + 0.72f * ndl) + fresnel * r1 * 0.65f + spec;
-                    float cg = (g0 + (g1 - g0) * blend) * (0.28f + 0.72f * ndl) + fresnel * g1 * 0.65f + spec;
-                    float cb = (b0 + (b1 - b0) * blend) * (0.28f + 0.72f * ndl) + fresnel * b1 * 0.65f + spec;
+                    // Smooth iridescent liquid-silk folds (zero blocky grid lines!)
+                    float blend = Math.Clamp(0.5f + nx * 0.95f + h * 0.28f, 0f, 1f);
+                    float cr = (r0 + (r1 - r0) * blend) * (0.24f + 0.76f * ndl) + fresnel * r1 * 0.78f + spec;
+                    float cg = (g0 + (g1 - g0) * blend) * (0.24f + 0.76f * ndl) + fresnel * g1 * 0.78f + spec;
+                    float cb = (b0 + (b1 - b0) * blend) * (0.24f + 0.76f * ndl) + fresnel * b1 * 0.78f + spec;
 
-                    // Subtle woven silk mesh grid lines that deform with the cloth
-                    float ux = gx + (_ox[i00] * (1f - tx) + _ox[i10] * tx) * 1.4f;
-                    float uy = gy + (_oy[i00] * (1f - ty) + _oy[i01] * ty) * 1.4f;
-                    float wireX = MathF.Abs(MathF.Sin(ux * MathF.PI));
-                    float wireY = MathF.Abs(MathF.Sin(uy * MathF.PI));
-                    float weave = 1f - MathF.Min(wireX, wireY);
-                    weave = MathF.Pow(Math.Clamp(weave, 0f, 1f), 7f) * 0.32f;
-                    cr += weave * (r0 * 0.6f + 0.4f);
-                    cg += weave * (g0 * 0.6f + 0.4f);
-                    cb += weave * (b0 * 0.6f + 0.4f);
-
-                    float mag = MathF.Max(cr, MathF.Max(cg, cb));
-                    float a = Math.Clamp(0.22f + fresnel * 0.72f + MathF.Abs(h) * 0.32f + weave * 0.85f, 0f, 0.86f) * edgeX * edgeY;
-                    float orr = cr / (1f + 0.35f * cr);
-                    float ogg = cg / (1f + 0.35f * cg);
-                    float obb = cb / (1f + 0.35f * cb);
+                    float a = Math.Clamp(0.14f + fresnel * 0.74f + MathF.Abs(h) * 0.34f + spec * 0.45f, 0f, 0.80f) * edgeX * edgeY;
+                    float orr = cr / (1f + 0.38f * cr);
+                    float ogg = cg / (1f + 0.38f * cg);
+                    float obb = cb / (1f + 0.38f * cb);
 
                     uint ba = (uint)(a * 255f + 0.5f);
                     uint br = (uint)(Math.Clamp(orr * a, 0f, 1f) * 255f + 0.5f);

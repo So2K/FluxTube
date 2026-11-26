@@ -467,38 +467,38 @@ public static unsafe class MusicStageEffects
         for (int i = 0; i < 256; i++)
         {
             float t = i / 255f;
+            // Smooth translucent flame curve: ZERO flat white clipping blocks, silky feathered edges & luminous core!
             float r, g, b, a;
-            if (t < 0.26f)
+            if (t < 0.30f)
             {
-                // Ultra-clean transparent wispy outer edge
-                float k = t / 0.26f;
-                r = r1 * 0.35f * k; g = g1 * 0.35f * k; b = b1 * 0.35f * k;
-                a = k * k * k * 0.12f;
+                float k = t / 0.30f;
+                r = r1 * (0.25f + 0.55f * k); g = g1 * (0.25f + 0.55f * k); b = b1 * (0.25f + 0.55f * k);
+                a = k * k * 0.20f;
             }
-            else if (t < 0.60f)
+            else if (t < 0.68f)
             {
-                float k = (t - 0.26f) / 0.34f;
-                r = r1 * (0.35f + 0.65f * k);
-                g = g1 * (0.35f + 0.65f * k);
-                b = b1 * (0.35f + 0.65f * k);
-                a = 0.12f + 0.56f * k;
+                float k = (t - 0.30f) / 0.38f;
+                r = r1 * (0.80f + 0.20f * k);
+                g = g1 * (0.80f + 0.20f * k);
+                b = b1 * (0.80f + 0.20f * k);
+                a = 0.20f + 0.36f * k;
             }
-            else if (t < 0.89f)
+            else if (t < 0.92f)
             {
-                float k = (t - 0.60f) / 0.29f;
+                float k = (t - 0.68f) / 0.24f;
                 r = r1 + (r2 - r1) * k;
                 g = g1 + (g2 - g1) * k;
                 b = b1 + (b2 - b1) * k;
-                a = 0.68f + 0.26f * k;
+                a = 0.56f + 0.18f * k;
             }
             else
             {
-                // Crisp jewel-bright core strictly at the hottest 11%
-                float k = (t - 0.89f) / 0.11f;
-                r = r2 + (1f - r2) * k * 0.78f;
-                g = g2 + (1f - g2) * k * 0.78f;
-                b = b2 + (1f - b2) * k * 0.78f;
-                a = 0.94f + 0.06f * k;
+                // Subtle translucent hot filament only at the very top 8% (never opaque white slab!)
+                float k = (t - 0.92f) / 0.08f;
+                r = r2 + (1f - r2) * k * 0.45f;
+                g = g2 + (1f - g2) * k * 0.45f;
+                b = b2 + (1f - b2) * k * 0.45f;
+                a = 0.74f + 0.08f * k;
             }
             uint ba = (uint)Math.Clamp(a * 255f + 0.5f, 0, 255);
             uint br = (uint)Math.Clamp(r * a * 255f + 0.5f, 0, 255);
@@ -693,10 +693,12 @@ public static unsafe class MusicStageEffects
                 float tipMask = tTip * tTip * (3f - 2f * tTip);
                 for (int x = 0; x < FireW; x++)
                 {
-                    float sideMask = x < 10 ? x * 0.1f : (x > FireW - 11 ? (FireW - 1 - x) * 0.1f : 1f);
+                    float sideMask = x < 14 ? x / 14f : (x > FireW - 15 ? (FireW - 1 - x) / 14f : 1f);
                     float blurred = (d0[ym2 + x] + 4f * d0[ym1 + x] + 6f * d0[y0r + x] + 4f * d0[yp1 + x] + d0[yp2 + x]) * 0.0625f;
-                    float val = blurred * tipMask * sideMask;
-                    int idx = (int)(val * 238f);
+                    // Soft-knee filmic compression -> prevents density clipping into flat white slabs!
+                    float compressed = blurred / (1f + 0.72f * blurred);
+                    float val = compressed * tipMask * sideMask;
+                    int idx = (int)(val * 245f);
                     if (idx < 0) idx = 0; else if (idx > 255) idx = 255;
                     pix[y0r + x] = pal[idx];
                 }
@@ -884,12 +886,7 @@ public static unsafe class MusicStageEffects
         {
             XpbdStageFx.DrawXpbdCloth(stage, dom1, dom2);
         }
-        // ---- 2D. XPBD PLUCKED LASER STRINGS + SOFT-BODY MERCURY RING ----
-        else if (mode == "xpbd_strings")
-        {
-            XpbdStageFx.DrawXpbdStrings(stage, dom1, dom2);
-        }
-        // ---- 2E. COVER-MATCHED FLUID SIDE FIRE CLIMAX (selectable "fire" mode) ----
+        // ---- 2D. COVER-MATCHED TRANSLUCENT FLUID SIDE FIRE CLIMAX (selectable "fire" mode) ----
         else if (fireMode && fire > 0.01f)
         {
             float bass = AudioAnalyzer.BassEnergy;

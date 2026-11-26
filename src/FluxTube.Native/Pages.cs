@@ -1985,9 +1985,8 @@ public sealed class WatchPage : IPage
                 ("water", "Вода", "Water"),
                 ("ferro", "Ферро", "Ferro"),
                 ("physarum", "Нейросеть", "Neural"),
-                ("rd", "Кораллы", "Coral"),
+                ("rd", "Автомат", "Automaton"),
                 ("xpbd_cloth", "Шёлк XPBD", "XPBD Silk"),
-                ("xpbd_strings", "Струны XPBD", "XPBD Strings"),
                 ("fire", "Огонь", "Fire"),
                 ("off", "Эффект: Выкл", "FX: Off"),
             ];

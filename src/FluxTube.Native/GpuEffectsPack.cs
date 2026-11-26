@@ -255,35 +255,40 @@ float4 PS_Ferro(VSOut i) : SV_Target
 
     float3 c = 0;
     float a = 0;
-    if (hitSurf)
+    float aaEdge = smoothstep(0.022, 0.002, minDist); // silky analytical SDF anti-aliasing!
+    if (hitSurf || aaEdge > 0.01)
     {
         float3 p = ro + rd * tRay;
         float3 n = ferroNormal(p);
         float3 ref = reflect(rd, n);
-        float fres = pow(1.0 - max(0.0, dot(n, -rd)), 3.0);
+        float fres = pow(1.0 - max(0.0, dot(n, -rd)), 2.8);
 
         // Studio chrome reflections tinted with cover palette + chromatic Fresnel rim!
         float envT = clamp(ref.y * 0.5 + 0.5, 0.0, 1.0);
         float3 env = lerp(col0 * 0.35, col1 * 1.15, envT);
-        float spec1 = pow(max(0.0, dot(ref, normalize(float3(-0.5, 0.7, -0.5)))), 22.0);
+        float spec1 = pow(max(0.0, dot(ref, normalize(float3(-0.5, 0.7, -0.5)))), 24.0);
         float spec2 = pow(max(0.0, dot(ref, normalize(float3(0.6, -0.4, -0.6)))), 14.0);
 
         float3 chromaRim = float3(
             lerp(col0.r, 1.0, fres),
             lerp(col1.g, 0.9, fres * 0.85),
             lerp(col1.b, 1.0, fres * 1.1)
-        ) * fres * (1.25 + bass * 0.65);
+        ) * fres * (1.20 + bass * 0.60);
 
-        c = env * (0.55 + 0.45 * calm) + chromaRim + spec1 * 1.35 + spec2 * col0 * 0.9;
-        c = c / (1.0 + 0.28 * c);
-        a = 0.90;
+        float3 surfCol = env * (0.55 + 0.45 * calm) + chromaRim + spec1 * 1.25 + spec2 * col0 * 0.85;
+        surfCol = surfCol / (1.0 + 0.32 * surfCol);
+        float halo = exp(-max(0.0, minDist) * 5.8) * (0.30 + bass * 0.32) * calm;
+        float3 haloCol = lerp(col0, col1, i.uv.x) * halo;
+        float cov = hitSurf ? 1.0 : aaEdge;
+        c = lerp(haloCol, surfCol, cov);
+        a = lerp(clamp(halo * 1.1, 0.0, 0.55), 0.88, cov);
     }
     else
     {
         // Soft magnetic aura glow right around the chrome blobs
-        float halo = exp(-max(0.0, minDist) * 5.2) * (0.32 + bass * 0.35) * calm;
+        float halo = exp(-max(0.0, minDist) * 5.8) * (0.30 + bass * 0.32) * calm;
         c = lerp(col0, col1, i.uv.x) * halo;
-        a = clamp(halo * 1.2, 0.0, 0.65);
+        a = clamp(halo * 1.1, 0.0, 0.55);
     }
 
     float2 edge = smoothstep(0.0, 0.05, i.uv) * smoothstep(0.0, 0.05, 1.0 - i.uv);
@@ -353,86 +358,115 @@ PVSOut VS_AgentDeposit(uint id : SV_VertexID)
 
 float4 PS_AgentDeposit(PVSOut i) : SV_Target
 {
-    return float4(0.32 + bass * 0.25, 0, 0, 1);
+    return float4(0.68 + bass * 0.45, 0, 0, 1);
 }
 
 float4 PS_TrailDiffuse(VSOut i) : SV_Target
 {
-    float sum = tex0.Sample(linClamp, i.uv).r * 4.0;
+    float sum = tex0.Sample(linClamp, i.uv).r * 3.0;
     sum += tex0.Sample(linClamp, i.uv - float2(texel.x, 0)).r;
     sum += tex0.Sample(linClamp, i.uv + float2(texel.x, 0)).r;
     sum += tex0.Sample(linClamp, i.uv - float2(0, texel.y)).r;
     sum += tex0.Sample(linClamp, i.uv + float2(0, texel.y)).r;
-    float decay = 0.915 + 0.048 * calm;
-    return float4(min(2.2, (sum / 8.0) * decay), 0, 0, 1);
+    sum += tex0.Sample(linClamp, i.uv + float2(-texel.x, -texel.y)).r * 0.5;
+    sum += tex0.Sample(linClamp, i.uv + float2( texel.x, -texel.y)).r * 0.5;
+    sum += tex0.Sample(linClamp, i.uv + float2(-texel.x,  texel.y)).r * 0.5;
+    sum += tex0.Sample(linClamp, i.uv + float2( texel.x,  texel.y)).r * 0.5;
+    float decay = 0.935 + 0.042 * calm;
+    return float4(min(2.6, (sum / 9.0) * decay), 0, 0, 1);
 }
 
 float4 PS_PhysarumDisplay(VSOut i) : SV_Target
 {
     float v = tex0.Sample(linClamp, i.uv).r;
-    float glow = pow(clamp(v, 0.0, 1.8), 1.35);
-    float3 c = lerp(col0 * 0.6, col1 * 1.25, clamp(v * 0.85, 0.0, 1.0)) * glow;
-    c += pow(clamp(v - 0.55, 0.0, 1.5), 2.0) * float3(1.0, 0.95, 1.0) * (0.45 + bass * 0.55);
-    c = c / (1.0 + 0.35 * c);
-    float2 edge = smoothstep(0.0, 0.06, i.uv) * smoothstep(0.0, 0.06, 1.0 - i.uv);
-    float a = clamp(v * 1.15, 0.0, 0.90) * edge.x * edge.y;
+    float glow = pow(clamp(v * 1.25, 0.0, 2.0), 1.15);
+    float3 c = lerp(col0 * 0.75, col1 * 1.35, clamp(v * 0.75, 0.0, 1.0)) * glow;
+    c += pow(clamp(v - 0.45, 0.0, 1.6), 1.8) * float3(1.0, 0.96, 1.0) * (0.55 + bass * 0.55);
+    c = c / (1.0 + 0.32 * c);
+    float2 edge = smoothstep(0.0, 0.05, i.uv) * smoothstep(0.0, 0.05, 1.0 - i.uv);
+    float a = clamp(v * 1.35, 0.0, 0.90) * edge.x * edge.y;
     return float4(c * a, a);
 }
 
-// ==================== 4. GRAY-SCOTT REACTION-DIFFUSION (Organic Coral / Plasma) ====================
+// ==================== 4. AUDIO-REACTIVE GPU CELLULAR AUTOMATON (SmoothLife / Cyclic Pattern Waves) ====================
 float4 PS_RdInit(VSOut i) : SV_Target
 {
     float2 p = (i.uv - 0.5) * float2(aspect, 1.0);
-    float ring = abs(length(p) - 0.22);
-    float h = hash21(floor(i.uv * 48.0));
-    float b = (ring < 0.035 || h > 0.975) ? 0.85 : 0.0;
-    return float4(1.0 - b, b, 0, 1);
+    float ang = atan2(p.y, p.x);
+    float rad = length(p);
+    float mandala = sin(rad * 28.0) * cos(ang * 6.0);
+    float h = hash21(floor(i.uv * 96.0));
+    float alive = (mandala > 0.55 || h > 0.88) ? 1.0 : 0.0;
+    return float4(alive, alive * 0.5, 0, 1);
 }
 
 float4 PS_RdStep(VSOut i) : SV_Target
 {
-    float2 ab = tex0.Sample(linClamp, i.uv).rg;
-    float2 lap = -ab;
-    lap += tex0.Sample(linClamp, i.uv - float2(texel.x, 0)).rg * 0.2;
-    lap += tex0.Sample(linClamp, i.uv + float2(texel.x, 0)).rg * 0.2;
-    lap += tex0.Sample(linClamp, i.uv - float2(0, texel.y)).rg * 0.2;
-    lap += tex0.Sample(linClamp, i.uv + float2(0, texel.y)).rg * 0.2;
-    lap += tex0.Sample(linClamp, i.uv + float2(-texel.x, -texel.y)).rg * 0.05;
-    lap += tex0.Sample(linClamp, i.uv + float2( texel.x, -texel.y)).rg * 0.05;
-    lap += tex0.Sample(linClamp, i.uv + float2(-texel.x,  texel.y)).rg * 0.05;
-    lap += tex0.Sample(linClamp, i.uv + float2( texel.x,  texel.y)).rg * 0.05;
+    float2 cur = tex0.Sample(linClamp, i.uv).rg; // r = state (0..1), g = glowing trail age
+    // 8-neighbor Moore neighborhood average (inner ring) + 4-neighbor outer ring (SmoothLife / Lenia kernel!)
+    float inner = 0.0;
+    inner += tex0.Sample(linClamp, i.uv + float2(-texel.x,  0)).r;
+    inner += tex0.Sample(linClamp, i.uv + float2( texel.x,  0)).r;
+    inner += tex0.Sample(linClamp, i.uv + float2( 0, -texel.y)).r;
+    inner += tex0.Sample(linClamp, i.uv + float2( 0,  texel.y)).r;
+    inner += tex0.Sample(linClamp, i.uv + float2(-texel.x, -texel.y)).r;
+    inner += tex0.Sample(linClamp, i.uv + float2( texel.x, -texel.y)).r;
+    inner += tex0.Sample(linClamp, i.uv + float2(-texel.x,  texel.y)).r;
+    inner += tex0.Sample(linClamp, i.uv + float2( texel.x,  texel.y)).r;
+    inner *= 0.125;
 
-    float a = ab.x, b = ab.y;
-    float abb = a * b * b;
-    float feed = 0.036 + bass * 0.014;
-    float kill = 0.060 + high * 0.005;
-    float na = a + (1.0 * lap.x - abb + feed * (1.0 - a)) * 0.95;
-    float nb = b + (0.5 * lap.y + abb - (kill + feed) * b) * 0.95;
+    float2 t2 = texel * 2.5;
+    float outer = 0.0;
+    outer += tex0.Sample(linClamp, i.uv + float2(-t2.x, 0)).r;
+    outer += tex0.Sample(linClamp, i.uv + float2( t2.x, 0)).r;
+    outer += tex0.Sample(linClamp, i.uv + float2(0, -t2.y)).r;
+    outer += tex0.Sample(linClamp, i.uv + float2(0,  t2.y)).r;
+    outer *= 0.25;
 
+    // Lenia / SmoothLife growth function modulated LIVE by Bass, Mid, and Treble!
+    float mu = 0.28 + mid * 0.14 - bass * 0.06;
+    float sigma = 0.095 + high * 0.045;
+    float kernel = inner * 0.68 + outer * 0.32;
+    float diff = (kernel - mu) / max(sigma, 0.02);
+    float growth = exp(-0.5 * diff * diff) * 2.0 - 1.0;
+
+    float stepRate = (0.16 + bass * 0.26 + hit * 0.18) * calm;
+    float nextState = clamp(cur.r + growth * stepRate, 0.0, 1.0);
+
+    // Symmetrical kaleidoscopic beat seeds so patterns constantly blossom into geometric mandalas!
     if (beat > 0.5)
     {
-        float2 d = (i.uv - float2(param0, param1)) * float2(aspect, 1.0);
-        nb = max(nb, exp(-dot(d, d) / 0.0018) * 0.88);
+        float2 p0 = float2(param0, param1);
+        float2 p1 = float2(1.0 - param0, param1);
+        float2 d0 = (i.uv - p0) * float2(aspect, 1.0);
+        float2 d1 = (i.uv - p1) * float2(aspect, 1.0);
+        float seed = exp(-dot(d0, d0) / 0.0014) + exp(-dot(d1, d1) / 0.0014);
+        nextState = clamp(nextState + seed * (0.65 + bass * 0.5), 0.0, 1.0);
     }
-    return float4(clamp(na, 0.0, 1.0), clamp(nb, 0.0, 1.0), 0, 1);
+
+    float trail = max(nextState, cur.g * (0.89 + 0.05 * calm));
+    return float4(nextState, trail, 0, 1);
 }
 
 float4 PS_RdDisplay(VSOut i) : SV_Target
 {
-    float b = tex0.Sample(linClamp, i.uv).g;
-    float bL = tex0.Sample(linClamp, i.uv - float2(texel.x, 0)).g;
-    float bR = tex0.Sample(linClamp, i.uv + float2(texel.x, 0)).g;
-    float bT = tex0.Sample(linClamp, i.uv - float2(0, texel.y)).g;
-    float bB = tex0.Sample(linClamp, i.uv + float2(0, texel.y)).g;
-    float3 n = normalize(float3((bL - bR) * 8.0, (bT - bB) * 8.0, 1.0));
-    float ndl = max(0.0, dot(n, normalize(float3(-0.4, -0.5, 0.75))));
-    float spec = pow(ndl, 14.0) * 0.55;
+    float2 st = tex0.Sample(linClamp, i.uv).rg;
+    float alive = st.r;
+    float trail = st.g;
 
-    float ridge = smoothstep(0.12, 0.42, b);
-    float3 c = lerp(col0, col1, smoothstep(0.18, 0.48, b)) * (0.45 + 0.65 * ndl) * ridge + spec * ridge;
-    c *= (0.85 + bass * 0.45) * calm;
-    float2 edge = smoothstep(0.0, 0.06, i.uv) * smoothstep(0.0, 0.06, 1.0 - i.uv);
-    float a = clamp(ridge * 0.88, 0.0, 0.88) * edge.x * edge.y;
+    // Crisp luminous cellular pattern with glowing edges & soft trail aura
+    float l = tex0.Sample(linClamp, i.uv - float2(texel.x, 0)).r;
+    float r = tex0.Sample(linClamp, i.uv + float2(texel.x, 0)).r;
+    float t = tex0.Sample(linClamp, i.uv - float2(0, texel.y)).r;
+    float b = tex0.Sample(linClamp, i.uv + float2(0, texel.y)).r;
+    float edgeGlow = clamp(length(float2(r - l, b - t)) * 3.8, 0.0, 1.0);
+
+    float3 baseCol = lerp(col0, col1, clamp(alive * 1.15, 0.0, 1.0));
+    float3 c = baseCol * (trail * 0.65 + alive * 0.55) + lerp(col1, float3(1.0, 1.0, 1.0), 0.65) * edgeGlow * (0.75 + bass * 0.45);
+    c = c / (1.0 + 0.30 * c);
+
+    float2 vig = smoothstep(0.0, 0.06, i.uv) * smoothstep(0.0, 0.06, 1.0 - i.uv);
+    float a = clamp((trail * 0.72 + edgeGlow * 0.55) * calm, 0.0, 0.88) * vig.x * vig.y;
     return float4(c * a, a);
 }
 ";
@@ -661,10 +695,12 @@ float4 PS_RdDisplay(VSOut i) : SV_Target
             // 1. Step 16,384 agents steering along pheromone trail
             QuadPass(ctx, _psAgentStep!, _agentRt.RtvB, AgentSide, AgentSide, _agentRt.SrvA, _trailRt.SrvA, cb);
             _agentRt.Swap();
-            // 2. Deposit 16,384 points additively onto trail texture
+            // 2. Deposit 16,384 points additively onto trail texture (bind VS sampler & CB so SampleLevel works!)
             UpdateCB(ctx, cb);
             ctx.IASetPrimitiveTopology(PrimitiveTopology.PointList);
             ctx.VSSetShader(_vsAgentDep);
+            ctx.VSSetConstantBuffer(0, _cb);
+            ctx.VSSetSampler(0, _sampler);
             ctx.VSSetShaderResource(0, _agentRt.SrvA);
             ctx.OMSetBlendState(_bsAdd);
             ctx.RSSetViewport(0, 0, SimW, SimH);
@@ -691,7 +727,7 @@ float4 PS_RdDisplay(VSOut i) : SV_Target
                 QuadPass(ctx, _psRdInit!, _rdRt.RtvA, SimW, SimH, null, null, cb);
                 _rdReady = true;
             }
-            for (int s = 0; s < 6; s++)
+            for (int s = 0; s < 2; s++)
             {
                 cb.Beat = (s == 0 && beatHit) ? 1f : 0f;
                 QuadPass(ctx, _psRdStep!, _rdRt.RtvB, SimW, SimH, _rdRt.SrvA, null, cb);
