@@ -613,13 +613,11 @@ float4 PS_SparkDraw(SparkVSOut i) : SV_Target { return i.col; }
         ctx.PSSetConstantBuffer(0, _cb);
         ctx.PSSetSampler(0, _sampler);
 
-        // Cover-faithful vivid color palette (matches video/cover theme!)
-        var (r0, g0, b0) = MusicStageEffects.VividPaletteColor(dom1 != 0 ? dom1 : Th.Brand);
-        uint c2 = dom2 != 0 && dom2 != dom1 ? dom2 : Gfx.Mix(dom1 != 0 ? dom1 : Th.Brand, Th.Brand, 0.5f);
-        var (r1, g1, b1) = MusicStageEffects.VividPaletteColor(c2);
-        if (MathF.Abs(r0 - r1) + MathF.Abs(g0 - g1) + MathF.Abs(b0 - b1) < 0.30f)
-            (r1, g1, b1) = RotateHue(r0, g0, b0, 1.15f);
-        var (r2, g2, b2) = RotateHue(r1, g1, b1, -1.35f);
+        // Rich evolving multi-color triad anchored to cover art (always vivid violet/cyan/gold/cover harmony — never flat monochrome!)
+        var (baseR, baseG, baseB) = MusicStageEffects.VividPaletteColor(dom1 != 0 ? dom1 : Th.Brand);
+        var (r0, g0, b0) = RotateHue(baseR, baseG, baseB, MathF.Sin(t * 0.14f) * 0.65f);
+        var (r1, g1, b1) = RotateHue(baseR, baseG, baseB, 2.15f + MathF.Cos(t * 0.19f) * 0.55f); // rich complementary violet/magenta
+        var (r2, g2, b2) = RotateHue(baseR, baseG, baseB, -2.10f + MathF.Sin(t * 0.23f) * 0.55f); // electric cyan/gold accent
 
         float calm = Math.Clamp(1f - quietDim * 0.92f, 0.05f, 1f);
 

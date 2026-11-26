@@ -1982,12 +1982,17 @@ public sealed class WatchPage : IPage
             [
                 ("fluid", "Флюид", "Fluid"),
                 ("fluid_sparks", "Флюид+Искры", "Fluid+Sparks"),
+                ("milkdrop", "Милкдроп", "MilkDrop"),
+                ("plasma", "Плазма 2000", "WMP Plasma"),
+                ("tunnel", "Гипертуннель", "Warp Tunnel"),
+                ("kaleid", "Калейдоскоп", "Kaleidoscope"),
+                ("synthwave", "Ретро-Сетка", "Synthwave"),
                 ("water", "Вода", "Water"),
                 ("ferro", "Ферро", "Ferro"),
-                ("physarum", "Нейросеть", "Neural"),
+                ("physarum", "Нейросеть", "Neural Web"),
                 ("rd", "Автомат", "Automaton"),
-                ("xpbd_cloth", "Шёлк XPBD", "XPBD Silk"),
                 ("fire", "Огонь", "Fire"),
+                ("xpbd_cloth", "Шёлк XPBD", "XPBD Silk"),
                 ("off", "Эффект: Выкл", "FX: Off"),
             ];
             int fxIdx = Array.FindIndex(fxPresets, p => string.Equals(p.Key, fxMode, StringComparison.OrdinalIgnoreCase));

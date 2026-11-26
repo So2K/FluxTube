@@ -804,7 +804,7 @@ public static unsafe class MusicStageEffects
         string mode = !sOpt.MusicImpactEffects ? "off" : (sOpt.MusicStageEffect ?? "fluid");
         if (mode == "off") return;
 
-        bool fireMode = string.Equals(mode, "fire", StringComparison.OrdinalIgnoreCase);
+        bool fireMode = false;
         float fire = _fireIntensity;
         float qDim = AudioAnalyzer.QuietDim;
         if (fireMode && fire <= 0.01f && qDim <= 0.04f) return;
@@ -863,8 +863,8 @@ public static unsafe class MusicStageEffects
             }
             UI.Animate();
         }
-        // ---- 2B. GPU SHADER PACK: Water Caustics / Liquid Chrome Ferrofluid / Physarum Neural Web / Gray-Scott Coral ----
-        else if (mode is "water" or "ferro" or "physarum" or "rd")
+        // ---- 2B. GPU SHADER PACK: MilkDrop / Plasma 2000 / Tunnel / Kaleidoscope / Synthwave / Water / Ferro / Neural / Automaton / Multi-Gradient GPU Fire ----
+        else if (mode is "milkdrop" or "plasma" or "tunnel" or "kaleid" or "synthwave" or "water" or "ferro" or "physarum" or "rd" or "fire")
         {
             bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.34f;
             if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
@@ -886,8 +886,8 @@ public static unsafe class MusicStageEffects
         {
             XpbdStageFx.DrawXpbdCloth(stage, dom1, dom2);
         }
-        // ---- 2D. COVER-MATCHED TRANSLUCENT FLUID SIDE FIRE CLIMAX (selectable "fire" mode) ----
-        else if (fireMode && fire > 0.01f)
+        // ---- 2D. Legacy fallback (unused now that Fire runs on 1024x576 GPU) ----
+        else if (false && fire > 0.01f)
         {
             float bass = AudioAnalyzer.BassEnergy;
             StepFireSimulation(fire, t, dom1, dom2);
