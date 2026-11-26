@@ -29,13 +29,14 @@ public static unsafe class MusicStageEffects
     private static long _lastFireSimMs;
     private static uint _rng = 0x9E3779B9u;
 
-    // ---- Pavel Dobryakov-Style Ultra-Crisp 320x180 MacCormack 3-Channel RGB Curl-Vorticity Silk Fluid (~0.7ms CPU via 4-stripe Parallel.For!) ----
-    private const int FlW = 320, FlH = 180, FlN = FlW * FlH;
+    // ---- Pavel Dobryakov-Style High-Res 384x216 3-Channel RGB Curl-Vorticity Silk Fluid (5.76x sharper than 160x90, 4-stripe Parallel.For!) ----
+    private const int FlW = 384, FlH = 216, FlN = FlW * FlH;
+    private const float FlScale = FlW / 160f; // 2.4x exact spatial scale vs v1 so physics/plumes match 1:1 with razor-sharp detail!
     private static readonly float[] _fu = new float[FlN], _fu0 = new float[FlN];
     private static readonly float[] _fv = new float[FlN], _fv0 = new float[FlN];
-    private static readonly float[] _fr = new float[FlN], _fr0 = new float[FlN], _fr1 = new float[FlN];
-    private static readonly float[] _fg = new float[FlN], _fg0 = new float[FlN], _fg1 = new float[FlN];
-    private static readonly float[] _fb = new float[FlN], _fb0 = new float[FlN], _fb1 = new float[FlN];
+    private static readonly float[] _fr = new float[FlN], _fr0 = new float[FlN];
+    private static readonly float[] _fg = new float[FlN], _fg0 = new float[FlN];
+    private static readonly float[] _fb = new float[FlN], _fb0 = new float[FlN];
     private static readonly float[] _fdiv = new float[FlN], _fp = new float[FlN], _fcurl = new float[FlN];
     private static readonly uint[] _fluidPixels = new uint[FlN];
     private static ID2D1Bitmap1? _fluidBmp;
@@ -49,7 +50,6 @@ public static unsafe class MusicStageEffects
         Array.Clear(_fu); Array.Clear(_fv); Array.Clear(_fu0); Array.Clear(_fv0);
         Array.Clear(_fr); Array.Clear(_fg); Array.Clear(_fb);
         Array.Clear(_fr0); Array.Clear(_fg0); Array.Clear(_fb0);
-        Array.Clear(_fr1); Array.Clear(_fg1); Array.Clear(_fb1);
         Array.Clear(_fp);
     }
 
@@ -62,42 +62,19 @@ public static unsafe class MusicStageEffects
         float m00 = cosA + (1f - cosA) * k;
         float m01 = k * (1f - cosA) - sq * sinA;
         float m02 = k * (1f - cosA) + sq * sinA;
-        float rr = Math.Clamp(r * m00 + g * m01 + b * m02, 0.02f, 1f);
-        float gg = Math.Clamp(r * m02 + g * m00 + b * m01, 0.02f, 1f);
-        float bb = Math.Clamp(r * m01 + g * m02 + b * m00, 0.02f, 1f);
+        float rr = Math.Clamp(r * m00 + g * m01 + b * m02, 0.03f, 1f);
+        float gg = Math.Clamp(r * m02 + g * m00 + b * m01, 0.03f, 1f);
+        float bb = Math.Clamp(r * m01 + g * m02 + b * m00, 0.03f, 1f);
         return (rr, gg, bb);
-    }
-
-    private static (float r, float g, float b) HyperVivid(uint argb, uint fallback)
-    {
-        var (r, g, b) = VividColor(argb);
-        float mx = MathF.Max(r, MathF.Max(g, b));
-        float mn = MathF.Min(r, MathF.Min(g, b));
-        // If cover is monochrome/B&W (like checkerboard), pull vivid neon energy from theme Brand instead of gray!
-        if (mx - mn < 0.22f)
-        {
-            var (fr, fg, fb) = VividColor(fallback);
-            r = r * 0.18f + fr * 0.82f;
-            g = g * 0.18f + fg * 0.82f;
-            b = b * 0.18f + fb * 0.82f;
-        }
-        float avg = (r + g + b) * (1f / 3f);
-        r = Math.Clamp(avg + (r - avg) * 1.45f, 0.02f, 1f);
-        g = Math.Clamp(avg + (g - avg) * 1.45f, 0.02f, 1f);
-        b = Math.Clamp(avg + (b - avg) * 1.45f, 0.02f, 1f);
-        // Normalize peak channel toward 1.0 so ribbons always glow brightly
-        float peak = MathF.Max(0.25f, MathF.Max(r, MathF.Max(g, b)));
-        float lift = MathF.Min(1.35f, 0.98f / peak);
-        return (Math.Clamp(r * lift, 0.02f, 1f), Math.Clamp(g * lift, 0.02f, 1f), Math.Clamp(b * lift, 0.02f, 1f));
     }
 
     private static void SplatFluid(float* u, float* v, float* r, float* g, float* b,
         float cx, float cy, float vx, float vy, float cr, float cg, float cb, float radPx)
     {
-        int x0 = Math.Clamp((int)(cx - radPx * 2.1f), 1, FlW - 2);
-        int x1 = Math.Clamp((int)(cx + radPx * 2.1f), 1, FlW - 2);
-        int y0 = Math.Clamp((int)(cy - radPx * 2.1f), 1, FlH - 2);
-        int y1 = Math.Clamp((int)(cy + radPx * 2.1f), 1, FlH - 2);
+        int x0 = Math.Clamp((int)(cx - radPx * 2.2f), 1, FlW - 2);
+        int x1 = Math.Clamp((int)(cx + radPx * 2.2f), 1, FlW - 2);
+        int y0 = Math.Clamp((int)(cy - radPx * 2.2f), 1, FlH - 2);
+        int y1 = Math.Clamp((int)(cy + radPx * 2.2f), 1, FlH - 2);
         float inv2R2 = 1f / MathF.Max(1f, 2f * radPx * radPx);
         for (int y = y0; y <= y1; y++)
         {
@@ -111,9 +88,9 @@ public static unsafe class MusicStageEffects
                 int i = row + x;
                 u[i] += vx * w;
                 v[i] += vy * w;
-                r[i] = MathF.Min(3.2f, r[i] + cr * w);
-                g[i] = MathF.Min(3.2f, g[i] + cg * w);
-                b[i] = MathF.Min(3.2f, b[i] + cb * w);
+                r[i] = MathF.Min(2.4f, r[i] + cr * w);
+                g[i] = MathF.Min(2.4f, g[i] + cg * w);
+                b[i] = MathF.Min(2.4f, b[i] + cb * w);
             }
         }
     }
@@ -140,53 +117,6 @@ public static unsafe class MusicStageEffects
         }
     }
 
-    /// <summary>2nd-order MacCormack advection with min/max limiter: keeps thin curling silk filaments RAZOR-SHARP (zero blurry cloud diffusion!).</summary>
-    private static void AdvectDyeMacCormack(float* src, float* phiHat, float* dst, float* u, float* v, float dt, float dissipation)
-    {
-        // Pass 1: forward semi-Lagrangian into phiHat
-        Parallel.For(0, 4, stripe =>
-        {
-            int y0 = 1 + stripe * (FlH - 2) / 4;
-            int y1 = 1 + (stripe + 1) * (FlH - 2) / 4;
-            AdvectFluidBand(phiHat, src, u, v, dt, 1f, y0, y1);
-        });
-        // Pass 2: backward error estimate + clamped 2nd-order correction into dst
-        Parallel.For(0, 4, stripe =>
-        {
-            const float maxX = FlW - 1.5f, maxY = FlH - 1.5f;
-            int y0 = 1 + stripe * (FlH - 2) / 4;
-            int y1 = 1 + (stripe + 1) * (FlH - 2) / 4;
-            for (int y = y0; y < y1; y++)
-            {
-                int row = y * FlW;
-                for (int x = 1; x < FlW - 1; x++)
-                {
-                    int i = row + x;
-                    // Sample phiHat forward (+dt) to estimate advection error
-                    float fx = Math.Clamp(x + dt * u[i], 0.5f, maxX);
-                    float fy = Math.Clamp(y + dt * v[i], 0.5f, maxY);
-                    int fx0 = (int)fx, fy0 = (int)fy;
-                    float ftx = fx - fx0, fty = fy - fy0;
-                    int fr0 = fy0 * FlW + fx0, fr1 = fr0 + FlW;
-                    float phiRev = (phiHat[fr0] + (phiHat[fr0 + 1] - phiHat[fr0]) * ftx) * (1f - fty)
-                                 + (phiHat[fr1] + (phiHat[fr1 + 1] - phiHat[fr1]) * ftx) * fty;
-
-                    // Min/max clamp from the 4 backward source neighbors guarantees 100% stability (zero overshoot/ringing!)
-                    float bx = Math.Clamp(x - dt * u[i], 0.5f, maxX);
-                    float by = Math.Clamp(y - dt * v[i], 0.5f, maxY);
-                    int bx0 = (int)bx, by0 = (int)by;
-                    int br0 = by0 * FlW + bx0, br1 = br0 + FlW;
-                    float s00 = src[br0], s10 = src[br0 + 1], s01 = src[br1], s11 = src[br1 + 1];
-                    float lo = MathF.Min(MathF.Min(s00, s10), MathF.Min(s01, s11));
-                    float hi = MathF.Max(MathF.Max(s00, s10), MathF.Max(s01, s11));
-
-                    float corr = phiHat[i] + 0.5f * (src[i] - phiRev);
-                    dst[i] = Math.Clamp(corr, lo, hi) * dissipation;
-                }
-            }
-        });
-    }
-
     private static void ProjectFluid(float* u, float* v, float* div, float* p)
     {
         Parallel.For(0, 4, stripe =>
@@ -200,7 +130,7 @@ public static unsafe class MusicStageEffects
                 {
                     int i = row + x;
                     div[i] = -0.5f * (u[i + 1] - u[i - 1] + v[i + FlW] - v[i - FlW]);
-                    p[i] *= 0.68f;
+                    p[i] *= 0.64f;
                 }
             }
         });
@@ -241,265 +171,202 @@ public static unsafe class MusicStageEffects
     private static void StepRgbFluidSimulation(float t, uint dom1, uint dom2, float bass, float mid, float high,
         float hit, float pan, float quietDim, bool beatHit, float burstPower, bool uploadGpu)
     {
-        uint brand = Th.Brand != 0 ? Th.Brand : 0xFFFF2E93;
-        uint c1 = dom1 != 0 ? dom1 : brand;
-        uint c2 = dom2 != 0 && dom2 != c1 ? dom2 : Gfx.Mix(c1, brand, 0.5f);
-        var (r0, g0, b0) = HyperVivid(c1, brand);
-        var (r1, g1, b1) = HyperVivid(c2, Gfx.Mix(brand, 0xFF00E5FF, 0.55f));
-        // Guarantee rich 3-color harmonic silk separation (magenta/cyan/gold or cover-matched triad!)
+        uint c1 = dom1 != 0 ? dom1 : Th.Brand;
+        uint c2 = dom2 != 0 && dom2 != c1 ? dom2 : Gfx.Mix(c1, Th.Brand, 0.5f);
+        var (r0, g0, b0) = VividColor(c1);
+        var (r1, g1, b1) = VividColor(c2);
+        // Same clean harmonic palette as v1: faithful to cover art & theme!
         float colorDist = MathF.Abs(r0 - r1) + MathF.Abs(g0 - g1) + MathF.Abs(b0 - b1);
-        if (colorDist < 0.45f) (r1, g1, b1) = RotateHue(r0, g0, b0, 1.85f);
-        var (r2, g2, b2) = RotateHue(r0, g0, b0, -1.95f);
-
-        float kick = MusicBounce.Kick;
-        float domAng = AudioAnalyzer.DominantAngle;
-        float energy = Math.Clamp(0.35f + bass * 1.15f + mid * 0.55f + high * 0.45f + hit * 0.85f + kick * 0.55f, 0.20f, 2.4f);
-        float calm = Math.Clamp(1f - quietDim * 0.90f, 0.08f, 1f);
+        if (colorDist < 0.32f) (r1, g1, b1) = RotateHue(r0, g0, b0, 1.05f);
+        var (r2, g2, b2) = RotateHue(r1, g1, b1, -1.35f);
+        float energy = Math.Clamp(0.26f + bass * 0.85f + mid * 0.45f + high * 0.35f + hit * 0.70f, 0.15f, 1.85f);
+        float calm = Math.Clamp(1f - quietDim * 0.92f, 0.06f, 1f);
 
         fixed (float* fu = _fu, fu0 = _fu0, fv = _fv, fv0 = _fv0,
-               fr = _fr, fr0 = _fr0, fr1 = _fr1,
-               fg = _fg, fg0 = _fg0, fg1 = _fg1,
-               fb = _fb, fb0 = _fb0, fb1 = _fb1,
+               fr = _fr, fr0 = _fr0, fg = _fg, fg0 = _fg0, fb = _fb, fb0 = _fb0,
                fdiv = _fdiv, fp = _fp, fcurl = _fcurl)
         fixed (uint* fpix = _fluidPixels)
         {
-            StepRgbFluidCore(fu, fu0, fv, fv0, fr, fr0, fr1, fg, fg0, fg1, fb, fb0, fb1, fdiv, fp, fcurl, fpix,
-                t, r0, g0, b0, r1, g1, b1, r2, g2, b2, bass, mid, high, hit, kick, pan, domAng, energy, calm, beatHit, burstPower, uploadGpu);
+            StepRgbFluidCore(fu, fu0, fv, fv0, fr, fr0, fg, fg0, fb, fb0, fdiv, fp, fcurl, fpix,
+                t, r0, g0, b0, r1, g1, b1, r2, g2, b2, bass, mid, high, hit, pan, energy, calm, beatHit, burstPower, uploadGpu);
         }
     }
 
     private static void StepRgbFluidCore(
         float* u, float* u0, float* v, float* v0,
-        float* r, float* r0p, float* r1p,
-        float* g, float* g0p, float* g1p,
-        float* b, float* b0p, float* b1p,
+        float* r, float* r0p, float* g, float* g0p, float* b, float* b0p,
         float* div, float* p, float* curl, uint* pix,
         float t, float r0, float g0, float b0, float r1, float g1, float b1, float r2, float g2, float b2,
-        float bass, float mid, float high, float hit, float kick, float pan, float domAng, float energy, float calm,
+        float bass, float mid, float high, float hit, float pan, float energy, float calm,
         bool beatHit, float burstPower, bool uploadGpu)
     {
+        // 1. Three clean orbiting spline vortex emitters (exact v1 composition & music-reactive turbulence, scaled cleanly to 384x216!)
+        float e0x = FlW * (0.50f + 0.34f * MathF.Sin(t * 0.62f) + pan * 0.08f);
+        float e0y = FlH * (0.54f + 0.24f * MathF.Sin(t * 1.24f));
+        float v0x = MathF.Cos(t * 0.62f) * (28f + bass * 46f + hit * 32f) * calm * FlScale;
+        float v0y = MathF.Cos(t * 1.24f) * (22f + bass * 38f) * calm * FlScale;
+        float d0s = (0.36f + bass * 0.68f + hit * 0.38f) * calm;
+        SplatFluid(u, v, r, g, b, e0x, e0y, v0x, v0y, r0 * d0s, g0 * d0s, b0 * d0s, (5.2f + bass * 3.0f) * FlScale);
+
+        float e1x = FlW * (0.50f - 0.35f * MathF.Cos(t * 0.54f + 1.1f) - pan * 0.07f);
+        float e1y = FlH * (0.46f + 0.28f * MathF.Sin(t * 0.88f + 0.6f));
+        float v1x = MathF.Sin(t * 0.54f + 1.1f) * (26f + mid * 44f) * calm * FlScale;
+        float v1y = MathF.Cos(t * 0.88f + 0.6f) * (24f + mid * 38f) * calm * FlScale;
+        float d1s = (0.32f + mid * 0.65f + bass * 0.25f) * calm;
+        SplatFluid(u, v, r, g, b, e1x, e1y, v1x, v1y, r1 * d1s, g1 * d1s, b1 * d1s, (4.8f + mid * 2.6f) * FlScale);
+
+        float e2x = FlW * (0.50f + 0.38f * MathF.Sin(t * 0.95f + 2.4f));
+        float e2y = FlH * (0.50f - 0.30f * MathF.Cos(t * 1.38f + 1.8f));
+        float v2x = MathF.Cos(t * 0.95f + 2.4f) * (30f + high * 42f + hit * 35f) * calm * FlScale;
+        float v2y = MathF.Sin(t * 1.38f + 1.8f) * (26f + high * 36f) * calm * FlScale;
+        float d2s = (0.26f + high * 0.62f + hit * 0.45f) * calm;
+        SplatFluid(u, v, r, g, b, e2x, e2y, v2x, v2y, r2 * d2s, g2 * d2s, b2 * d2s, (4.2f + high * 2.4f) * FlScale);
+
+        // 2. Beat & Drop opposing colliding vortex splats (organic music-reactive swirls!)
+        if ((beatHit || burstPower > 0.05f) && calm > 0.2f)
         {
-            // 1. FIVE full-stage interlocking silk vortex jets (sweeping center, wings, & diagonals -> rich full-canvas saturation!)
-            float spdScale = (1.55f + bass * 1.35f + kick * 0.85f) * calm;
-
-            // Jet 0 (Bass Core Sweeper): wide figure-8 across the stage behind the cover art
-            float e0x = FlW * (0.50f + 0.36f * MathF.Sin(t * 0.72f) + pan * 0.10f);
-            float e0y = FlH * (0.52f + 0.26f * MathF.Sin(t * 1.44f));
-            float d0s = (0.68f + bass * 1.10f + kick * 0.55f) * calm;
-            SplatFluid(u, v, r, g, b, e0x, e0y,
-                MathF.Cos(t * 0.72f) * 62f * spdScale, MathF.Cos(t * 1.44f) * 48f * spdScale,
-                r0 * d0s, g0 * d0s, b0 * d0s, 7.2f + bass * 4.5f);
-
-            // Jet 1 (Mid Counter-Swirl): counter-orbiting silk ribbon
-            float e1x = FlW * (0.50f - 0.38f * MathF.Cos(t * 0.64f + 1.1f) - pan * 0.09f);
-            float e1y = FlH * (0.48f + 0.30f * MathF.Sin(t * 0.98f + 0.7f));
-            float d1s = (0.62f + mid * 1.05f + bass * 0.42f) * calm;
-            SplatFluid(u, v, r, g, b, e1x, e1y,
-                MathF.Sin(t * 0.64f + 1.1f) * 58f * spdScale, MathF.Cos(t * 0.98f + 0.7f) * 52f * spdScale,
-                r1 * d1s, g1 * d1s, b1 * d1s, 6.8f + mid * 4.0f);
-
-            // Jet 2 (Treble Whip Ribbon): fast electric accent slicing diagonally
-            float e2x = FlW * (0.50f + 0.40f * MathF.Sin(t * 1.12f + 2.4f));
-            float e2y = FlH * (0.50f - 0.32f * MathF.Cos(t * 1.56f + 1.9f));
-            float d2s = (0.52f + high * 1.00f + hit * 0.72f) * calm;
-            SplatFluid(u, v, r, g, b, e2x, e2y,
-                MathF.Cos(t * 1.12f + 2.4f) * 66f * spdScale, MathF.Sin(t * 1.56f + 1.9f) * 54f * spdScale,
-                r2 * d2s, g2 * d2s, b2 * d2s, 5.8f + high * 3.6f);
-
-            // Jet 3 & 4 (Opposing Left & Right Wing Jets): collide in the center into massive curling mushroom spirals!
-            float wingY = FlH * (0.50f + 0.24f * MathF.Sin(t * 0.85f));
-            float wingD = (0.55f + bass * 0.95f + hit * 0.55f) * calm;
-            SplatFluid(u, v, r, g, b, FlW * 0.08f, wingY,
-                (52f + bass * 78f + kick * 55f) * calm, MathF.Cos(t * 1.3f) * 28f * calm,
-                r0 * wingD, g0 * wingD, b0 * wingD, 6.4f + bass * 3.5f);
-            SplatFluid(u, v, r, g, b, FlW * 0.92f, FlH - wingY,
-                -(52f + bass * 78f + kick * 55f) * calm, -MathF.Cos(t * 1.3f) * 28f * calm,
-                r1 * wingD, g1 * wingD, b1 * wingD, 6.4f + bass * 3.5f);
-
-            // 2. Beat & Drop Opposing Colliding Vortex Bursts
-            if ((beatHit || burstPower > 0.05f) && calm > 0.18f)
+            int splats = burstPower > 0.45f ? 4 : 2;
+            float pwr = MathF.Max(0.55f, MathF.Max(bass * 1.1f + hit * 0.9f, burstPower));
+            for (int s = 0; s < splats; s++)
             {
-                int splats = burstPower > 0.45f ? 5 : 3;
-                float pwr = MathF.Max(0.75f, MathF.Max(bass * 1.35f + kick * 0.95f + hit, burstPower));
-                for (int s = 0; s < splats; s++)
+                int idx = ++_fluidSplatSeed;
+                float ang = (idx * 2.399963f + t * 0.9f) % MathF.Tau;
+                float sx = FlW * (0.50f + 0.34f * MathF.Cos(ang));
+                float sy = FlH * (0.50f + 0.32f * MathF.Sin(ang));
+                float tang = ang + 2.45f;
+                float spd = (46f + 42f * pwr) * calm * FlScale;
+                float cr = (s & 1) == 0 ? r0 : (s == 3 ? r2 : r1);
+                float cg = (s & 1) == 0 ? g0 : (s == 3 ? g2 : g1);
+                float cb = (s & 1) == 0 ? b0 : (s == 3 ? b2 : b1);
+                float boost = burstPower > 0.45f ? 1.25f : 0.85f;
+                SplatFluid(u, v, r, g, b, sx, sy, MathF.Cos(tang) * spd, MathF.Sin(tang) * spd,
+                    cr * boost, cg * boost, cb * boost, (5.4f + pwr * 2.4f) * FlScale);
+            }
+        }
+
+        // 3. High-Res Curl Vorticity Confinement (silky fine-grain turbulence without pixelation!)
+        const float dt = 0.040f;
+        Parallel.For(0, 4, stripe =>
+        {
+            int y0 = 1 + stripe * (FlH - 2) / 4;
+            int y1 = 1 + (stripe + 1) * (FlH - 2) / 4;
+            for (int y = y0; y < y1; y++)
+            {
+                int row = y * FlW;
+                for (int x = 1; x < FlW - 1; x++)
                 {
-                    int idx = ++_fluidSplatSeed;
-                    float ang = (idx * 2.399963f + t * 1.1f) % MathF.Tau;
-                    float sx = FlW * (0.50f + 0.34f * MathF.Cos(ang));
-                    float sy = FlH * (0.50f + 0.30f * MathF.Sin(ang));
-                    float tang = ang + 2.38f;
-                    float spd = (95f + 85f * pwr) * calm;
-                    float cr = (s % 3) == 0 ? r0 : ((s % 3) == 1 ? r1 : r2);
-                    float cg = (s % 3) == 0 ? g0 : ((s % 3) == 1 ? g1 : g2);
-                    float cb = (s % 3) == 0 ? b0 : ((s % 3) == 1 ? b1 : b2);
-                    float boost = burstPower > 0.45f ? 1.55f : 1.12f;
-                    SplatFluid(u, v, r, g, b, sx, sy, MathF.Cos(tang) * spd, MathF.Sin(tang) * spd,
-                        cr * boost, cg * boost, cb * boost, 7.2f + pwr * 3.6f);
+                    int i = row + x;
+                    curl[i] = (v[i + 1] - v[i - 1] - (u[i + FlW] - u[i - FlW])) * 0.5f;
                 }
             }
-
-            // 3. BASS-REACTIVE RADIAL SHOCKWAVE & GLOBAL KINETIC FLUID SHAKE (plumes physically jolt, ripple & whip to every kick!)
-            float shakePwr = (bass * 0.85f + kick * 1.35f + hit * 0.90f) * calm;
-            if (shakePwr > 0.10f || beatHit)
+        });
+        float vortDt = (14.0f + energy * 4.5f) * dt;
+        Parallel.For(0, 4, stripe =>
+        {
+            int y0 = 2 + stripe * (FlH - 4) / 4;
+            int y1 = 2 + (stripe + 1) * (FlH - 4) / 4;
+            for (int y = y0; y < y1; y++)
             {
-                float radialBlast = (beatHit ? 42f : 0f) + kick * 26f + bass * 12f;
-                float swirlTorque = (pan * 24f + MathF.Sin(domAng) * 18f) * shakePwr;
-                float joltX = (MathF.Cos(domAng) * 16f + pan * 22f) * shakePwr;
-                float joltY = (-14f * kick + MathF.Sin(domAng) * 12f) * shakePwr;
-                const float midX = FlW * 0.5f, midY = FlH * 0.5f;
-                float invRad2 = 1f / (FlW * FlW * 0.16f);
-                Parallel.For(0, 4, stripe =>
+                int row = y * FlW;
+                for (int x = 2; x < FlW - 2; x++)
                 {
-                    int y0 = 2 + stripe * (FlH - 4) / 4;
-                    int y1 = 2 + (stripe + 1) * (FlH - 4) / 4;
-                    for (int y = y0; y < y1; y++)
-                    {
-                        float dy = y - midY;
-                        int row = y * FlW;
-                        for (int x = 2; x < FlW - 2; x++)
-                        {
-                            float dx = x - midX;
-                            float d2 = dx * dx + dy * dy + 16f;
-                            float invD = 1f / MathF.Sqrt(d2);
-                            float falloff = MathF.Exp(-d2 * invRad2);
-                            float nx = dx * invD, ny = dy * invD;
-                            int i = row + x;
-                            // Radial bass shockwave + rotational swirl + global directional kick jolt!
-                            u[i] += (nx * radialBlast - ny * swirlTorque) * falloff + joltX * 0.22f;
-                            v[i] += (ny * radialBlast + nx * swirlTorque) * falloff + joltY * 0.22f;
-                        }
-                    }
-                });
+                    int i = row + x;
+                    float dwDx = MathF.Abs(curl[i + 1]) - MathF.Abs(curl[i - 1]);
+                    float dwDy = MathF.Abs(curl[i + FlW]) - MathF.Abs(curl[i - FlW]);
+                    float invLen = 1f / (MathF.Sqrt(dwDx * dwDx + dwDy * dwDy) + 1e-4f);
+                    float c = curl[i] * vortDt;
+                    u[i] += dwDy * invLen * c;
+                    v[i] -= dwDx * invLen * c;
+                }
             }
+        });
 
-            // 4. High-Curl Vorticity Confinement (tight curling liquid-silk spirals!)
-            const float dt = 0.036f;
-            Parallel.For(0, 4, stripe =>
+        // 4. Incompressible Projection -> Velocity Advection -> Projection
+        ProjectFluid(u, v, div, p);
+        Parallel.For(0, 4, stripe =>
+        {
+            int y0 = 1 + stripe * (FlH - 2) / 4;
+            int y1 = 1 + (stripe + 1) * (FlH - 2) / 4;
+            AdvectFluidBand(u0, u, u, v, dt, 0.974f, y0, y1);
+            AdvectFluidBand(v0, v, u, v, dt, 0.974f, y0, y1);
+        });
+        Buffer.MemoryCopy(u0, u, FlN * sizeof(float), FlN * sizeof(float));
+        Buffer.MemoryCopy(v0, v, FlN * sizeof(float), FlN * sizeof(float));
+        ProjectFluid(u, v, div, p);
+
+        // 5. High-Res RGB Dye Advection (clean silky plumes, zero pixel artifacts!)
+        float dyeDiss = 0.940f + 0.036f * calm;
+        Parallel.For(0, 4, stripe =>
+        {
+            int y0 = 1 + stripe * (FlH - 2) / 4;
+            int y1 = 1 + (stripe + 1) * (FlH - 2) / 4;
+            AdvectFluidBand(r0p, r, u, v, dt, dyeDiss, y0, y1);
+            AdvectFluidBand(g0p, g, u, v, dt, dyeDiss, y0, y1);
+            AdvectFluidBand(b0p, b, u, v, dt, dyeDiss, y0, y1);
+        });
+        Buffer.MemoryCopy(r0p, r, FlN * sizeof(float), FlN * sizeof(float));
+        Buffer.MemoryCopy(g0p, g, FlN * sizeof(float), FlN * sizeof(float));
+        Buffer.MemoryCopy(b0p, b, FlN * sizeof(float), FlN * sizeof(float));
+
+        // 6. Silky 3D Normal-Gradient Specular Shading + Filmic Tone Map -> Premultiplied BGRA
+        const float lx = -0.46f, ly = -0.58f, lz = 0.67f;
+        Parallel.For(0, 4, stripe =>
+        {
+            int y0 = stripe * FlH / 4;
+            int y1 = (stripe + 1) * FlH / 4;
+            for (int y = y0; y < y1; y++)
             {
-                int y0 = 1 + stripe * (FlH - 2) / 4;
-                int y1 = 1 + (stripe + 1) * (FlH - 2) / 4;
-                for (int y = y0; y < y1; y++)
+                int row = y * FlW;
+                int ym = (y > 0 ? y - 1 : 0) * FlW;
+                int yp = (y < FlH - 1 ? y + 1 : FlH - 1) * FlW;
+                float fy = y < 18 ? y * (1f / 18f) : (y > FlH - 19 ? (FlH - 1 - y) * (1f / 18f) : 1f);
+                for (int x = 0; x < FlW; x++)
                 {
-                    int row = y * FlW;
-                    for (int x = 1; x < FlW - 1; x++)
-                    {
-                        int i = row + x;
-                        curl[i] = (v[i + 1] - v[i - 1] - (u[i + FlW] - u[i - FlW])) * 0.5f;
-                    }
+                    int i = row + x;
+                    int xm = x > 0 ? x - 1 : 0;
+                    int xp = x < FlW - 1 ? x + 1 : FlW - 1;
+                    float cr = r[i], cg = g[i], cb = b[i];
+                    float maxC = MathF.Max(cr, MathF.Max(cg, cb));
+                    float fx = x < 24 ? x * (1f / 24f) : (x > FlW - 25 ? (FlW - 1 - x) * (1f / 24f) : 1f);
+                    float edgeMask = fx * fy;
+
+                    float lL = r[row + xm] * 0.299f + g[row + xm] * 0.587f + b[row + xm] * 0.114f;
+                    float lR = r[row + xp] * 0.299f + g[row + xp] * 0.587f + b[row + xp] * 0.114f;
+                    float lU = r[ym + x] * 0.299f + g[ym + x] * 0.587f + b[ym + x] * 0.114f;
+                    float lD = r[yp + x] * 0.299f + g[yp + x] * 0.587f + b[yp + x] * 0.114f;
+                    float nx = (lL - lR) * 8.2f;
+                    float ny = (lU - lD) * 8.2f;
+                    float invN = 1f / MathF.Sqrt(nx * nx + ny * ny + 1f);
+                    float ndl = MathF.Max(0f, (nx * lx + ny * ly + lz) * invN);
+                    float spec = ndl * ndl;
+                    spec = spec * spec * spec * 0.30f * Math.Clamp(maxC * 1.4f, 0f, 1f);
+                    float shade = 0.72f + 0.42f * ndl;
+
+                    float orr = (cr * shade + spec) / (1f + 0.38f * (cr * shade + spec));
+                    float ogg = (cg * shade + spec) / (1f + 0.38f * (cg * shade + spec));
+                    float obb = (cb * shade + spec) / (1f + 0.38f * (cb * shade + spec));
+                    float a = Math.Clamp(maxC * 1.08f, 0f, 0.84f) * edgeMask;
+
+                    uint ba = (uint)(a * 255f + 0.5f);
+                    uint br = (uint)(Math.Clamp(orr * a, 0f, 1f) * 255f + 0.5f);
+                    uint bg = (uint)(Math.Clamp(ogg * a, 0f, 1f) * 255f + 0.5f);
+                    uint bb = (uint)(Math.Clamp(obb * a, 0f, 1f) * 255f + 0.5f);
+                    pix[i] = (ba << 24) | (br << 16) | (bg << 8) | bb;
                 }
-            });
-            float vortDt = (18.5f + energy * 6.5f) * dt;
-            Parallel.For(0, 4, stripe =>
+            }
+        });
+
+        if (uploadGpu)
+        {
+            if (_fluidBmp == null || _fluidBmpGen != Gfx.DeviceGeneration)
             {
-                int y0 = 2 + stripe * (FlH - 4) / 4;
-                int y1 = 2 + (stripe + 1) * (FlH - 4) / 4;
-                for (int y = y0; y < y1; y++)
-                {
-                    int row = y * FlW;
-                    for (int x = 2; x < FlW - 2; x++)
-                    {
-                        int i = row + x;
-                        float dwDx = MathF.Abs(curl[i + 1]) - MathF.Abs(curl[i - 1]);
-                        float dwDy = MathF.Abs(curl[i + FlW]) - MathF.Abs(curl[i - FlW]);
-                        float invLen = 1f / (MathF.Sqrt(dwDx * dwDx + dwDy * dwDy) + 1e-4f);
-                        float c = curl[i] * vortDt;
-                        u[i] += dwDy * invLen * c;
-                        v[i] -= dwDx * invLen * c;
-                    }
-                }
-            });
-
-            // 5. Incompressible Projection -> Velocity Advection -> Projection
-            ProjectFluid(u, v, div, p);
-            Parallel.For(0, 4, stripe =>
+                _fluidBmp?.Dispose();
+                _fluidBmp = Gfx.CreateBitmap((byte*)pix, FlW, FlH, bc1: false);
+                _fluidBmpGen = Gfx.DeviceGeneration;
+            }
+            else
             {
-                int y0 = 1 + stripe * (FlH - 2) / 4;
-                int y1 = 1 + (stripe + 1) * (FlH - 2) / 4;
-                AdvectFluidBand(u0, u, u, v, dt, 0.976f, y0, y1);
-                AdvectFluidBand(v0, v, u, v, dt, 0.976f, y0, y1);
-            });
-            Buffer.MemoryCopy(u0, u, FlN * sizeof(float), FlN * sizeof(float));
-            Buffer.MemoryCopy(v0, v, FlN * sizeof(float), FlN * sizeof(float));
-            ProjectFluid(u, v, div, p);
-
-            // 6. RAZOR-SHARP 2nd-Order MacCormack RGB Dye Advection (zero cloud blur!)
-            float dyeDiss = 0.946f + 0.034f * calm;
-            AdvectDyeMacCormack(r, r0p, r1p, u, v, dt, dyeDiss);
-            AdvectDyeMacCormack(g, g0p, g1p, u, v, dt, dyeDiss);
-            AdvectDyeMacCormack(b, b0p, b1p, u, v, dt, dyeDiss);
-            Buffer.MemoryCopy(r1p, r, FlN * sizeof(float), FlN * sizeof(float));
-            Buffer.MemoryCopy(g1p, g, FlN * sizeof(float), FlN * sizeof(float));
-            Buffer.MemoryCopy(b1p, b, FlN * sizeof(float), FlN * sizeof(float));
-
-            // 7. Glossy 3D Liquid-Silk Specular Shading + Vivid Neon Bloom -> Premultiplied BGRA
-            const float lx = -0.45f, ly = -0.58f, lz = 0.68f;
-            float bassGlow = 1.0f + bass * 0.35f + kick * 0.25f;
-            Parallel.For(0, 4, stripe =>
-            {
-                int y0 = stripe * FlH / 4;
-                int y1 = (stripe + 1) * FlH / 4;
-                for (int y = y0; y < y1; y++)
-                {
-                    int row = y * FlW;
-                    int ym = (y > 0 ? y - 1 : 0) * FlW;
-                    int yp = (y < FlH - 1 ? y + 1 : FlH - 1) * FlW;
-                    float fy = y < 12 ? y * (1f / 12f) : (y > FlH - 13 ? (FlH - 1 - y) * (1f / 12f) : 1f);
-                    for (int x = 0; x < FlW; x++)
-                    {
-                        int i = row + x;
-                        int xm = x > 0 ? x - 1 : 0;
-                        int xp = x < FlW - 1 ? x + 1 : FlW - 1;
-                        float cr = r[i] * bassGlow, cg = g[i] * bassGlow, cb = b[i] * bassGlow;
-                        float maxC = MathF.Max(cr, MathF.Max(cg, cb));
-                        float fx = x < 16 ? x * 0.0625f : (x > FlW - 17 ? (FlW - 1 - x) * 0.0625f : 1f);
-                        float edgeMask = fx * fy;
-
-                        // Steep screen-space height normal for crisp 3D glossy liquid-silk ridges!
-                        float lL = r[row + xm] * 0.299f + g[row + xm] * 0.587f + b[row + xm] * 0.114f;
-                        float lR = r[row + xp] * 0.299f + g[row + xp] * 0.587f + b[row + xp] * 0.114f;
-                        float lU = r[ym + x] * 0.299f + g[ym + x] * 0.587f + b[ym + x] * 0.114f;
-                        float lD = r[yp + x] * 0.299f + g[yp + x] * 0.587f + b[yp + x] * 0.114f;
-                        float nx = (lL - lR) * 8.8f;
-                        float ny = (lU - lD) * 8.8f;
-                        float invN = 1f / MathF.Sqrt(nx * nx + ny * ny + 1f);
-                        float ndl = MathF.Max(0f, (nx * lx + ny * ly + lz) * invN);
-                        float sp2 = ndl * ndl;
-                        float spec = sp2 * sp2 * sp2 * 0.42f * Math.Clamp(maxC * 1.5f, 0f, 1f);
-                        float shade = 0.62f + 0.58f * ndl;
-
-                        // Vibrant chroma boost + luminous hot-core neon bloom
-                        float lum = (cr + cg + cb) * (1f / 3f);
-                        float vr = MathF.Max(0f, lum + (cr - lum) * 1.28f) * shade + spec;
-                        float vg = MathF.Max(0f, lum + (cg - lum) * 1.28f) * shade + spec;
-                        float vb = MathF.Max(0f, lum + (cb - lum) * 1.28f) * shade + spec;
-                        float orr = vr / (1f + 0.30f * vr);
-                        float ogg = vg / (1f + 0.30f * vg);
-                        float obb = vb / (1f + 0.30f * vb);
-
-                        // Crisp contrast alpha curve: deep dark troughs between ribbons, rich opaque glowing silk cores!
-                        float a = Math.Clamp(MathF.Pow(Math.Clamp(maxC * 0.92f, 0f, 1.35f), 1.15f), 0f, 0.92f) * edgeMask;
-
-                        uint ba = (uint)(a * 255f + 0.5f);
-                        uint br = (uint)(Math.Clamp(orr * a, 0f, 1f) * 255f + 0.5f);
-                        uint bg = (uint)(Math.Clamp(ogg * a, 0f, 1f) * 255f + 0.5f);
-                        uint bb = (uint)(Math.Clamp(obb * a, 0f, 1f) * 255f + 0.5f);
-                        pix[i] = (ba << 24) | (br << 16) | (bg << 8) | bb;
-                    }
-                }
-            });
-
-            if (uploadGpu)
-            {
-                if (_fluidBmp == null || _fluidBmpGen != Gfx.DeviceGeneration)
-                {
-                    _fluidBmp?.Dispose();
-                    _fluidBmp = Gfx.CreateBitmap((byte*)pix, FlW, FlH, bc1: false);
-                    _fluidBmpGen = Gfx.DeviceGeneration;
-                }
-                else
-                {
-                    _fluidBmp.CopyFromMemory((nint)pix, FlW * 4);
-                }
+                _fluidBmp.CopyFromMemory((nint)pix, FlW * 4);
             }
         }
     }
@@ -510,7 +377,7 @@ public static unsafe class MusicStageEffects
         var sw = System.Diagnostics.Stopwatch.StartNew();
         const int steps = 10;
         for (int i = 0; i < steps; i++)
-            StepRgbFluidSimulation(i * 0.05f, 0xFFFF2090, 0xFF00D4FF, 0.78f, 0.62f, 0.52f, i == 3 ? 0.90f : 0.25f, 0.25f, 0f, i == 0 || i == 5, i == 0 ? 1.0f : 0f, uploadGpu: false);
+            StepRgbFluidSimulation(i * 0.05f, 0xFFFF2090, 0xFF00D4FF, 0.75f, 0.58f, 0.45f, i == 3 ? 0.85f : 0.2f, 0.25f, 0f, i == 0 || i == 6, i == 0 ? 0.9f : 0f, uploadGpu: false);
         sw.Stop();
         int lit = 0;
         for (int i = 0; i < FlN; i++) if ((_fluidPixels[i] >> 24) > 30) lit++;
@@ -973,13 +840,13 @@ public static unsafe class MusicStageEffects
             }
         }
 
-        // ---- 2A. PAVEL-STYLE THEME-ADAPTIVE 320x180 MACCORMACK RGB CURL-VORTICITY SILK FLUID + BASS SHAKE ----
+        // ---- 2A. PAVEL-STYLE THEME-ADAPTIVE HIGH-RES 384x216 RGB CURL-VORTICITY SILK FLUID ----
         if (fluidMode)
         {
-            if (UI.Now - _lastFluidSimMs >= 16)
+            if (UI.Now - _lastFluidSimMs >= 20)
             {
                 _lastFluidSimMs = UI.Now;
-                bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.30f;
+                bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.36f;
                 if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
                 float burst = _fluidBurstPower;
                 _fluidBurstPower = 0f;
@@ -989,20 +856,9 @@ public static unsafe class MusicStageEffects
             }
             if (_fluidBmp != null)
             {
-                float bass = AudioAnalyzer.BassEnergy;
-                float kick = MusicBounce.Kick;
-                float fluidOp = Math.Clamp(0.76f + bass * 0.20f + AudioAnalyzer.DropImpact * 0.14f, 0.55f, 0.96f) * Math.Clamp(1f - qDim * 0.72f, 0.20f, 1f);
-                // Live GPU Bass-Pump & Coupled Shake Transform on the fluid layer so ribbons visibly thump & sway!
-                var savedTf = Gfx.DC.Transform;
-                float pump = 1.035f + bass * 0.065f + kick * 0.048f;
-                float tilt = AudioAnalyzer.StereoPan * 0.022f + MathF.Sin(t * 2.1f) * kick * 0.015f;
-                var center = new Vector2(stage.X + stage.W * 0.5f, stage.Y + stage.H * 0.5f);
-                var tfFluid = MusicBounce.Push(stage, 2, amp: 0.75f, rotAmp: 0.45f, textSafe: false);
-                Gfx.DC.Transform = Matrix3x2.CreateScale(pump, pump, center) * Matrix3x2.CreateRotation(tilt, center) * Gfx.DC.Transform;
+                float fluidOp = Math.Clamp(0.64f + AudioAnalyzer.BassEnergy * 0.24f + AudioAnalyzer.DropImpact * 0.14f, 0.45f, 0.90f) * Math.Clamp(1f - qDim * 0.75f, 0.18f, 1f);
                 Gfx.DC.DrawBitmap(_fluidBmp, new RawRectF(stage.X, stage.Y, stage.Right, stage.Bottom), fluidOp,
                     Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
-                MusicBounce.Pop(tfFluid);
-                Gfx.DC.Transform = savedTf;
             }
             UI.Animate();
         }
