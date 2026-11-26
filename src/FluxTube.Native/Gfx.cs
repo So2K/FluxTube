@@ -433,6 +433,8 @@ public static unsafe class Gfx
             LineJoin = LineJoin.Round,
         }, [4.4f, 3.8f]);
 
+    public static void InvalidateBackdrop() { _backdropBakedAt = 0; _backdropBg = 0; }
+
     /// <summary>Pre-bakes a 384×240 linear-light studio backdrop ONCE per theme/mode change (~2ms CPU once, 0.04ms GPU/frame).</summary>
     private static void EnsureBackdropBaked(string mode)
     {

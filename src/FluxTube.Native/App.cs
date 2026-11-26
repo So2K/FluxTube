@@ -207,9 +207,9 @@ public static unsafe class App
     private static void FrameColors()
     {
         if (Hwnd == 0) return;
-        int dark = Themes.Current.Light ? 0 : 1;
+        int dark = Th.Light ? 0 : 1;
         W.DwmSetWindowAttribute(Hwnd, 20, &dark, 4);
-        var bg = Themes.Current.Bg;
+        var bg = Th.Bg;
         uint caption = W.Rgb((byte)(bg >> 16), (byte)(bg >> 8), (byte)bg);
         W.DwmSetWindowAttribute(Hwnd, 35, &caption, 4);
     }

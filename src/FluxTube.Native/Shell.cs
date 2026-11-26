@@ -173,7 +173,7 @@ public static class Shell
     private static string? _lastAdaptiveVideoId;
 
     /// <summary>
-    /// Returns the currently open video's id (WatchPage / ShortsPage / playing track / active or first video tab)
+    /// Returns the currently open video's id (WatchPage / ShortsPage / active video tab / playing track / first video tab)
     /// and remembers the last seen video so Settings / non-video pages always preserve its adaptive palette.
     /// </summary>
     public static string? AdaptiveVideoId()
@@ -183,10 +183,10 @@ public static class Shell
             vid = wp.Video.VideoId;
         else if (_cur is ShortsPage sp && !string.IsNullOrEmpty(sp.CurrentId))
             vid = sp.CurrentId;
-        else if (!string.IsNullOrEmpty(T.Current?.VideoId))
-            vid = T.Current!.VideoId;
         else if (_tab >= 0 && _tab < _tabs.Count && _tabs[_tab].Kind == "video" && !string.IsNullOrEmpty(_tabs[_tab].Arg))
             vid = _tabs[_tab].Arg;
+        else if (!string.IsNullOrEmpty(T.Current?.VideoId))
+            vid = T.Current!.VideoId;
         else
         {
             for (int i = 0; i < _tabs.Count; i++)
@@ -3034,6 +3034,7 @@ public static class Shell
     public static void Tick()
     {
         var now = Environment.TickCount64;
+        if (Themes.IsAdaptiveVideo) Themes.SyncAdaptiveFromOpenVideo();
         if (_volSaveDueAt > 0 && now >= _volSaveDueAt)
         {
             _volSaveDueAt = 0;

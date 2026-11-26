@@ -76,9 +76,11 @@ public static unsafe class MusicStageEffects
         float max = MathF.Max(r, MathF.Max(g, b));
         float min = MathF.Min(r, MathF.Min(g, b));
         float avg = (r + g + b) / 3f;
-        // If cover color is near-grayscale/white, blend gently with theme brand so fire stays colorful & jewel-toned
+        // If cover color is near-grayscale/white: keep sleek neutral silver-white in Adaptive mode; otherwise blend gently with theme brand
         if (max - min < 0.14f)
         {
+            if (Themes.IsAdaptiveVideo)
+                return (Math.Clamp(avg, 0.72f, 0.96f), Math.Clamp(avg, 0.72f, 0.96f), Math.Clamp(avg + 0.03f, 0.75f, 1f));
             uint tb = Th.Brand;
             float tr = ((tb >> 16) & 255) / 255f, tg = ((tb >> 8) & 255) / 255f, tbb = (tb & 255) / 255f;
             r = r * 0.35f + tr * 0.65f;

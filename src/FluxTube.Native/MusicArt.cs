@@ -30,7 +30,8 @@ public static class MusicArt
         public byte[]? Pixels;
         public int W, H;
         public float Aspect = 1f;
-        public uint Dom1 = 0xFFFF4DA6, Dom2 = 0xFF7B61FF;
+        public uint Dom1 = 0xFFD0D4DC, Dom2 = 0xFF8E94A0;
+        public bool IsNeutral;
         public ID2D1Bitmap1? SharpBmp;
         public ID2D1Bitmap1? BlurBmp;
         public int DeviceGen;
@@ -39,9 +40,18 @@ public static class MusicArt
         public long FailedAt;
     }
 
-    private const int MaxCachedTracks = 3;
+    private const int MaxCachedTracks = 6;
     private static readonly ConcurrentDictionary<string, Entry> _cache = new(StringComparer.Ordinal);
-    private static readonly HttpClient _http = MakeClient();
+    private static readonly ConcurrentDictionary<string, (uint Dom1, uint Dom2, bool IsNeutral)> _colorCache = new(StringComparer.Ordinal);
+    private static HttpClient _http = MakeClient();
+    private static string _proxySnap = AppSettings.Current.Proxy ?? "";
+
+    private static HttpClient GetHttp()
+    {
+        var cur = AppSettings.Current.Proxy ?? "";
+        if (cur != _proxySnap) { _proxySnap = cur; _http = MakeClient(); }
+        return _http;
+    }
 
     static MusicArt()
     {
@@ -113,10 +123,17 @@ public static class MusicArt
     /// CPU-only dominant color query for the Adaptive Video Theme — works on ANY tab, ANY mode (video, audio-only, Settings),
     /// and outside Direct2D BeginDraw! Immediately kicks off thumbnail download if not cached and retries transient failures.
     /// </summary>
-    public static bool TryGetColors(string? videoId, out uint dom1, out uint dom2)
+    public static bool TryGetColors(string? videoId, out uint dom1, out uint dom2, out bool isNeutral)
     {
-        dom1 = 0; dom2 = 0;
+        dom1 = 0; dom2 = 0; isNeutral = false;
         if (string.IsNullOrEmpty(videoId)) return false;
+        if (_colorCache.TryGetValue(videoId, out var cached))
+        {
+            dom1 = cached.Dom1;
+            dom2 = cached.Dom2;
+            isNeutral = cached.IsNeutral;
+            return dom1 != 0;
+        }
         long now = UI.Now;
         if (!_cache.TryGetValue(videoId, out var e))
         {
@@ -135,9 +152,10 @@ public static class MusicArt
         {
             dom1 = e.Dom1;
             dom2 = e.Dom2;
+            isNeutral = e.IsNeutral;
             return dom1 != 0;
         }
-        if (st == 3 && now - Volatile.Read(ref e.FailedAt) > 4000)
+        if (st == 3 && now - Volatile.Read(ref e.FailedAt) > 3000)
         {
             Volatile.Write(ref e.State, 0);
             Volatile.Write(ref e.FailedAt, now);
@@ -190,27 +208,39 @@ public static class MusicArt
         try
         {
             byte[]? data = null;
+            var http = GetHttp();
             string[] urls =
             [
                 $"https://i.ytimg.com/vi/{e.VideoId}/maxresdefault.jpg",
                 $"https://i.ytimg.com/vi/{e.VideoId}/sddefault.jpg",
                 $"https://i.ytimg.com/vi/{e.VideoId}/hq720.jpg",
                 $"https://i.ytimg.com/vi/{e.VideoId}/hqdefault.jpg",
+                $"https://i.ytimg.com/vi/{e.VideoId}/mqdefault.jpg",
+                $"https://i.ytimg.com/vi/{e.VideoId}/oar2.jpg",
+                $"https://i.ytimg.com/vi/{e.VideoId}/0.jpg",
             ];
+            var wic = Wic.Factory;
             foreach (var u in urls)
             {
                 try
                 {
-                    using var resp = await _http.GetAsync(u);
+                    using var resp = await http.GetAsync(u);
                     if (!resp.IsSuccessStatusCode) continue;
                     var b = await resp.Content.ReadAsByteArrayAsync();
-                    if (b.Length > 2500) { data = b; break; }
+                    // Allow compact pure-white / solid minimalist JPEGs (> 500 bytes), rejecting only YouTube's 120x90 404 stub!
+                    if (b.Length <= 500) continue;
+                    using var testStream = wic.CreateStream(b);
+                    using var testDec = wic.CreateDecoderFromStream(testStream, DecodeOptions.CacheOnLoad);
+                    using var testFrame = testDec.GetFrame(0);
+                    var tsz = testFrame.Size;
+                    if (tsz.Width == 120 && tsz.Height == 90) continue;
+                    data = b;
+                    break;
                 }
                 catch { }
             }
             if (data == null) { Volatile.Write(ref e.FailedAt, UI.Now); Volatile.Write(ref e.State, 3); return; }
 
-            var wic = Wic.Factory;
             using var stream = wic.CreateStream(data);
             using var dec = wic.CreateDecoderFromStream(stream, DecodeOptions.CacheOnLoad);
             using var frame = dec.GetFrame(0);
@@ -257,15 +287,19 @@ public static class MusicArt
                         Buffer.BlockCopy(raw, ((y0 + row) * tw + x0) * 4, finalPx, row * rowBytes, rowBytes);
                 }
 
-                ExtractDominantColors(finalPx, cw, ch, out uint d1, out uint d2);
+                ExtractDominantColors(finalPx, cw, ch, out uint d1, out uint d2, out bool neutral);
                 e.Pixels = finalPx;
                 e.W = cw;
                 e.H = ch;
                 e.Aspect = cw / (float)Math.Max(1, ch);
                 e.Dom1 = d1;
                 e.Dom2 = d2;
+                e.IsNeutral = neutral;
+                if (_colorCache.Count >= 128) _colorCache.Clear();
+                _colorCache[e.VideoId] = (d1, d2, neutral);
                 Volatile.Write(ref e.State, 1);
                 App.WakeUi();
+                App.Post(App.Invalidate);
             }
             finally
             {
@@ -344,13 +378,16 @@ public static class MusicArt
         }
     }
 
-    private static void ExtractDominantColors(byte[] px, int w, int h, out uint c1, out uint c2)
+    private static void ExtractDominantColors(byte[] px, int w, int h, out uint c1, out uint c2, out bool isNeutral)
     {
         Span<double> hr = stackalloc double[12];
         Span<double> hg = stackalloc double[12];
         Span<double> hb = stackalloc double[12];
         Span<double> hw = stackalloc double[12];
         int sx = Math.Max(1, w / 36), sy = Math.Max(1, h / 36);
+        int totalSamples = 0, visibleSamples = 0, chromaticSamples = 0, whiteNeutralSamples = 0;
+        double sumR = 0, sumG = 0, sumB = 0, sumLuma = 0;
+
         for (int y = 0; y < h; y += sy)
         {
             for (int x = 0; x < w; x += sx)
@@ -361,7 +398,19 @@ public static class MusicArt
                 float mn = MathF.Min(r, MathF.Min(g, b));
                 float d = mx - mn;
                 float sat = mx > 0.01f ? d / mx : 0f;
-                if (mx < 0.14f || sat < 0.12f) continue;
+                float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                totalSamples++;
+                if (mx >= 0.12f)
+                {
+                    visibleSamples++;
+                    sumR += r; sumG += g; sumB += b; sumLuma += luma;
+                }
+                if (luma >= 0.56f && sat < 0.18f)
+                    whiteNeutralSamples++;
+
+                if (mx < 0.15f || sat < 0.18f || d < 0.08f) continue;
+                chromaticSamples++;
+
                 float hue = d < 0.001f ? 0f :
                     mx == r ? ((g - b) / d + (g < b ? 6f : 0f)) :
                     mx == g ? ((b - r) / d + 2f) : ((r - g) / d + 4f);
@@ -379,6 +428,33 @@ public static class MusicArt
             int dist = Math.Min(Math.Abs(i - best1), 12 - Math.Abs(i - best1));
             if (dist >= 2 && (best2 < 0 || hw[i] > hw[best2])) best2 = i;
         }
+
+        // Detect white / grayscale / minimalist neutral videos so tiny colored logos or noise NEVER turn them red/blue!
+        float chromaticFrac = chromaticSamples / (float)Math.Max(1, visibleSamples);
+        float whiteFrac = whiteNeutralSamples / (float)Math.Max(1, totalSamples);
+        float avgLuma = visibleSamples > 0 ? (float)(sumLuma / visibleSamples) : 0.5f;
+        isNeutral = best1 < 0 || chromaticFrac < 0.15f || (whiteFrac >= 0.58f && chromaticFrac < 0.28f);
+
+        if (isNeutral)
+        {
+            // Derive a refined neutral silver-white / warm-or-cool light-gray accent from the real neutral tone (zero red/neon bias!)
+            float baseTone = (whiteFrac >= 0.42f || avgLuma >= 0.58f) ? 0.84f : 0.74f;
+            float nr = baseTone, ng = baseTone, nb = baseTone;
+            if (visibleSamples > 0)
+            {
+                float ar = (float)(sumR / visibleSamples), ag = (float)(sumG / visibleSamples), ab = (float)(sumB / visibleSamples);
+                float aMean = (ar + ag + ab) / 3f;
+                // Keep at most a delicate ±0.025 warm/cool paper tint so white stays truly neutral white/gray
+                nr = Math.Clamp(baseTone + Math.Clamp((ar - aMean) * 0.35f, -0.025f, 0.025f), 0.65f, 0.92f);
+                ng = Math.Clamp(baseTone + Math.Clamp((ag - aMean) * 0.35f, -0.025f, 0.025f), 0.65f, 0.92f);
+                nb = Math.Clamp(baseTone + Math.Clamp((ab - aMean) * 0.35f, -0.025f, 0.025f), 0.65f, 0.92f);
+            }
+            c1 = 0xFF000000u | ((uint)(nr * 255f + 0.5f) << 16) | ((uint)(ng * 255f + 0.5f) << 8) | (uint)(nb * 255f + 0.5f);
+            float sec = baseTone - 0.22f;
+            c2 = 0xFF000000u | ((uint)(sec * 255f + 0.5f) << 16) | ((uint)(sec * 255f + 0.5f) << 8) | (uint)(Math.Clamp(sec + 0.02f, 0f, 1f) * 255f + 0.5f);
+            return;
+        }
+
         static uint PackVivid(double sr, double sg, double sb, double sw, uint fallback)
         {
             if (sw <= 0.001) return fallback;
@@ -391,35 +467,13 @@ public static class MusicArt
             if (mx < 0.65f && mx > 0.01f) { float k = 0.65f / mx; r = MathF.Min(1f, r * k); g = MathF.Min(1f, g * k); b = MathF.Min(1f, b * k); }
             return 0xFF000000u | ((uint)(r * 255f) << 16) | ((uint)(g * 255f) << 8) | (uint)(b * 255f);
         }
-        // If thumbnail is muted/dark/monochrome, extract subtle real tint from all non-black pixels instead of reusing Th.Brand!
-        if (best1 < 0)
-        {
-            double sr = 0, sg = 0, sb = 0, sw = 0;
-            for (int y = 0; y < h; y += sy)
-            {
-                for (int x = 0; x < w; x += sx)
-                {
-                    int o = (y * w + x) * 4;
-                    float b = px[o] / 255f, g = px[o + 1] / 255f, r = px[o + 2] / 255f;
-                    float mx = MathF.Max(r, MathF.Max(g, b));
-                    if (mx < 0.08f) continue;
-                    double weight = 0.2 + mx;
-                    sr += r * weight; sg += g * weight; sb += b * weight; sw += weight;
-                }
-            }
-            c1 = PackVivid(sr, sg, sb, sw, 0xFF8CA6D9u);
-        }
-        else
-        {
-            c1 = PackVivid(hr[best1], hg[best1], hb[best1], hw[best1], 0xFF8CA6D9u);
-        }
+        c1 = PackVivid(hr[best1], hg[best1], hb[best1], hw[best1], 0xFFD0D4DCu);
         if (best2 >= 0)
         {
             c2 = PackVivid(hr[best2], hg[best2], hb[best2], hw[best2], c1);
         }
         else
         {
-            // Derive complementary harmonic secondary color directly from c1 (never leaking previous video's Th.Brand2)
             float r = ((c1 >> 16) & 255) / 255f, g = ((c1 >> 8) & 255) / 255f, b = (c1 & 255) / 255f;
             c2 = 0xFF000000u | ((uint)(Math.Clamp(g * 0.72f + b * 0.42f, 0.14f, 1f) * 255f) << 16)
                              | ((uint)(Math.Clamp(b * 0.72f + r * 0.42f, 0.14f, 1f) * 255f) << 8)

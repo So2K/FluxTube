@@ -153,18 +153,35 @@ public static class Themes
 
     private static string? _adaptiveVid;
     private static uint _adaptiveDom1, _adaptiveDom2;
+    private static bool _adaptiveNeutral;
     private static Theme? _adaptiveLiveTheme;
 
-    /// <summary>Builds a harmonious, crisp dark palette automatically adapted from a video's dominant cover colors.</summary>
-    private static Theme BuildAdaptiveTheme(uint dom1, uint dom2)
+    /// <summary>Builds a harmonious dark palette adapted from a video's dominant colors (or sleek neutral charcoal-gray for white/B&amp;W videos).</summary>
+    private static Theme BuildAdaptiveTheme(uint dom1, uint dom2, bool isNeutral)
     {
+        if (isNeutral)
+        {
+            // Pure white / neutral / monochrome video -> clean dark neutral charcoal-gray + silver-white accent (zero red/blue tint!)
+            uint nBrand = dom1 != 0 ? dom1 : 0xFFD2D6DDu;
+            uint nBrand2 = dom2 != 0 ? dom2 : 0xFF9096A2u;
+            uint nBg = Gfx.Mix(0xFF101113, nBrand, 0.04f);
+            uint nPanel = Gfx.Mix(0xFF18191D, nBrand, 0.05f);
+            uint nCard = Gfx.Mix(0xFF22242A, nBrand, 0.06f);
+            uint nText = 0xFFF3F4F6;
+            uint nSub = 0xFFA4A8B2;
+            uint nDim = 0xFF6B707B;
+            uint nOnBrand = Luma(nBrand) > 0.56f ? 0xFF101114 : 0xFFFFFFFF;
+            return new Theme(AdaptiveVideoName, "Свои", false, nBg, nPanel, nCard, nText, nSub, nDim, nBrand, nOnBrand, nBrand2,
+                DefaultBackdrop: "matte", DefaultNeonGlow: false);
+        }
+
         static uint BoostBrand(uint c)
         {
             float r = ((c >> 16) & 255) / 255f, g = ((c >> 8) & 255) / 255f, b = (c & 255) / 255f;
             float avg = (r + g + b) / 3f;
-            r = Math.Clamp(avg + (r - avg) * 1.45f, 0f, 1f);
-            g = Math.Clamp(avg + (g - avg) * 1.45f, 0f, 1f);
-            b = Math.Clamp(avg + (b - avg) * 1.45f, 0f, 1f);
+            r = Math.Clamp(avg + (r - avg) * 1.40f, 0f, 1f);
+            g = Math.Clamp(avg + (g - avg) * 1.40f, 0f, 1f);
+            b = Math.Clamp(avg + (b - avg) * 1.40f, 0f, 1f);
             float max = MathF.Max(r, MathF.Max(g, b));
             if (max < 0.58f && max > 0.02f) { float k = 0.68f / max; r = MathF.Min(1f, r * k); g = MathF.Min(1f, g * k); b = MathF.Min(1f, b * k); }
             return 0xFF000000u | ((uint)(r * 255f + 0.5f) << 16) | ((uint)(g * 255f + 0.5f) << 8) | (uint)(b * 255f + 0.5f);
@@ -172,36 +189,39 @@ public static class Themes
 
         uint brand = BoostBrand(dom1);
         uint brand2 = dom2 != 0 && dom2 != dom1 ? BoostBrand(dom2) : ShiftHue(brand, 42f);
-        uint bg = Gfx.Mix(0xFF09090D, brand, 0.09f);
-        uint panel = Gfx.Mix(0xFF111117, brand, 0.14f);
-        uint card = Gfx.Mix(0xFF191922, brand, 0.18f);
+        uint bg = Gfx.Mix(0xFF09090D, brand, 0.11f);
+        uint panel = Gfx.Mix(0xFF111117, brand, 0.16f);
+        uint card = Gfx.Mix(0xFF191922, brand, 0.21f);
         uint text = Gfx.Mix(0xFFF4F4F8, brand, 0.05f);
-        uint sub = Gfx.Mix(0xFFA2A4B4, brand, 0.17f);
-        uint dim = Gfx.Mix(0xFF646778, brand, 0.15f);
+        uint sub = Gfx.Mix(0xFFA2A4B4, brand, 0.18f);
+        uint dim = Gfx.Mix(0xFF646778, brand, 0.16f);
         uint onBrand = Luma(brand) > 0.62f ? 0xFF0E0E12 : 0xFFFFFFFF;
         return new Theme(AdaptiveVideoName, "Свои", false, bg, panel, card, text, sub, dim, brand, onBrand, brand2,
             DefaultBackdrop: "mesh", DefaultNeonGlow: true);
     }
 
-    private static void SyncAdaptiveFromOpenVideo()
+    public static void SyncAdaptiveFromOpenVideo()
     {
         if (!IsAdaptiveVideo) return;
         string? vid = Shell.AdaptiveVideoId();
         if (string.IsNullOrEmpty(vid)) return;
-        if (!MusicArt.TryGetColors(vid, out uint dom1, out uint dom2)) return;
-        if (_adaptiveVid == vid && _adaptiveDom1 == dom1 && _adaptiveDom2 == dom2 && _adaptiveLiveTheme != null)
+        if (!MusicArt.TryGetColors(vid, out uint dom1, out uint dom2, out bool isNeutral)) return;
+        if (_adaptiveVid == vid && _adaptiveDom1 == dom1 && _adaptiveDom2 == dom2 && _adaptiveNeutral == isNeutral && _adaptiveLiveTheme != null)
             return;
 
         _adaptiveVid = vid;
         _adaptiveDom1 = dom1;
         _adaptiveDom2 = dom2;
-        _adaptiveLiveTheme = BuildAdaptiveTheme(dom1, dom2);
+        _adaptiveNeutral = isNeutral;
+        _adaptiveLiveTheme = BuildAdaptiveTheme(dom1, dom2, isNeutral);
         _from = Snapshot();
         _to = Derive(_adaptiveLiveTheme, null);
         _startedAt = UI.Now;
         _moving = true;
+        Gfx.InvalidateBackdrop();
         Changed?.Invoke();
         UI.Animate();
+        App.Invalidate();
     }
 
     private static (string Group, Theme[] Items)[] BuildGroups(Theme[] list)
@@ -619,7 +639,7 @@ public static class Themes
         var t = Math.Clamp((UI.Now - _startedAt) / 360f, 0, 1);
         var e = t * t * (3 - 2 * t);
         Set(Blend(_from, _to, e));
-        if (t >= 1) { _moving = false; Set(_to); Changed?.Invoke(); }
+        if (t >= 1) { _moving = false; Set(_to); Gfx.InvalidateBackdrop(); Changed?.Invoke(); App.Invalidate(); }
         UI.Animate();
     }
 
