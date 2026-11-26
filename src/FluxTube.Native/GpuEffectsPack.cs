@@ -265,32 +265,87 @@ float4 PS_Plasma(VSOut i) : SV_Target
     return float4(c * a, a);
 }
 
-// ==================== 3. 2000s 3D NEON HYPER-TUNNEL (Smooth Cruise Speed!) ====================
+// ==================== 3. SECOND REALITY POINT TUNNEL (Shadertoy Xlt3R8 + Audio Speed/Stereo/Perlin Path!) ====================
+float2 AngRep(float2 uv, float angle)
+{
+    float a = atan2(uv.y, uv.x);
+    float r = length(uv);
+    float m = a + angle * 0.5;
+    m = m - angle * floor(m / angle) - angle * 0.5;
+    return r * float2(cos(m), sin(m));
+}
+
+float2 TunnelPath(float x)
+{
+    const float TAU = 6.2831853071795865;
+    float2 offs;
+    offs.x = 0.20 * sin(TAU * x * 0.5) + 0.40 * sin(TAU * x * 0.2 + 0.3);
+    offs.y = 0.30 * cos(TAU * x * 0.3) + 0.20 * cos(TAU * x * 0.1);
+    // Mix smooth Perlin/value noise so the tunnel meanders organically
+    float nx = vnoise(float2(x * 0.65, 1.37)) - 0.5;
+    float ny = vnoise(float2(x * 0.65, 7.91)) - 0.5;
+    offs += float2(nx, ny) * 0.26;
+    offs *= smoothstep(0.0, 2.0, x + 1.5);
+    return offs;
+}
+
 float4 PS_Tunnel(VSOut i) : SV_Target
 {
-    float2 p = (i.uv - 0.5) * float2(aspect, 1.0) * 2.0;
-    p += float2(sin(time * 0.35) * 0.14 + pan * 0.18, cos(time * 0.28) * 0.10);
-    float r = max(length(p), 0.04);
-    float ang = atan2(p.y, p.x);
+    const float TAU = 6.2831853071795865;
+    const int TUNNEL_LAYERS = 96;
+    const float RING_POINTS = 128.0;
 
-    float depth = 1.0 / r;
-    float travel = time * 0.68 + bass * 0.18;
-    float twist = ang + depth * (0.24 + sin(time * 0.22) * 0.12);
+    // Exact Shadertoy aspect-normalized coords centered at (0,0)
+    float2 uv = (i.uv - 0.5) * float2(aspect, 1.0);
+    float invResY = texel.y; // 1.0 / 576.0
+    float repAngle = TAU / RING_POINTS;
+    float pointSize = (2.1 + bass * 0.75 + hit * 0.55) * 0.5 * invResY;
 
-    float ringGrid = pow(0.5 + 0.5 * sin(depth * 4.2 - travel * 2.6), 8.0);
-    float railGrid = pow(0.5 + 0.5 * sin(twist * 8.0), 10.0);
-    float pulseWave = pow(0.5 + 0.5 * sin(depth * 1.8 - travel * 3.8), 4.0) * (0.35 + bass * 1.0);
-    float fog = smoothstep(0.04, 0.42, r);
+    // Integrated audio-reactive camera Z (param0) + stereo L/R steer (param1) + treble/loudness Y steer (extra)!
+    float camZ = param0;
+    float2 camOffs = TunnelPath(camZ);
+    float2 audioSteer = float2(param1, extra);
+    float layerScroll = camZ - (4.0 / (float)TUNNEL_LAYERS) * floor(camZ / (4.0 / (float)TUNNEL_LAYERS));
 
-    float3 c = col0 * ringGrid * (1.05 + bass * 0.75)
-             + col1 * railGrid * (0.90 + high * 0.75)
-             + col2 * pulseWave * 0.60;
-    c += lerp(col1, float3(1, 1, 1), 0.55) * exp(-r * 4.2) * (0.50 + bass * 0.65);
-    c *= fog * calm;
-    c = c / (1.0 + 0.34 * c);
+    float3 color = 0;
+    float maxAlpha = 0.0;
 
-    float a = clamp(max(c.r, max(c.g, c.b)) * 1.12, 0.0, 0.88) * edgeFade(i.uv);
-    return float4(c * a, a);
+    [loop]
+    for (int k = 1; k <= TUNNEL_LAYERS; k++)
+    {
+        float pz = 1.0 - ((float)k / (float)TUNNEL_LAYERS);
+        pz -= layerScroll;
+        if (pz < -0.15) continue;
+
+        // Curve ahead bends smoothly with Perlin path + live Stereo L/R & Treble/Bass audio steering!
+        float ahead = max(0.0, pz);
+        float2 offs = (TunnelPath(camZ + pz) - camOffs) + audioSteer * (ahead * ahead * 1.15);
+
+        float denom = pz * 0.8 + 0.4;
+        float ringRad = (0.15 + bass * 0.014 * (1.0 - ahead)) * (1.0 / (denom * denom));
+        float distFromRing = abs(length(uv + offs) - ringRad);
+
+        if (distFromRing < pointSize * 2.2)
+        {
+            float2 aruv = AngRep(uv + offs, repAngle);
+            float pdist = length(aruv - float2(ringRad, 0.0)) - pointSize;
+            float blend = 1.0 - smoothstep(0.0, invResY * 1.35, pdist);
+            if (blend > 0.005)
+            {
+                // Classic Xlt3R8 alternating stripes tinted with crisp white + evolving cover triad!
+                float stripe = fmod(floor((float)k * 0.5), 2.0);
+                float3 colA = lerp(col2, float3(1.0, 1.0, 1.0), 0.74);
+                float3 colB = lerp(col0, col1, clamp(ahead * 1.2, 0.0, 1.0));
+                float3 ptColor = (stripe < 0.5) ? colA : colB;
+                float shade = clamp(1.0 - ahead, 0.05, 1.0) * (0.78 + bass * 0.35 + high * 0.25);
+                color = lerp(color, ptColor * shade, blend);
+                maxAlpha = max(maxAlpha, blend * shade);
+            }
+        }
+    }
+
+    float a = clamp(maxAlpha * 1.15, 0.0, 0.95) * calm * edgeFade(i.uv);
+    return float4(color * a, a);
 }
 
 // ==================== 4. ITUNES / GEISS 8-RAY FRACTAL KALEIDOSCOPE ====================
@@ -698,6 +753,7 @@ float4 PS_GpuFire(VSOut i) : SV_Target
     private static bool _reqBeat;
     private static long _lastStepMs;
     private static int _seed;
+    private static float _tunnelZ, _tunnelSteerX, _tunnelSteerY;
 
     public static ID2D1Bitmap1? OutputBitmap => _d2dBmp;
 
@@ -888,8 +944,23 @@ float4 PS_GpuFire(VSOut i) : SV_Target
                 QuadPass(ctx, _psPlasma!, _outRtv!, OutW, OutH, null, cb);
                 break;
             case "tunnel":
+            {
+                // Smooth C1 integrated tunnel speed driven by track loudness + bass + drop energy!
+                float loud = Math.Clamp(AudioAnalyzer.Loudness, 0f, 1f);
+                float tSpeed = (0.30f + loud * 0.85f + bass * 0.65f + AudioAnalyzer.DropImpact * 0.65f) * calm;
+                _tunnelZ += dt * tSpeed;
+                // Stereo L/R pan steers tunnel horizontally; treble centroid + loudness steers vertically!
+                float targetSteerX = Math.Clamp(pan * 0.42f, -0.45f, 0.45f);
+                float targetSteerY = Math.Clamp((AudioAnalyzer.SpectralCentroid - 0.35f) * 0.65f + (loud - 0.42f) * 0.38f - bass * 0.22f, -0.42f, 0.42f);
+                float sAlpha = 1f - MathF.Exp(-dt * 4.5f);
+                _tunnelSteerX += (targetSteerX - _tunnelSteerX) * sAlpha;
+                _tunnelSteerY += (targetSteerY - _tunnelSteerY) * sAlpha;
+                cb.Param0 = _tunnelZ;
+                cb.Param1 = _tunnelSteerX;
+                cb.Extra = _tunnelSteerY;
                 QuadPass(ctx, _psTunnel!, _outRtv!, OutW, OutH, null, cb);
                 break;
+            }
             case "kaleid":
                 QuadPass(ctx, _psKaleid!, _outRtv!, OutW, OutH, null, cb);
                 break;
