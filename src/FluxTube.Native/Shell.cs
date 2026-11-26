@@ -170,6 +170,41 @@ public static class Shell
 
     public static IReadOnlyList<Tab> Tabs => _tabs;
     public static bool CurrentTabOwnsMainPlayer => _tab >= 0 && _tab < _tabs.Count && _mainTabKey == _tabs[_tab].Key;
+    private static string? _lastAdaptiveVideoId;
+
+    /// <summary>
+    /// Returns the currently open video's id (WatchPage / ShortsPage / playing track / active or first video tab)
+    /// and remembers the last seen video so Settings / non-video pages always preserve its adaptive palette.
+    /// </summary>
+    public static string? AdaptiveVideoId()
+    {
+        string? vid = null;
+        if (_cur is WatchPage wp && !string.IsNullOrEmpty(wp.Video.VideoId))
+            vid = wp.Video.VideoId;
+        else if (_cur is ShortsPage sp && !string.IsNullOrEmpty(sp.CurrentId))
+            vid = sp.CurrentId;
+        else if (!string.IsNullOrEmpty(T.Current?.VideoId))
+            vid = T.Current!.VideoId;
+        else if (_tab >= 0 && _tab < _tabs.Count && _tabs[_tab].Kind == "video" && !string.IsNullOrEmpty(_tabs[_tab].Arg))
+            vid = _tabs[_tab].Arg;
+        else
+        {
+            for (int i = 0; i < _tabs.Count; i++)
+            {
+                if (_tabs[i].Kind == "video" && !string.IsNullOrEmpty(_tabs[i].Arg))
+                {
+                    vid = _tabs[i].Arg;
+                    break;
+                }
+            }
+        }
+        if (!string.IsNullOrEmpty(vid))
+        {
+            _lastAdaptiveVideoId = vid;
+            return vid;
+        }
+        return _lastAdaptiveVideoId;
+    }
     public static R TabPreviewRect => _tabPreviewRect;
     public static void SyncCookieStamp() { _cookieStamp = CookieStamp(); _wasLoggedIn = CookieStore.IsLoggedIn; }
 
@@ -1871,9 +1906,13 @@ public static class Shell
         // Single-instance active-tab shake: ONLY shake/render beat physics when THIS active WatchPage tab owns the playing audio!
         MusicStageRect = default;
         bool onActivePlayingWatch = CurrentTabOwnsMainPlayer && _cur is WatchPage wpCur && wpCur.Video.VideoId == cur?.VideoId;
-        bool musicBounceOn = AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicBassShake && onActivePlayingWatch && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test;
+        bool stagePlaying = onActivePlayingWatch && P.HasMedia && !P.Paused && !P.Muted && P.Volume > 0 && !App.Test;
+        bool shakeEnabled = AppSettings.Current.MusicBassShake && AppSettings.Current.MusicShakeLevel != "off";
+        bool musicBounceOn = AppSettings.Current.AudioOnlyMode && shakeEnabled && stagePlaying;
         MusicBounce.Update(musicBounceOn, (float)UI.Dt);
-        _shakeEnergy = 0f; _shakeBassAvg = 0f;
+        MusicStageEffects.Update(AppSettings.Current.AudioOnlyMode && AppSettings.Current.MusicImpactEffects && stagePlaying);
+        _shakeEnergy = musicBounceOn ? MusicBounce.Kick : 0f;
+        _shakeBassAvg = musicBounceOn ? MusicBounce.Bass : 0f;
 
         // Tactile frosted/matte glass backdrop behind the entire window + GPU stylization
         Gfx.DrawFrostedBackdrop(w, h);
@@ -2226,32 +2265,46 @@ public static class Shell
         }
     }
 
-    /// <summary>Full-width draped garland + multi-depth snowflakes & sparkling ice crystals (works on any theme).</summary>
-    private static float _snowTravel, _snowStorm;
+    /// <summary>Full-width draped garland + multi-depth snowflakes &amp; sparkling ice crystals (strictly monotonic left-to-right tempo-reactive wind).</summary>
+    private static float _snowTravel, _snowDriftX, _snowStorm, _snowTempo;
     private static void DrawNewYearFestive(float w, float h)
     {
         float t = (UI.Now - UI.StartTick) / 1000f;
         DrawFullWidthGarland(w, t, _garlandCols, 2.3f);
 
+        bool audioPlaying = (P.HasMedia && !P.Paused && !P.Muted) || BgPlayers.ActiveCount > 0;
+        if (audioPlaying && !App.Test) AudioAnalyzer.RequestFrame(force: true);
+
         float dt = (float)Math.Clamp(UI.Dt, 0, 0.05);
-        float target = Math.Clamp(_shakeEnergy * 1.4f + _shakeBassAvg * 0.6f + MusicStageEffects.Intensity * 0.7f, 0, 1);
-        _snowStorm += (target - _snowStorm) * (1f - MathF.Exp(-dt * (target > _snowStorm ? 9f : 1.5f)));
-        _snowTravel += dt * (1f + _snowStorm * 2.8f);
+        float tempoTarget = audioPlaying
+            ? Math.Clamp(AudioAnalyzer.LiveTempo * 0.78f + AudioAnalyzer.BuildupLevel * 0.35f + AudioAnalyzer.DropImpact * 0.55f, 0f, 1.25f)
+            : 0f;
+        _snowTempo += (tempoTarget - _snowTempo) * (1f - MathF.Exp(-dt * (tempoTarget > _snowTempo ? 4.2f : 1.8f)));
+
+        float target = audioPlaying
+            ? Math.Clamp(AudioAnalyzer.BoomEnergy * 0.85f + AudioAnalyzer.DropImpact * 0.80f + AudioAnalyzer.BuildupLevel * 0.45f + MusicStageEffects.Intensity * 0.50f, 0f, 1f)
+            : 0f;
+        _snowStorm += (target - _snowStorm) * (1f - MathF.Exp(-dt * (target > _snowStorm ? 5.5f : 1.6f)));
+
+        // Strictly monotonic forward integrals -> snow ALWAYS flows smoothly left-to-right and downward, NEVER jumps or reverses!
+        _snowTravel += dt * (0.72f + _snowTempo * 2.40f + _snowStorm * 1.85f);
+        _snowDriftX += dt * (18f + _snowTempo * 105f + _snowStorm * 95f);
+
         for (int i = 0; i < _snow.Length; i++)
         {
             var f = _snow[i];
-            float visibility = i < 96 ? 1f : Math.Clamp(_snowStorm * 160f - (i - 96), 0f, 1f);
+            float visibility = i < 96 ? 1f : Math.Clamp((_snowStorm + _snowTempo * 0.45f) * 140f - (i - 96), 0f, 1f);
             if (visibility <= 0) continue;
-            f.Alpha *= visibility;
+            float alpha = f.Alpha * visibility;
+            float depth = f.Kind == 2 ? 1.18f : (f.Kind == 1 ? 0.96f : 0.78f);
             float y = (f.Y * h + _snowTravel * f.Spd) % (h + 26) - 13;
-            float drift = MathF.Sin(t * 0.75f + f.Phase) * (f.Kind == 2 ? 28f : 18f);
-            float x = (f.X * w + drift + w) % w;
+            float x = (f.X * w + _snowDriftX * depth) % (w + 26) - 13;
 
             if (f.Kind == 2)
             {
                 // Sparkling crystal snowflake (soft halo + crisp cross/star core)
                 float pulse = 0.72f + 0.28f * MathF.Sin(t * 2.8f + f.Phase);
-                float a = f.Alpha * pulse;
+                float a = alpha * pulse;
                 float r = f.R;
                 Gfx.Circle(x, y, r * 2.2f, Gfx.Fade(0xFFBDE0FE, 0.14f * a));
                 Gfx.Fill(new R(x - r * 1.15f, y - 0.65f, r * 2.3f, 1.3f), Gfx.Fade(0xFFFFFFFF, a * 0.92f), 0.6f);
@@ -2260,8 +2313,8 @@ public static class Shell
             }
             else
             {
-                Gfx.Circle(x, y, f.R * 1.6f, Gfx.Fade(0xFFCAF0F8, f.Alpha * 0.15f));
-                Gfx.Circle(x, y, f.R, Gfx.Fade(0xFFF0F8FF, f.Alpha * 0.85f));
+                Gfx.Circle(x, y, f.R * 1.6f, Gfx.Fade(0xFFCAF0F8, alpha * 0.15f));
+                Gfx.Circle(x, y, f.R, Gfx.Fade(0xFFF0F8FF, alpha * 0.85f));
             }
         }
         UI.Animate();

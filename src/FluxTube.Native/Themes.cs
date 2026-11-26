@@ -26,9 +26,12 @@ public sealed record Theme(
 /// </summary>
 public static class Themes
 {
+    public const string AdaptiveVideoName = "Адаптивная (видео)";
+
     public static readonly Theme[] BuiltIn =
     [
         new("FluxTube", "Свои", false, 0xFF0E0E11, 0xFF151519, 0xFF1C1C22, 0xFFF2F2F4, 0xFFA6A6B2, 0xFF6C6C78, 0xFFFF3355, 0xFFFFFFFF, 0xFF7B61FF),
+        new(AdaptiveVideoName, "Свои", false, 0xFF0E0E13, 0xFF15151C, 0xFF1D1D26, 0xFFF3F3F7, 0xFFA6A7B5, 0xFF6B6C7A, 0xFF7B61FF, 0xFFFFFFFF, 0xFFFF4DA6, DefaultBackdrop: "mesh", DefaultNeonGlow: true),
         new("Новогодняя", "Свои", false, 0xFF0A1220, 0xFF101C30, 0xFF172740, 0xFFF3F7FF, 0xFF9FB5D1, 0xFF647B99, 0xFFE63946, 0xFFFFFFFF, 0xFF56CFE1, DefaultEffect: "newyear"),
         new("Чёрно-оранжевая", "Свои", false, 0xFF000000, 0xFF121212, 0xFF1E1E1E, 0xFFFFFFFF, 0xFFC6C6C6, 0xFF8A8A8A, 0xFFFF9000, 0xFF000000, 0xFFFF5400),
         new("AMOLED", "Свои", false, 0xFF000000, 0xFF0A0A0A, 0xFF151515, 0xFFEDEDED, 0xFF9A9A9A, 0xFF5E5E5E, 0xFFFF3355, 0xFFFFFFFF, 0xFF9B6CFF),
@@ -108,6 +111,7 @@ public static class Themes
 
     public static string DisplayName(string name) => !L.En ? name : name switch
     {
+        AdaptiveVideoName => "Adaptive (Video)",
         "Новогодняя" => "New Year",
         "Чёрно-оранжевая" => "Black & Orange",
         "Ультра Кавай" => "Ultra Kawaii",
@@ -144,7 +148,61 @@ public static class Themes
 
     public static Theme Current { get; private set; } = BuiltIn[0];
     public static bool IsNewYear => Current.Name == "Новогодняя";
+    public static bool IsAdaptiveVideo => Current.Name == AdaptiveVideoName;
     public static bool IsCustom(string name) => _customFiles.ContainsKey(name);
+
+    private static string? _adaptiveVid;
+    private static uint _adaptiveDom1, _adaptiveDom2;
+    private static Theme? _adaptiveLiveTheme;
+
+    /// <summary>Builds a harmonious, crisp dark palette automatically adapted from a video's dominant cover colors.</summary>
+    private static Theme BuildAdaptiveTheme(uint dom1, uint dom2)
+    {
+        static uint BoostBrand(uint c)
+        {
+            float r = ((c >> 16) & 255) / 255f, g = ((c >> 8) & 255) / 255f, b = (c & 255) / 255f;
+            float avg = (r + g + b) / 3f;
+            r = Math.Clamp(avg + (r - avg) * 1.45f, 0f, 1f);
+            g = Math.Clamp(avg + (g - avg) * 1.45f, 0f, 1f);
+            b = Math.Clamp(avg + (b - avg) * 1.45f, 0f, 1f);
+            float max = MathF.Max(r, MathF.Max(g, b));
+            if (max < 0.58f && max > 0.02f) { float k = 0.68f / max; r = MathF.Min(1f, r * k); g = MathF.Min(1f, g * k); b = MathF.Min(1f, b * k); }
+            return 0xFF000000u | ((uint)(r * 255f + 0.5f) << 16) | ((uint)(g * 255f + 0.5f) << 8) | (uint)(b * 255f + 0.5f);
+        }
+
+        uint brand = BoostBrand(dom1);
+        uint brand2 = dom2 != 0 && dom2 != dom1 ? BoostBrand(dom2) : ShiftHue(brand, 42f);
+        uint bg = Gfx.Mix(0xFF09090D, brand, 0.09f);
+        uint panel = Gfx.Mix(0xFF111117, brand, 0.14f);
+        uint card = Gfx.Mix(0xFF191922, brand, 0.18f);
+        uint text = Gfx.Mix(0xFFF4F4F8, brand, 0.05f);
+        uint sub = Gfx.Mix(0xFFA2A4B4, brand, 0.17f);
+        uint dim = Gfx.Mix(0xFF646778, brand, 0.15f);
+        uint onBrand = Luma(brand) > 0.62f ? 0xFF0E0E12 : 0xFFFFFFFF;
+        return new Theme(AdaptiveVideoName, "Свои", false, bg, panel, card, text, sub, dim, brand, onBrand, brand2,
+            DefaultBackdrop: "mesh", DefaultNeonGlow: true);
+    }
+
+    private static void SyncAdaptiveFromOpenVideo()
+    {
+        if (!IsAdaptiveVideo) return;
+        string? vid = Shell.AdaptiveVideoId();
+        if (string.IsNullOrEmpty(vid)) return;
+        if (!MusicArt.TryGetColors(vid, out uint dom1, out uint dom2)) return;
+        if (_adaptiveVid == vid && _adaptiveDom1 == dom1 && _adaptiveDom2 == dom2 && _adaptiveLiveTheme != null)
+            return;
+
+        _adaptiveVid = vid;
+        _adaptiveDom1 = dom1;
+        _adaptiveDom2 = dom2;
+        _adaptiveLiveTheme = BuildAdaptiveTheme(dom1, dom2);
+        _from = Snapshot();
+        _to = Derive(_adaptiveLiveTheme, null);
+        _startedAt = UI.Now;
+        _moving = true;
+        Changed?.Invoke();
+        UI.Animate();
+    }
 
     private static (string Group, Theme[] Items)[] BuildGroups(Theme[] list)
         => list.GroupBy(t => t.Group).Select(g => (g.Key, g.ToArray())).ToArray();
@@ -504,10 +562,12 @@ public static class Themes
             }
         }
         if (accent != null) s.Accent = accent;
+        else if (theme == AdaptiveVideoName) s.Accent = "";
         if (save) s.Save();
         Current = ByName(s.Theme);
+        if (IsAdaptiveVideo) { _adaptiveVid = null; SyncAdaptiveFromOpenVideo(); }
         _from = Snapshot();
-        _to = Derive(Current, AccentOverride);
+        _to = Derive(IsAdaptiveVideo && _adaptiveLiveTheme != null ? _adaptiveLiveTheme : Current, IsAdaptiveVideo ? null : AccentOverride);
         _startedAt = UI.Now;
         _moving = save;
         if (!save) Set(_to);
@@ -554,8 +614,9 @@ public static class Themes
 
     public static void Tick()
     {
+        SyncAdaptiveFromOpenVideo();
         if (!_moving) return;
-        var t = Math.Clamp((UI.Now - _startedAt) / 260f, 0, 1);
+        var t = Math.Clamp((UI.Now - _startedAt) / 360f, 0, 1);
         var e = t * t * (3 - 2 * t);
         Set(Blend(_from, _to, e));
         if (t >= 1) { _moving = false; Set(_to); Changed?.Invoke(); }
@@ -564,7 +625,8 @@ public static class Themes
 
     public static (uint Bg, uint Panel, uint Card, uint Text, uint Sub, uint Brand, uint OnBrand, uint Line) Preview(Theme t, bool useAccentOverride = true)
     {
-        var p = Derive(t, useAccentOverride ? AccentOverride : null);
+        var eff = t.Name == AdaptiveVideoName && _adaptiveLiveTheme != null ? _adaptiveLiveTheme : t;
+        var p = Derive(eff, t.Name == AdaptiveVideoName ? null : (useAccentOverride ? AccentOverride : null));
         return (p.Bg, p.Panel, p.Card, p.Text, p.Sub, p.Brand, p.OnBrand, p.Line);
     }
 

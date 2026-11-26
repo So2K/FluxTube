@@ -139,7 +139,7 @@ public static unsafe class Gfx
         public float A0, A1, A2, Mid;
         public void Dispose() { Brush?.Dispose(); Stops?.Dispose(); Brush = null; Stops = null; A0 = -1; }
     }
-    private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new(), new(), new(), new(), new()];
+    private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new(), new(), new(), new(), new(), new(), new(), new()];
     private static readonly LinearSlot[] _linears = [new(), new(), new()];
     private static readonly GradientStop[] _radialStopsBuf = new GradientStop[6];
     private static readonly GradientStop[] _linearStopsBuf = new GradientStop[3];
@@ -1427,23 +1427,23 @@ public static unsafe class Gfx
     public static void Line(float x1, float y1, float x2, float y2, uint color, float width = 1.5f)
         => DC.DrawLine(new Vector2(x1, y1), new Vector2(x2, y2), Scratch(color), width);
 
-    /// <summary>Hardware-accelerated Direct2D radial Gaussian-like light glow with per-zone COM brush caching (zero per-frame allocs when steady).</summary>
+    /// <summary>Hardware-accelerated Direct2D radial Gaussian-like light glow with per-zone COM brush caching (zero per-frame allocs via Brush.Opacity).</summary>
     public static void RadialGlow(float cx, float cy, float rx, float ry, float r, float g, float b, float alpha, int slot = 0)
     {
         if (alpha <= 0.004f || rx <= 1 || ry <= 1) return;
         var s = _radials[(uint)slot % (uint)_radials.Length];
-        if (s.Brush == null || MathF.Abs(s.R - r) > 0.004f || MathF.Abs(s.G - g) > 0.004f || MathF.Abs(s.B - b) > 0.004f || MathF.Abs(s.A - alpha) > 0.003f)
+        if (s.Brush == null || MathF.Abs(s.R - r) > 0.015f || MathF.Abs(s.G - g) > 0.015f || MathF.Abs(s.B - b) > 0.015f)
         {
             s.Dispose();
-            _radialStopsBuf[0] = new(0.00f, new Color4(r, g, b, alpha));
-            _radialStopsBuf[1] = new(0.20f, new Color4(r, g, b, alpha * 0.64f));
-            _radialStopsBuf[2] = new(0.42f, new Color4(r, g, b, alpha * 0.28f));
-            _radialStopsBuf[3] = new(0.65f, new Color4(r, g, b, alpha * 0.08f));
-            _radialStopsBuf[4] = new(0.84f, new Color4(r, g, b, alpha * 0.015f));
+            _radialStopsBuf[0] = new(0.00f, new Color4(r, g, b, 1.00f));
+            _radialStopsBuf[1] = new(0.20f, new Color4(r, g, b, 0.64f));
+            _radialStopsBuf[2] = new(0.42f, new Color4(r, g, b, 0.28f));
+            _radialStopsBuf[3] = new(0.65f, new Color4(r, g, b, 0.08f));
+            _radialStopsBuf[4] = new(0.84f, new Color4(r, g, b, 0.015f));
             _radialStopsBuf[5] = new(1.00f, new Color4(r, g, b, 0f));
             s.Stops = DC.CreateGradientStopCollection(_radialStopsBuf, Gamma.StandardRgb, ExtendMode.Clamp);
             s.Brush = DC.CreateRadialGradientBrush(new RadialGradientBrushProperties(new Vector2(cx, cy), Vector2.Zero, rx, ry), s.Stops);
-            s.R = r; s.G = g; s.B = b; s.A = alpha;
+            s.R = r; s.G = g; s.B = b; s.A = 1f;
         }
         else
         {
@@ -1451,6 +1451,7 @@ public static unsafe class Gfx
             s.Brush.RadiusX = rx;
             s.Brush.RadiusY = ry;
         }
+        s.Brush.Opacity = Math.Clamp(alpha, 0f, 1f);
         DC.FillEllipse(new Ellipse(new Vector2(cx, cy), rx, ry), s.Brush);
     }
 
@@ -2516,6 +2517,14 @@ public static class MusicBounce
 
     public static float BandEnergy(int band) => Active ? _bandPulse[band & 31] : 0f;
 
+    private static float ShakeLevelMul() => Services.AppSettings.Current.MusicShakeLevel switch
+    {
+        "off" => 0f,
+        "low" => 0.36f,
+        "high" => 1.18f,
+        _ => 0.85f,
+    };
+
     /// <summary>
     /// Pro VJ Coupled Spring-Chain per-element choreography: Node 0 (Cover) -> Node 1 (Likes) -> Nodes 2..15 (Buttons/Cards).
     /// Pure continuous math, zero mode branches, pure translation when textSafe=true (0 D2D glyph-atlas cost).
@@ -2524,6 +2533,13 @@ public static class MusicBounce
     {
         var prev = Gfx.DC.Transform;
         if (!Active) return prev;
+        string lvl = Services.AppSettings.Current.MusicShakeLevel;
+        if (lvl == "off") return prev;
+        // Minimal mode: buttons & chrome stay completely still; only the cover art (textSafe=false) moves gently!
+        if (lvl == "low" && textSafe) return prev;
+        float lvlMul = ShakeLevelMul();
+        amp *= lvlMul;
+        rotAmp *= lvlMul;
         int b = band & 31;
         int node = b >> 1; // 0..15 coupled physical spring chain index!
         float e = Math.Clamp(_bandPulse[b] * 0.72f + Kick * (b < 8 ? 0.48f : 0.20f), 0f, 1.55f);
@@ -2566,6 +2582,9 @@ public static class MusicBounce
         var prev = Gfx.DC.Transform;
         energy = 0f;
         if (!Active) return prev;
+        float lvlMul = ShakeLevelMul();
+        if (lvlMul <= 0.001f) return prev;
+        amp *= lvlMul;
 
         float drive = Services.AppSettings.Current.MusicImpactEffects ? 1.32f : 1.0f;
         float loud = Math.Clamp(LoudnessGain, 0.12f, 1.70f);

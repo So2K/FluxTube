@@ -61,13 +61,31 @@ public static class AudioStudioPanel
 
     private static readonly uint[] CueColors = [0xFFFF4D94, 0xFF2EDBFF, 0xFFFFB830, 0xFF39E68B];
 
-    private static readonly (string Key, string Ru, string En)[] VisStyles =
+    public static readonly (string Key, string Ru, string En)[] VisStyles =
     [
-        ("bars_wave", "Волны+спектр", "Waves+bars"),
+        ("bars_wave", "Спектр+", "Spectrum+"),
+        ("cyber", "Кибер", "Cyber"),
+        ("bars", "LED-спектр", "LED Bars"),
+        ("orbit", "Неон-волны", "Neon Waves"),
+        ("matrix", "Матрица", "Matrix"),
+        ("pulse", "Плазма", "Plasma"),
         ("ribbon", "Шёлк", "Silk"),
-        ("bars", "Спектр", "Bars"),
         ("off", "Выкл", "Off"),
     ];
+
+    public static string CurrentVisualizerName(AppSettings s)
+    {
+        var cur = VisStyles.FirstOrDefault(v => v.Key == s.VisualizerStyle);
+        return cur.Ru != null ? L.T(cur.Ru, cur.En) : L.T("Спектр+", "Spectrum+");
+    }
+
+    public static void CycleVisualizerStyle(AppSettings s)
+    {
+        int curIdx = Array.FindIndex(VisStyles, v => v.Key == s.VisualizerStyle);
+        s.VisualizerStyle = VisStyles[(curIdx + 1) % VisStyles.Length].Key;
+        s.Save();
+        App.Invalidate();
+    }
 
     public static bool IsDjFxActive(AppSettings s) =>
         _activeLoopLen > 0 || _brakeState != 0 || _holdMode != 0
@@ -600,9 +618,7 @@ public static class AudioStudioPanel
 
         // ---- Clean Non-Overlapping Footer Studio Toggles ----
         float footY = panel.Bottom - 36;
-        var curVis = VisStyles.FirstOrDefault(v => v.Key == s.VisualizerStyle);
-        var visName = curVis.Ru != null ? L.T(curVis.Ru, curVis.En) : L.T("Волны", "Waves");
-        var visLbl = L.T("Визуал: ", "Visual: ") + visName;
+        var visLbl = L.T("Визуал: ", "Visual: ") + CurrentVisualizerName(s);
         var vw = UI.PillWidth(null, visLbl) - 10;
         var vrBtn = new R(panel.Right - pad - vw, footY, vw, 26);
         Gfx.Fill(vrBtn, Th.A(0.08f), Gfx.Corner(13));
@@ -610,12 +626,7 @@ public static class AudioStudioPanel
         var vtr = Gfx.Text(visLbl, 11f, 500);
         Gfx.Draw(vtr, vrBtn.X + (vrBtn.W - vtr.W) / 2, vrBtn.Y + (vrBtn.H - vtr.H) / 2, Th.Text);
         if (UI.Click(UI.Id("dsp:vis"), vrBtn))
-        {
-            int curIdx = Array.FindIndex(VisStyles, v => v.Key == s.VisualizerStyle);
-            s.VisualizerStyle = VisStyles[(curIdx + 1) % VisStyles.Length].Key;
-            s.Save();
-            App.Invalidate();
-        }
+            CycleVisualizerStyle(s);
 
         float bx = panel.X + pad;
         float footMaxX = vrBtn.X - 8;

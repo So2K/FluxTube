@@ -147,7 +147,7 @@ public sealed class AppSettings
     public bool AutoOpenCopiedYouTubeLinks { get; set; } = false;
     /// <summary>Automatically suspends mpv video decoding (vid=no) whenever FluxTube is minimized or viewing another tab.</summary>
     public bool AutoSuspendVideoWhenHidden { get; set; } = false;
-    /// <summary>Live audio visualizer style ("bars_wave", "ribbon", "bars", "off").</summary>
+    /// <summary>Live audio visualizer style ("bars_wave", "cyber", "bars", "orbit", "matrix", "pulse", "ribbon", "off").</summary>
     public string VisualizerStyle { get; set; } = "bars_wave";
     /// <summary>Backdrop &amp; frosted glass style ("off", "soft", "matte", "mesh", "kawaii", "neon").</summary>
     public string FrostedGlass { get; set; } = "matte";
@@ -193,6 +193,8 @@ public sealed class AppSettings
     public bool SoundCloudWave { get; set; } = true;
     /// <summary>Ultra-cheap GPU camera shake + bass thump on the UI during Audio-Only Music Mode (single Matrix3x2 transform, ~0.001ms).</summary>
     public bool MusicBassShake { get; set; } = true;
+    /// <summary>Shake intensity preset in Music Mode ("off", "low", "med", "high").</summary>
+    public string MusicShakeLevel { get; set; } = "med";
     public bool MusicImpactEffects { get; set; } = true;
     public bool VideoBeatShake { get; set; } = true;
     /// <summary>User-saved custom DSP Studio presets.</summary>

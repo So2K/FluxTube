@@ -36,6 +36,7 @@ public static class MusicArt
         public int DeviceGen;
         public long ReadyAt;
         public long LastUsedAt;
+        public long FailedAt;
     }
 
     private const int MaxCachedTracks = 3;
@@ -108,6 +109,43 @@ public static class MusicArt
         }
     }
 
+    /// <summary>
+    /// CPU-only dominant color query for the Adaptive Video Theme — works on ANY tab, ANY mode (video, audio-only, Settings),
+    /// and outside Direct2D BeginDraw! Immediately kicks off thumbnail download if not cached and retries transient failures.
+    /// </summary>
+    public static bool TryGetColors(string? videoId, out uint dom1, out uint dom2)
+    {
+        dom1 = 0; dom2 = 0;
+        if (string.IsNullOrEmpty(videoId)) return false;
+        long now = UI.Now;
+        if (!_cache.TryGetValue(videoId, out var e))
+        {
+            EvictOldest(videoId);
+            e = new Entry { VideoId = videoId, State = 0, LastUsedAt = now };
+            if (_cache.TryAdd(videoId, e))
+                _ = Task.Run(() => FetchAndCropAsync(e));
+            else
+                _cache.TryGetValue(videoId, out e);
+        }
+        if (e == null) return false;
+        Volatile.Write(ref e.LastUsedAt, now);
+
+        int st = Volatile.Read(ref e.State);
+        if (st == 1 || st == 2 || (e.W > 0 && e.Dom1 != 0))
+        {
+            dom1 = e.Dom1;
+            dom2 = e.Dom2;
+            return dom1 != 0;
+        }
+        if (st == 3 && now - Volatile.Read(ref e.FailedAt) > 4000)
+        {
+            Volatile.Write(ref e.State, 0);
+            Volatile.Write(ref e.FailedAt, now);
+            _ = Task.Run(() => FetchAndCropAsync(e));
+        }
+        return false;
+    }
+
     public static Entry? Get(string? videoId)
     {
         if (string.IsNullOrEmpty(videoId)) return null;
@@ -170,7 +208,7 @@ public static class MusicArt
                 }
                 catch { }
             }
-            if (data == null) { Volatile.Write(ref e.State, 3); return; }
+            if (data == null) { Volatile.Write(ref e.FailedAt, UI.Now); Volatile.Write(ref e.State, 3); return; }
 
             var wic = Wic.Factory;
             using var stream = wic.CreateStream(data);
@@ -237,6 +275,7 @@ public static class MusicArt
         }
         catch
         {
+            Volatile.Write(ref e.FailedAt, UI.Now);
             Volatile.Write(ref e.State, 3);
         }
     }
@@ -352,8 +391,40 @@ public static class MusicArt
             if (mx < 0.65f && mx > 0.01f) { float k = 0.65f / mx; r = MathF.Min(1f, r * k); g = MathF.Min(1f, g * k); b = MathF.Min(1f, b * k); }
             return 0xFF000000u | ((uint)(r * 255f) << 16) | ((uint)(g * 255f) << 8) | (uint)(b * 255f);
         }
-        c1 = best1 >= 0 ? PackVivid(hr[best1], hg[best1], hb[best1], hw[best1], Th.Brand) : Th.Brand;
-        c2 = best2 >= 0 ? PackVivid(hr[best2], hg[best2], hb[best2], hw[best2], Th.Brand2 != 0 ? Th.Brand2 : c1) : (Th.Brand2 != 0 ? Th.Brand2 : c1);
+        // If thumbnail is muted/dark/monochrome, extract subtle real tint from all non-black pixels instead of reusing Th.Brand!
+        if (best1 < 0)
+        {
+            double sr = 0, sg = 0, sb = 0, sw = 0;
+            for (int y = 0; y < h; y += sy)
+            {
+                for (int x = 0; x < w; x += sx)
+                {
+                    int o = (y * w + x) * 4;
+                    float b = px[o] / 255f, g = px[o + 1] / 255f, r = px[o + 2] / 255f;
+                    float mx = MathF.Max(r, MathF.Max(g, b));
+                    if (mx < 0.08f) continue;
+                    double weight = 0.2 + mx;
+                    sr += r * weight; sg += g * weight; sb += b * weight; sw += weight;
+                }
+            }
+            c1 = PackVivid(sr, sg, sb, sw, 0xFF8CA6D9u);
+        }
+        else
+        {
+            c1 = PackVivid(hr[best1], hg[best1], hb[best1], hw[best1], 0xFF8CA6D9u);
+        }
+        if (best2 >= 0)
+        {
+            c2 = PackVivid(hr[best2], hg[best2], hb[best2], hw[best2], c1);
+        }
+        else
+        {
+            // Derive complementary harmonic secondary color directly from c1 (never leaking previous video's Th.Brand2)
+            float r = ((c1 >> 16) & 255) / 255f, g = ((c1 >> 8) & 255) / 255f, b = (c1 & 255) / 255f;
+            c2 = 0xFF000000u | ((uint)(Math.Clamp(g * 0.72f + b * 0.42f, 0.14f, 1f) * 255f) << 16)
+                             | ((uint)(Math.Clamp(b * 0.72f + r * 0.42f, 0.14f, 1f) * 255f) << 8)
+                             |  (uint)(Math.Clamp(r * 0.72f + g * 0.42f, 0.14f, 1f) * 255f);
+        }
     }
 
     private static unsafe void CopyPixels(IWICFormatConverter conv, int tw, int th, byte[] dst, int byteLen)
