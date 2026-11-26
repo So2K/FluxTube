@@ -2390,7 +2390,9 @@ public static unsafe class Gfx
             Assert(packOk, $"GpuEffectsPack self-test failed ({packSummary})");
             var (xpbdOk, xpbdMs) = XpbdStageFx.SelfTestXpbd();
             Assert(xpbdOk, $"XpbdStageFx self-test failed ({xpbdMs:0.00}ms)");
-            var msg7 = $"PASS [7/7] RoundedClip (cB={bCorner},iB={bInside}) + GPU Fluid ({flMs:0.00}ms,lit={flLit}) + Pack ({packSummary}) + XPBD ({xpbdMs:0.00}ms)";
+            var (drOk, drL, drR, drH) = DriftCarFx.SelfTestPhysics();
+            Assert(drOk, $"DriftCarFx physics self-test failed (L={drL}, R={drR}, wallHits={drH})");
+            var msg7 = $"PASS [7/7] RoundedClip + GPU Fluid ({flMs:0.00}ms) + Pack ({packSummary}) + XPBD ({xpbdMs:0.00}ms) + Drift(L={drL},R={drR},hits={drH})";
             Services.Paths.Log("self-test: " + msg7); Console.WriteLine(msg7);
 
             MusicBounce.Update(false, 0.016f);
