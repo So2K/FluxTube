@@ -240,59 +240,56 @@ float4 PS_MilkdropDisplay(VSOut i) : SV_Target
     return float4(c * a, a);
 }
 
-// ==================== 2. WMP 2000s ALCHEMY / PLASMA WAVES ====================
+// ==================== 2. WMP 2000s ALCHEMY / PLASMA WAVES (Calm & Hypnotic!) ====================
 float4 PS_Plasma(VSOut i) : SV_Target
 {
-    float2 p = (i.uv - 0.5) * float2(aspect, 1.0) * 2.4;
-    float t = time * (0.65 + bass * 0.35);
-    float v1 = sin(p.x * 2.2 + t * 1.3 + sin(p.y * 1.8 - t));
-    float v2 = sin(p.y * 2.5 - t * 1.1 + cos(p.x * 2.1 + t * 0.8));
-    float v3 = sin(length(p - float2(pan * 0.6, sin(t * 0.5) * 0.3)) * (4.2 + bass * 2.2) - t * 2.6);
-    float v4 = cos((p.x + p.y) * 2.0 + t * 1.7 + high * 2.0);
+    float2 p = (i.uv - 0.5) * float2(aspect, 1.0) * 2.2;
+    float t = time * 0.24;
+    float v1 = sin(p.x * 2.0 + t * 1.1 + sin(p.y * 1.6 - t * 0.8));
+    float v2 = sin(p.y * 2.2 - t * 0.9 + cos(p.x * 1.9 + t * 0.7));
+    float v3 = sin(length(p - float2(pan * 0.45, sin(t * 0.5) * 0.25)) * (3.6 + bass * 1.1) - t * 1.6);
+    float v4 = cos((p.x + p.y) * 1.8 + t * 1.1 + high * 0.8);
     float v = (v1 + v2 + v3 + v4) * 0.25;
 
-    // WMP Alchemy luminous silk ribbon contours!
-    float rib1 = exp(-abs(v) * (9.5 - bass * 3.5));
-    float rib2 = exp(-abs(v - 0.38) * 11.0);
-    float rib3 = exp(-abs(v + 0.38) * 11.0);
+    float rib1 = exp(-abs(v) * (9.0 - bass * 2.8));
+    float rib2 = exp(-abs(v - 0.38) * 10.5);
+    float rib3 = exp(-abs(v + 0.38) * 10.5);
 
-    float3 c = col0 * rib1 * (1.1 + bass * 0.7)
-             + col1 * rib2 * (0.95 + mid * 0.6)
-             + col2 * rib3 * (0.90 + high * 0.7);
-    c += (col0 * 0.25 + col1 * 0.25) * (0.5 + 0.5 * v) * (0.35 + bass * 0.35);
-    c = c / (1.0 + 0.32 * c);
+    float3 c = col0 * rib1 * (1.05 + bass * 0.6)
+             + col1 * rib2 * (0.95 + mid * 0.5)
+             + col2 * rib3 * (0.90 + high * 0.6);
+    c += (col0 * 0.22 + col1 * 0.22) * (0.5 + 0.5 * v) * (0.32 + bass * 0.30);
+    c = c / (1.0 + 0.34 * c);
 
-    float a = clamp((rib1 * 0.78 + rib2 * 0.62 + rib3 * 0.58 + 0.14) * calm, 0.0, 0.88) * edgeFade(i.uv);
+    float a = clamp((rib1 * 0.76 + rib2 * 0.60 + rib3 * 0.56 + 0.12) * calm, 0.0, 0.86) * edgeFade(i.uv);
     return float4(c * a, a);
 }
 
-// ==================== 3. 2000s 3D NEON HYPER-TUNNEL ====================
+// ==================== 3. 2000s 3D NEON HYPER-TUNNEL (Smooth Cruise Speed!) ====================
 float4 PS_Tunnel(VSOut i) : SV_Target
 {
     float2 p = (i.uv - 0.5) * float2(aspect, 1.0) * 2.0;
-    p += float2(sin(time * 0.7) * 0.18 + pan * 0.22, cos(time * 0.55) * 0.14);
+    p += float2(sin(time * 0.35) * 0.14 + pan * 0.18, cos(time * 0.28) * 0.10);
     float r = max(length(p), 0.04);
     float ang = atan2(p.y, p.x);
 
     float depth = 1.0 / r;
-    float travel = time * (2.2 + bass * 1.8) + hit * 0.6;
-    float twist = ang + depth * (0.28 + sin(time * 0.4) * 0.16);
+    float travel = time * 0.68 + bass * 0.18;
+    float twist = ang + depth * (0.24 + sin(time * 0.22) * 0.12);
 
-    // Glowing rings + longitudinal neon rails
-    float ringGrid = pow(0.5 + 0.5 * sin(depth * 4.5 - travel * 3.0), 8.0);
+    float ringGrid = pow(0.5 + 0.5 * sin(depth * 4.2 - travel * 2.6), 8.0);
     float railGrid = pow(0.5 + 0.5 * sin(twist * 8.0), 10.0);
-    float pulseWave = pow(0.5 + 0.5 * sin(depth * 2.0 - travel * 5.0), 4.0) * (0.4 + bass * 1.2);
+    float pulseWave = pow(0.5 + 0.5 * sin(depth * 1.8 - travel * 3.8), 4.0) * (0.35 + bass * 1.0);
     float fog = smoothstep(0.04, 0.42, r);
 
-    float3 c = col0 * ringGrid * (1.1 + bass * 0.8)
-             + col1 * railGrid * (0.95 + high * 0.85)
-             + col2 * pulseWave * 0.65;
-    // Central warp core glow
-    c += lerp(col1, float3(1, 1, 1), 0.55) * exp(-r * 4.2) * (0.55 + bass * 0.75);
+    float3 c = col0 * ringGrid * (1.05 + bass * 0.75)
+             + col1 * railGrid * (0.90 + high * 0.75)
+             + col2 * pulseWave * 0.60;
+    c += lerp(col1, float3(1, 1, 1), 0.55) * exp(-r * 4.2) * (0.50 + bass * 0.65);
     c *= fog * calm;
-    c = c / (1.0 + 0.32 * c);
+    c = c / (1.0 + 0.34 * c);
 
-    float a = clamp(max(c.r, max(c.g, c.b)) * 1.15, 0.0, 0.90) * edgeFade(i.uv);
+    float a = clamp(max(c.r, max(c.g, c.b)) * 1.12, 0.0, 0.88) * edgeFade(i.uv);
     return float4(c * a, a);
 }
 

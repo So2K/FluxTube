@@ -461,44 +461,46 @@ public static unsafe class MusicStageEffects
         _palCol1 = c1;
         _palCol2 = c2;
 
-        var (r1, g1, b1) = VividColor(c1);
-        var (r2, g2, b2) = VividColor(c2);
+        var (br1, bg1, bb1) = VividColor(c1);
+        // Multi-hue triadic flame gradient so flames NEVER blend invisibly into a single-color background!
+        var (r1, g1, b1) = RotateHue(br1, bg1, bb1, 0.85f);  // warm contrasting outer tongue
+        var (r2, g2, b2) = RotateHue(br1, bg1, bb1, -1.65f); // vivid contrasting inner flame core
+        var (r3, g3, b3) = RotateHue(br1, bg1, bb1, 2.25f);  // luminous jewel tip accent
 
         for (int i = 0; i < 256; i++)
         {
             float t = i / 255f;
-            // Smooth translucent flame curve: ZERO flat white clipping blocks, silky feathered edges & luminous core!
+            // Smooth multi-color translucent flame gradient: ZERO white slabs, rich 3-tone contrast!
             float r, g, b, a;
-            if (t < 0.30f)
+            if (t < 0.28f)
             {
-                float k = t / 0.30f;
-                r = r1 * (0.25f + 0.55f * k); g = g1 * (0.25f + 0.55f * k); b = b1 * (0.25f + 0.55f * k);
-                a = k * k * 0.20f;
+                float k = t / 0.28f;
+                r = r1 * (0.35f + 0.65f * k); g = g1 * (0.35f + 0.65f * k); b = b1 * (0.35f + 0.65f * k);
+                a = k * k * 0.24f;
             }
-            else if (t < 0.68f)
+            else if (t < 0.64f)
             {
-                float k = (t - 0.30f) / 0.38f;
-                r = r1 * (0.80f + 0.20f * k);
-                g = g1 * (0.80f + 0.20f * k);
-                b = b1 * (0.80f + 0.20f * k);
-                a = 0.20f + 0.36f * k;
-            }
-            else if (t < 0.92f)
-            {
-                float k = (t - 0.68f) / 0.24f;
+                float k = (t - 0.28f) / 0.36f;
                 r = r1 + (r2 - r1) * k;
                 g = g1 + (g2 - g1) * k;
                 b = b1 + (b2 - b1) * k;
-                a = 0.56f + 0.18f * k;
+                a = 0.24f + 0.38f * k;
+            }
+            else if (t < 0.90f)
+            {
+                float k = (t - 0.64f) / 0.26f;
+                r = r2 + (r3 - r2) * k;
+                g = g2 + (g3 - g2) * k;
+                b = b2 + (b3 - b2) * k;
+                a = 0.62f + 0.16f * k;
             }
             else
             {
-                // Subtle translucent hot filament only at the very top 8% (never opaque white slab!)
-                float k = (t - 0.92f) / 0.08f;
-                r = r2 + (1f - r2) * k * 0.45f;
-                g = g2 + (1f - g2) * k * 0.45f;
-                b = b2 + (1f - b2) * k * 0.45f;
-                a = 0.74f + 0.08f * k;
+                float k = (t - 0.90f) / 0.10f;
+                r = r3 + (1f - r3) * k * 0.45f;
+                g = g3 + (1f - g3) * k * 0.45f;
+                b = b3 + (1f - b3) * k * 0.45f;
+                a = 0.78f + 0.08f * k;
             }
             uint ba = (uint)Math.Clamp(a * 255f + 0.5f, 0, 255);
             uint br = (uint)Math.Clamp(r * a * 255f + 0.5f, 0, 255);
@@ -804,7 +806,7 @@ public static unsafe class MusicStageEffects
         string mode = !sOpt.MusicImpactEffects ? "off" : (sOpt.MusicStageEffect ?? "fluid");
         if (mode == "off") return;
 
-        bool fireMode = false;
+        bool fireMode = string.Equals(mode, "fire", StringComparison.OrdinalIgnoreCase);
         float fire = _fireIntensity;
         float qDim = AudioAnalyzer.QuietDim;
         if (fireMode && fire <= 0.01f && qDim <= 0.04f) return;
@@ -863,8 +865,8 @@ public static unsafe class MusicStageEffects
             }
             UI.Animate();
         }
-        // ---- 2B. GPU SHADER PACK: MilkDrop / Plasma 2000 / Tunnel / Kaleidoscope / Synthwave / Water / Ferro / Neural / Automaton / Multi-Gradient GPU Fire ----
-        else if (mode is "milkdrop" or "plasma" or "tunnel" or "kaleid" or "synthwave" or "water" or "ferro" or "physarum" or "rd" or "fire")
+        // ---- 2B. GPU SHADER PACK: MilkDrop / Plasma 2000 / Tunnel / Water / Ferro ----
+        else if (mode is "milkdrop" or "plasma" or "tunnel" or "water" or "ferro")
         {
             bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.34f;
             if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
@@ -881,13 +883,18 @@ public static unsafe class MusicStageEffects
             }
             UI.Animate();
         }
-        // ---- 2C. XPBD PHYSICAL SILK MEMBRANE ----
+        // ---- 2C. AUDIO-REACTIVE TOP-DOWN DRIFT CAR ----
+        else if (mode == "drift")
+        {
+            DriftCarFx.Draw(stage, dom1, dom2);
+        }
+        // ---- 2D. XPBD PHYSICAL SILK MEMBRANE ----
         else if (mode == "xpbd_cloth")
         {
             XpbdStageFx.DrawXpbdCloth(stage, dom1, dom2);
         }
-        // ---- 2D. Legacy fallback (unused now that Fire runs on 1024x576 GPU) ----
-        else if (false && fire > 0.01f)
+        // ---- 2E. RESTORED MULTI-GRADIENT TRANSLUCENT PHYSICAL SIDE FIRE ----
+        else if (fireMode && fire > 0.01f)
         {
             float bass = AudioAnalyzer.BassEnergy;
             StepFireSimulation(fire, t, dom1, dom2);
