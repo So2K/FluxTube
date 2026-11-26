@@ -209,61 +209,90 @@ public sealed class StreamProxy
     }
 
     /// <summary>
-    /// Silently pre-buffers the FLAC byte window around the current playback timestamp straight into MediaCache
-    /// while YouTube audio is still playing — so switching to FLAC reads from SSD in ~2ms with ZERO audible pause!
+    /// Downloads the entire Lossless FLAC file into MediaCache in parallel (3 concurrent 1.5 MB workers)
+    /// while YouTube audio plays uninterrupted. Reports 0..100% progress and returns true once 100% of bytes
+    /// are safely on SSD so mpv's FLAC binary-search seek happens in &lt;1ms with ZERO video/audio stalls!
     /// </summary>
-    public async Task PrefillWindowAsync(string localUrl, double currentPosSec, double totalDurationSec, CancellationToken ct = default)
+    public async Task<bool> DownloadFullToCacheAsync(string localUrl, Action<int>? onProgress, CancellationToken ct)
     {
         var key = localUrl[(localUrl.LastIndexOf('/') + 1)..];
-        if (!_entries.TryGetValue(key, out var e) || !e.External) return;
+        if (!_entries.TryGetValue(key, out var e) || !e.External) return false;
         try
         {
-            using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            limit.CancelAfter(TimeSpan.FromSeconds(8));
-            if (e.Length <= 0) await ProbeLengthAsync(e, limit.Token).ConfigureAwait(false);
+            if (e.Length <= 0) await ProbeLengthAsync(e, ct).ConfigureAwait(false);
             var cache = e.Cache;
-            if (cache == null || e.Length <= 0 || cache.Complete) return;
+            if (cache == null || e.Length <= 0) return false;
+            if (cache.Complete) { onProgress?.Invoke(100); return true; }
 
             Interlocked.Increment(ref cache.Users);
             try
             {
-                // 1. Ensure header (0..128KB) is on disk
-                long headWant = Math.Min(128 * 1024L, e.Length);
-                if (cache.Covered(0) < headWant)
+                const long chunkSize = 1536 * 1024; // 1.5 MB chunks across 3 parallel HTTP/2 streams
+                var jobs = new ConcurrentQueue<(long From, long To)>();
+                long pos = 0;
+                while (pos < e.Length)
                 {
-                    using var hr = await FetchAsync(e, 0, headWant - 1, limit.Token).ConfigureAwait(false);
-                    if (hr.IsSuccessStatusCode)
-                    {
-                        var hb = await hr.Content.ReadAsByteArrayAsync(limit.Token).ConfigureAwait(false);
-                        if (hb.Length > 0) cache.Write(0, hb);
-                    }
+                    var cov = cache.Covered(pos);
+                    if (cov > 0) { pos += cov; continue; }
+                    long to = Math.Min(e.Length - 1, pos + chunkSize - 1);
+                    to = Math.Min(to, cache.NextStart(pos) - 1);
+                    if (to < pos) { pos++; continue; }
+                    jobs.Enqueue((pos, to));
+                    pos = to + 1;
                 }
 
-                // 2. Pre-buffer ~2.2 MB around currentPosSec so mpv seeks & plays instantly from SSD
-                double frac = (totalDurationSec > 1 && currentPosSec > 1)
-                    ? Math.Clamp(currentPosSec / totalDurationSec, 0.0, 0.96)
-                    : 0.0;
-                long target = (long)(e.Length * frac);
-                long from = Math.Max(0, target - 256 * 1024L);
-                long to = Math.Min(e.Length - 1, from + 2_200_000L);
-
-                if (cache.Covered(from) < (to - from + 1))
+                int lastPct = -1;
+                void Report()
                 {
-                    long fetchFrom = from + cache.Covered(from);
-                    if (fetchFrom <= to)
+                    int pct = (int)Math.Clamp(cache.Bytes * 100L / Math.Max(1, e.Length), 0, 99);
+                    if (pct > Volatile.Read(ref lastPct))
                     {
-                        using var wr = await FetchAsync(e, fetchFrom, to, limit.Token).ConfigureAwait(false);
-                        if (wr.IsSuccessStatusCode)
+                        Volatile.Write(ref lastPct, pct);
+                        onProgress?.Invoke(pct);
+                    }
+                }
+                Report();
+
+                int workers = Math.Min(3, Math.Max(1, jobs.Count));
+                var tasks = new Task[workers];
+                for (int w = 0; w < workers; w++)
+                {
+                    tasks[w] = Task.Run(async () =>
+                    {
+                        while (!ct.IsCancellationRequested && jobs.TryDequeue(out var job))
                         {
-                            var wb = await wr.Content.ReadAsByteArrayAsync(limit.Token).ConfigureAwait(false);
-                            if (wb.Length > 0) cache.Write(fetchFrom, wb);
+                            for (int attempt = 0; attempt < 3 && !ct.IsCancellationRequested; attempt++)
+                            {
+                                try
+                                {
+                                    using var resp = await FetchAsync(e, job.From, job.To, ct, forceNewConnection: attempt > 0).ConfigureAwait(false);
+                                    if (!resp.IsSuccessStatusCode) { await Task.Delay(350 * (attempt + 1), ct).ConfigureAwait(false); continue; }
+                                    var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+                                    if (bytes.Length == job.To - job.From + 1 || (job.To == e.Length - 1 && bytes.Length > 0))
+                                    {
+                                        cache.Write(job.From, bytes);
+                                        Report();
+                                        break;
+                                    }
+                                }
+                                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+                                catch { await Task.Delay(400 * (attempt + 1), ct).ConfigureAwait(false); }
+                            }
                         }
-                    }
+                    }, ct);
                 }
+
+                await Task.WhenAll(tasks).ConfigureAwait(false);
+                if (cache.Complete)
+                {
+                    onProgress?.Invoke(100);
+                    return true;
+                }
+                return false;
             }
             finally { Interlocked.Decrement(ref cache.Users); }
         }
-        catch { }
+        catch { return false; }
     }
 
     /// <summary>

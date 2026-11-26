@@ -143,6 +143,7 @@ public sealed class PlaybackTracker
         Flush();
         var gen = ++_gen;
         Interlocked.Increment(ref _losslessGen);
+        try { _losslessCts?.Cancel(); } catch { }
         _losslessAttemptedId = null;
         Retrying = false;
         _fileLoaded = _timeValid = false;
@@ -384,71 +385,103 @@ public sealed class PlaybackTracker
         return "searching";
     }
 
+    private CancellationTokenSource? _losslessCts;
+
     private void StartLosslessUpgrade(VideoItem v, double durationSec, bool manual)
     {
         var playGen = _gen;
         var lGen = Interlocked.Increment(ref _losslessGen);
+        try { _losslessCts?.Cancel(); } catch { }
+        var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+        _losslessCts = cts;
+        var ct = cts.Token;
+
         var id = v.VideoId;
         var title = v.Title;
         var channel = v.Channel;
         _p.LosslessSearching = true;
+        _p.LosslessDownloadPercent = -1;
         CurrentChanged?.Invoke();
 
         _ = Task.Run(async () =>
         {
             try
             {
-                // 1. Instant hit from local FLAC disk cache (0 ms, works offline when complete; auto-resumes URL when partial!)
+                // 1. Instant 0ms hit if 100% of FLAC is already on SSD!
                 var cachedFlac = MediaCache.FindLossless(id);
-                if (cachedFlac != null)
+                if (cachedFlac != null && cachedFlac.Complete)
                 {
                     var localUrl = StreamProxy.Instance.RegisterCached(cachedFlac);
                     int estKbps = (cachedFlac.Length > 0 && durationSec > 1) ? (int)Math.Round(cachedFlac.Length * 8.0 / durationSec / 1000.0) : 0;
                     UiThread.Post(() =>
                     {
                         if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen) || _p.CurrentVideoId != id) return;
-                        _p.AttachLosslessTrack(localUrl, cachedFlac.Complete ? "Cache" : "FLAC", autoSelect: true, expectedBitrateKbps: estKbps);
-                        Paths.Log($"lossless {id}: instant attach from disk cache ({estKbps} kbps{(cachedFlac.Complete ? ", complete" : ", partial -> resuming")})");
+                        _p.AttachLosslessTrack(localUrl, "Cache", autoSelect: true, expectedBitrateKbps: estKbps);
+                        Paths.Log($"lossless {id}: instant 100% SSD attach ({estKbps} kbps)");
                         CurrentChanged?.Invoke();
                     });
-                    if (cachedFlac.Complete) return;
-
-                    // Partial FLAC cache: immediately supply upstream URL to the SAME StreamProxy entry so playback never truncates!
-                    var resumeMatch = await LosslessResolver.ResolveAsync(id, title, channel, durationSec, manualRequest: true).ConfigureAwait(false);
-                    if (resumeMatch != null)
-                    {
-                        var resumedUrl = StreamProxy.Instance.RegisterLossless(resumeMatch.Url, id, cachedFlac.Length, resumeMatch.Mime);
-                        StreamProxy.Instance.StartBackgroundDownload(resumedUrl);
-                    }
                     return;
                 }
 
-                // 2. Auto-resolve from live Monochrome / HiFi-API / custom self-hosted pool
-                var match = await LosslessResolver.ResolveAsync(id, title, channel, durationSec, manualRequest: manual).ConfigureAwait(false);
-                if (match == null)
+                // 2. Resolve FLAC URL in background while YouTube Opus plays completely uninterrupted!
+                var match = await LosslessResolver.ResolveAsync(id, title, channel, durationSec, manualRequest: manual, ct: ct).ConfigureAwait(false);
+                if (match == null || ct.IsCancellationRequested)
                 {
                     UiThread.Post(() =>
                     {
                         if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen)) return;
                         _p.LosslessSearching = false;
+                        _p.LosslessDownloadPercent = -1;
                         if (manual) _p.ShowText(L.T("FLAC для этого трека не найден", "No Lossless FLAC found for this track"), 2400);
                         CurrentChanged?.Invoke();
                     });
                     return;
                 }
 
-                var proxyUrl = StreamProxy.Instance.RegisterLossless(match.Url, id, match.ContentLength, match.Mime, initialHead: match.InitialHead);
-                // Silently pre-buffer ~2.2 MB around the current playback timestamp while YouTube keeps playing -> ZERO pause on switch!
+                long knownLen = cachedFlac?.Length > 0 ? cachedFlac.Length : match.ContentLength;
+                var proxyUrl = StreamProxy.Instance.RegisterLossless(match.Url, id, knownLen, match.Mime, initialHead: match.InitialHead);
                 double refDur = match.DurationSec > 1 ? match.DurationSec : durationSec;
-                double curPos = _timeValid ? _p.TimePos : _startPos;
-                await StreamProxy.Instance.PrefillWindowAsync(proxyUrl, curPos, refDur).ConfigureAwait(false);
-                StreamProxy.Instance.StartBackgroundDownload(proxyUrl);
+                int matchKbps = (knownLen > 0 && refDur > 1) ? (int)Math.Round(knownLen * 8.0 / refDur / 1000.0) : 0;
 
-                int matchKbps = (match.ContentLength > 0 && refDur > 1) ? (int)Math.Round(match.ContentLength * 8.0 / refDur / 1000.0) : 0;
+                // 3. Download 100% of the FLAC to SSD in 3 parallel streams while YouTube keeps playing (ZERO interruptions!)
+                UiThread.Post(() =>
+                {
+                    if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen)) return;
+                    _p.LosslessSearching = false;
+                    _p.LosslessDownloadPercent = 1;
+                    CurrentChanged?.Invoke();
+                });
+
+                bool ok = await StreamProxy.Instance.DownloadFullToCacheAsync(proxyUrl, pct =>
+                {
+                    if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen)) return;
+                    _p.LosslessDownloadPercent = pct;
+                    UiThread.Post(() =>
+                    {
+                        if (playGen == _gen && lGen == Volatile.Read(ref _losslessGen)) CurrentChanged?.Invoke();
+                    });
+                }, ct).ConfigureAwait(false);
+
+                if (!ok || ct.IsCancellationRequested)
+                {
+                    UiThread.Post(() =>
+                    {
+                        if (playGen == _gen && lGen == Volatile.Read(ref _losslessGen))
+                        {
+                            _p.LosslessDownloadPercent = -1;
+                            CurrentChanged?.Invoke();
+                        }
+                    });
+                    return;
+                }
+
+                // 4. 100% of FLAC is now on SSD! Smoothly blend from YouTube Opus -> SSD FLAC with ZERO video/audio stall!
                 UiThread.Post(() =>
                 {
                     if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen) || _p.CurrentVideoId != id) return;
-                    bool autoSelect = manual || match.ExactTiming || AppSettings.Current.AudioOnlyMode;
+                    // If the track is already in its last 5 seconds, keep it cached for next play instead of blending at the very end
+                    bool nearEnd = _p.Duration > 15 && (_p.Duration - _p.TimePos) < 5.0;
+                    bool autoSelect = !nearEnd && (manual || match.ExactTiming || AppSettings.Current.AudioOnlyMode);
                     _p.AttachLosslessTrack(proxyUrl, match.SourceLabel, autoSelect, timingDiff: !match.ExactTiming, expectedBitrateKbps: matchKbps);
                     if (autoSelect)
                         _p.ShowText($"ULTRA FLAC · {match.SourceLabel}", 2000);
@@ -463,6 +496,7 @@ public sealed class PlaybackTracker
                     if (playGen == _gen && lGen == Volatile.Read(ref _losslessGen))
                     {
                         _p.LosslessSearching = false;
+                        _p.LosslessDownloadPercent = -1;
                         CurrentChanged?.Invoke();
                     }
                 });

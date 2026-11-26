@@ -2072,10 +2072,11 @@ public sealed class WatchPage : IPage
                 bool bdLossless = isThisStagePlaying && mpv.IsLosslessAudio;
                 bool bdHiRes = isThisStagePlaying && mpv.IsHiResLossless;
                 bool bdHiFi = isThisStagePlaying && mpv.IsHiFiAudio;
-                bool bdBuffering = isThisStagePlaying && mpv.Buffering;
+                bool bdDownloading = isThisStagePlaying && mpv.LosslessDownloading;
+                int dlPct = bdDownloading ? mpv.LosslessDownloadPercent : 0;
                 string liveBadge = isThisStagePlaying
-                    ? (mpv.LosslessSearching && !bdLossless ? L.T("Поиск FLAC…", "Finding FLAC…")
-                        : (bdBuffering && bdLossless ? L.T($"Загрузка {mpv.TidalQualityLabel}…", $"Buffering {mpv.TidalQualityLabel}…") : mpv.TidalQualityLabel))
+                    ? (bdDownloading ? $"{mpv.AudioCodec.ToUpperInvariant()} → FLAC {dlPct}%"
+                        : (mpv.LosslessSearching && !bdLossless ? L.T("Поиск FLAC…", "Finding FLAC…") : mpv.TidalQualityLabel))
                     : "HD";
                 var badgeTxt = sOpt.AudioFxEnabled
                     ? $"{AudioDsp.DisplayPresetName(sOpt)} · {liveBadge}"
@@ -2137,6 +2138,17 @@ public sealed class WatchPage : IPage
                         uint textCol = bdHiRes ? 0xFFFFD86B : 0xFF20F0BE;
                         Gfx.Stroke(bdR, borderCol, bdRad, 1.25f);
                         Gfx.Draw(bdRun, bdR.X + bdPadX, bdR.Y + (bdR.H - bdRun.H) * 0.5f, textCol);
+                    }
+                    else if (bdDownloading)
+                    {
+                        // Live FLAC background download progress fill inside the pill while YouTube plays uninterrupted!
+                        Gfx.Fill(bdR, Gfx.Fade(0xFF0A1012, 0.90f), bdRad);
+                        float fillW = MathF.Max(bdRad * 2f, bdR.W * (dlPct / 100f));
+                        Gfx.PushClip(new R(bdR.X, bdR.Y, MathF.Min(bdR.W, fillW), bdR.H));
+                        Gfx.Fill(bdR, Gfx.Fade(0xFF1DE9B6, 0.24f), bdRad);
+                        Gfx.PopClip();
+                        Gfx.Stroke(bdR, Gfx.Fade(0xFF1DE9B6, 0.55f), bdRad, 1.1f);
+                        Gfx.Draw(bdRun, bdR.X + bdPadX, bdR.Y + (bdR.H - bdRun.H) * 0.5f, 0xFF7CFFE0);
                     }
                     else
                     {

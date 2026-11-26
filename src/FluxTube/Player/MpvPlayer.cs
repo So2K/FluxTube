@@ -81,6 +81,8 @@ public sealed class MpvPlayer : IDisposable
     // Zero-Wait Lossless FLAC state for the currently playing item
     public bool HasLosslessTrack { get; private set; }
     public bool LosslessSearching { get; set; }
+    public int LosslessDownloadPercent { get; set; } = -1;
+    public bool LosslessDownloading => LosslessDownloadPercent >= 0 && LosslessDownloadPercent < 100 && !IsLosslessAudio;
     public bool LosslessTimingDiff { get; private set; }
     public string? LosslessSourceLabel { get; private set; }
     public int ExpectedLosslessBitrateKbps { get; private set; }
@@ -373,7 +375,7 @@ public sealed class MpvPlayer : IDisposable
         CurrentVideoId = videoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         AudioCodec = ""; AudioSampleFormat = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
-        HasLosslessTrack = false; LosslessSearching = false; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
+        HasLosslessTrack = false; LosslessSearching = false; LosslessDownloadPercent = -1; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
         if (startPaused) { Paused = true; Set("pause", "yes"); }
         // Keep vid strictly as a global property (never a sticky per-file loadfile option, which races with SetVideoEnabled(true)!)
         Set("vid", VideoEnabled ? "auto" : "no");
@@ -392,7 +394,7 @@ public sealed class MpvPlayer : IDisposable
         CurrentVideoId = s.VideoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
         AudioCodec = ""; AudioSampleFormat = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
-        HasLosslessTrack = false; LosslessSearching = false; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
+        HasLosslessTrack = false; LosslessSearching = false; LosslessDownloadPercent = -1; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
         if (keepPause) { Paused = true; Set("pause", "yes"); }
         // Direct HLS manifests (live streams) bypass StreamProxy, so pass the user's proxy directly when non-loopback
         bool directRemote = s.Video.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !s.Video.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)
@@ -416,7 +418,7 @@ public sealed class MpvPlayer : IDisposable
         Interlocked.Increment(ref _loadGen);
         Command("stop");
         CurrentUrl = null; CurrentVideoId = null;
-        HasLosslessTrack = false; LosslessSearching = false; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
+        HasLosslessTrack = false; LosslessSearching = false; LosslessDownloadPercent = -1; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
     }
 
@@ -430,6 +432,7 @@ public sealed class MpvPlayer : IDisposable
         if (!IsReady || !HasMedia) return;
         HasLosslessTrack = true;
         LosslessSearching = false;
+        LosslessDownloadPercent = 100;
         LosslessSourceLabel = sourceLabel;
         LosslessTimingDiff = timingDiff;
         ExpectedLosslessBitrateKbps = expectedBitrateKbps;
@@ -441,7 +444,7 @@ public sealed class MpvPlayer : IDisposable
             return;
         }
 
-        // Smooth studio blend transition: stage FLAC -> soft 70ms dip -> instant SSD switch -> soft 110ms bloom back to full volume!
+        // Seamless SSD studio-blend: 100% of FLAC is already on SSD -> gentle 96ms fade-down -> <2ms local switch -> gentle 160ms bloom-up!
         var baseVol = Volume;
         var loadGen = Volatile.Read(ref _loadGen);
         var rampGen = Interlocked.Increment(ref _volRampGen);
@@ -451,8 +454,8 @@ public sealed class MpvPlayer : IDisposable
         {
             try
             {
-                // Soft dip down to 35% over 4 steps (~64ms)
-                double[] down = [0.80, 0.62, 0.46, 0.35];
+                // Soft dip down to 25% over 6 steps (~96ms)
+                double[] down = [0.85, 0.70, 0.56, 0.44, 0.33, 0.25];
                 foreach (var k in down)
                 {
                     if (loadGen != Volatile.Read(ref _loadGen) || rampGen != Volatile.Read(ref _volRampGen) || !IsReady) return;
@@ -460,11 +463,11 @@ public sealed class MpvPlayer : IDisposable
                     await Task.Delay(16).ConfigureAwait(false);
                 }
                 if (loadGen != Volatile.Read(ref _loadGen) || !IsReady) return;
-                // Switch to pre-buffered SSD FLAC track right at the quietest point of the dip
+                // Instant switch to 100%-SSD FLAC track right at the quietest point of the dip (0 network stall!)
                 Set("aid", "2");
-                await Task.Delay(24).ConfigureAwait(false);
-                // Smooth bloom back up to full volume over 6 steps (~96ms)
-                double[] up = [0.48, 0.64, 0.78, 0.89, 0.96, 1.0];
+                await Task.Delay(20).ConfigureAwait(false);
+                // Smooth bloom back up to full volume over 9 steps (~144ms)
+                double[] up = [0.34, 0.45, 0.56, 0.67, 0.77, 0.85, 0.92, 0.97, 1.0];
                 foreach (var k in up)
                 {
                     if (loadGen != Volatile.Read(ref _loadGen) || rampGen != Volatile.Read(ref _volRampGen) || !IsReady) return;
