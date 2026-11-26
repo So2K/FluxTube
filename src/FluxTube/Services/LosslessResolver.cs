@@ -128,22 +128,27 @@ public static partial class LosslessResolver
                     ? await SearchMonochromeAsync(src.BaseUrl, query, ct).ConfigureAwait(false)
                     : await SearchHifiApiAsync(src.BaseUrl, query, ct).ConfigureAwait(false);
 
-                // If artist+title search yielded nothing and title differs from query, retry with title alone
-                if (candidates.Count == 0 && !string.Equals(query, trackTitle, StringComparison.OrdinalIgnoreCase))
+                var best = PickBestCandidate(candidates, artist, trackTitle, ytDurationSec);
+
+                // If artist+title search yielded nothing or weak score, retry with title alone (helps with transliterated artist/channel names)
+                if ((best == null || best.Value.Score < 0.55) && !string.Equals(query, trackTitle, StringComparison.OrdinalIgnoreCase))
                 {
-                    candidates = src.Type == "monochrome"
+                    var more = src.Type == "monochrome"
                         ? await SearchMonochromeAsync(src.BaseUrl, trackTitle, ct).ConfigureAwait(false)
                         : await SearchHifiApiAsync(src.BaseUrl, trackTitle, ct).ConfigureAwait(false);
+                    if (more.Count > 0)
+                    {
+                        var best2 = PickBestCandidate(more, artist, trackTitle, ytDurationSec);
+                        if (best2 != null && (best == null || best2.Value.Score > best.Value.Score))
+                            best = best2;
+                    }
                 }
 
-                if (candidates.Count == 0) continue;
-
-                var best = PickBestCandidate(candidates, artist, trackTitle, ytDurationSec);
                 if (best == null) continue;
 
                 var (cand, score, diffSec) = best.Value;
-                if (score < 0.52) continue;
-                if (ytDurationSec > 0 && cand.DurationSec > 0 && diffSec > 12.0) continue;
+                if (score < 0.48) continue;
+                if (ytDurationSec > 0 && cand.DurationSec > 0 && diffSec > 14.0) continue;
 
                 var resolved = cand.SourceType == "monochrome"
                     ? await ResolveMonochromeStreamAsync(videoId, cand, diffSec, ytDurationSec, ct).ConfigureAwait(false)
@@ -553,7 +558,7 @@ public static partial class LosslessResolver
     {
         var set = new HashSet<string>(StringComparer.Ordinal);
         if (string.IsNullOrWhiteSpace(s)) return set;
-        var norm = s.Normalize(NormalizationForm.FormKD);
+        var norm = TransliterateToLatin(s.Normalize(NormalizationForm.FormKD));
         var sb = new StringBuilder(norm.Length);
         foreach (var ch in norm)
         {
@@ -570,11 +575,83 @@ public static partial class LosslessResolver
         return set;
     }
 
+    /// <summary>
+    /// Normalizes Cyrillic (Russian/Ukrainian) into canonical Latin so YouTube transliterated titles
+    /// ("PAPIN TANK", "MORGENSHTERN") match catalog Cyrillic titles ("ПАПИН ТАНК", "МОРГЕНШТЕРН") seamlessly.
+    /// </summary>
+    private static string TransliterateToLatin(string s)
+    {
+        var sb = new StringBuilder(s.Length + 8);
+        foreach (var raw in s)
+        {
+            char c = char.ToLowerInvariant(raw);
+            switch (c)
+            {
+                case 'а': sb.Append('a'); break;
+                case 'б': sb.Append('b'); break;
+                case 'в': sb.Append('v'); break;
+                case 'г': sb.Append('g'); break;
+                case 'д': sb.Append('d'); break;
+                case 'е': case 'ё': case 'э': sb.Append('e'); break;
+                case 'ж': sb.Append("zh"); break;
+                case 'з': sb.Append('z'); break;
+                case 'и': case 'й': case 'і': case 'ї': sb.Append('i'); break;
+                case 'к': sb.Append('k'); break;
+                case 'л': sb.Append('l'); break;
+                case 'м': sb.Append('m'); break;
+                case 'н': sb.Append('n'); break;
+                case 'о': sb.Append('o'); break;
+                case 'п': sb.Append('p'); break;
+                case 'р': sb.Append('r'); break;
+                case 'с': sb.Append('s'); break;
+                case 'т': sb.Append('t'); break;
+                case 'у': sb.Append('u'); break;
+                case 'ф': sb.Append('f'); break;
+                case 'х': sb.Append('h'); break;
+                case 'ц': sb.Append("ts"); break;
+                case 'ч': sb.Append("ch"); break;
+                case 'ш': sb.Append("sh"); break;
+                case 'щ': sb.Append("shch"); break;
+                case 'ы': sb.Append('y'); break;
+                case 'ю': sb.Append("yu"); break;
+                case 'я': sb.Append("ya"); break;
+                case 'ъ': case 'ь': break;
+                default: sb.Append(c); break;
+            }
+        }
+        // Unify common transliteration variants (kh->h, yo->e, j->i, y->i in endings)
+        return sb.ToString()
+            .Replace("shch", "sh")
+            .Replace("sch", "sh")
+            .Replace("kh", "h")
+            .Replace("yo", "e")
+            .Replace("ia", "ya")
+            .Replace("iu", "yu");
+    }
+
+    private static bool TokensMatch(string a, string b)
+    {
+        if (a == b) return true;
+        if (Math.Abs(a.Length - b.Length) > 1 || Math.Min(a.Length, b.Length) < 4) return false;
+        // Edit distance <= 1 for words >= 4 chars (handles "morgenstern" vs "morgenshtern" / minor typos)
+        int i = 0, j = 0, edits = 0;
+        while (i < a.Length && j < b.Length)
+        {
+            if (a[i] == b[j]) { i++; j++; continue; }
+            if (++edits > 1) return false;
+            if (a.Length > b.Length) i++;
+            else if (b.Length > a.Length) j++;
+            else { i++; j++; }
+        }
+        return edits + (a.Length - i) + (b.Length - j) <= 1;
+    }
+
     private static double Jaccard(HashSet<string> a, HashSet<string> b)
     {
         if (a.Count == 0 || b.Count == 0) return 0;
         int inter = 0;
-        foreach (var x in a) if (b.Contains(x)) inter++;
+        foreach (var x in a)
+            if (b.Contains(x) || b.Any(y => TokensMatch(x, y))) inter++;
         return (double)inter / (a.Count + b.Count - inter);
     }
 
@@ -582,7 +659,8 @@ public static partial class LosslessResolver
     {
         if (needle.Count == 0 || haystack.Count == 0) return 0;
         int inter = 0;
-        foreach (var x in needle) if (haystack.Contains(x)) inter++;
+        foreach (var x in needle)
+            if (haystack.Contains(x) || haystack.Any(y => TokensMatch(x, y))) inter++;
         return (double)inter / Math.Min(needle.Count, haystack.Count);
     }
 

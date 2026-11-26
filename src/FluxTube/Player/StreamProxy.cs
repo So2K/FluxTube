@@ -185,11 +185,11 @@ public sealed class StreamProxy
             e.Url = url;
             e.AvailableAt = DateTime.UtcNow;
             e.Headers = headers ?? new Dictionary<string, string> { ["User-Agent"] = "FluxTube/9.2" };
-            e.HeadBytes = 256 * 1024;
+            e.HeadBytes = 512 * 1024; // cache FLAC header + seektable + first seconds before mpv attaches
             e.Fragile = false;
             e.External = true;
-            e.Retries = 3;
-            e.Chunk = 2 * 1024 * 1024;
+            e.Retries = 4;
+            e.Chunk = 4 * 1024 * 1024; // 4 MB chunks = minimal Cloudflare round-trips for 30-50 MB Hi-Res FLAC
             if (knownLength > 0) e.Length = knownLength;
             e.Mime = string.IsNullOrWhiteSpace(mime) ? "audio/flac" : mime;
             if (e.Cache == null && e.Length > 0) e.Cache = MediaCache.Open(videoId, itag, e.Length, e.Mime);
@@ -198,6 +198,48 @@ public sealed class StreamProxy
         e.UrlReady.TrySetResult(true);
         Trim();
         return Local(key);
+    }
+
+    /// <summary>
+    /// Progressively caches an active Lossless FLAC stream to MediaCache in the background so seeking &amp; looping
+    /// hit SSD at zero latency and never stutter on CDN hiccups.
+    /// </summary>
+    public void StartBackgroundDownload(string localUrl)
+    {
+        var key = localUrl[(localUrl.LastIndexOf('/') + 1)..];
+        if (!_entries.TryGetValue(key, out var e) || !e.External) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                if (e.Length <= 0) await ProbeLengthAsync(e, cts.Token).ConfigureAwait(false);
+                var cache = e.Cache;
+                if (cache == null || e.Length <= 0 || cache.Complete) return;
+                Interlocked.Increment(ref cache.Users);
+                try
+                {
+                    long pos = 0;
+                    const long chunk = 4 * 1024 * 1024;
+                    while (pos < e.Length && !cts.IsCancellationRequested)
+                    {
+                        var cov = cache.Covered(pos);
+                        if (cov > 0) { pos += cov; continue; }
+                        long to = Math.Min(e.Length - 1, pos + chunk - 1);
+                        to = Math.Min(to, cache.NextStart(pos) - 1);
+                        if (to < pos) { pos++; continue; }
+                        using var resp = await FetchAsync(e, pos, to, cts.Token).ConfigureAwait(false);
+                        if (!resp.IsSuccessStatusCode) break;
+                        var bytes = await resp.Content.ReadAsByteArrayAsync(cts.Token).ConfigureAwait(false);
+                        if (bytes.Length == 0) break;
+                        cache.Write(pos, bytes);
+                        pos += bytes.Length;
+                    }
+                }
+                finally { Interlocked.Decrement(ref cache.Users); }
+            }
+            catch { }
+        });
     }
 
     /// <summary>Does this look like the start of an mp4, webm, flac, wav, ogg or id3 media file?</summary>
@@ -515,7 +557,7 @@ public sealed class StreamProxy
                     while (pos <= to)
                     {
                         int n;
-                        idle.CancelAfter(6_000); // detect stalled upstream in 6s instead of 20s and reconnect on a fresh socket!
+                        idle.CancelAfter(e.External ? 14_000 : 6_000); // generous timeout for Hi-Res FLAC CDNs, snappy for googlevideo
                         try { n = await body.ReadAsync(buf.AsMemory(0, (int)Math.Min(buf.Length, to - pos + 1)), idle.Token); }
                         catch (OperationCanceledException) when (!cts.IsCancellationRequested) { upstreamFailed = true; break; }
                         catch (Exception ex) when (ex is IOException or SocketException or HttpRequestException)

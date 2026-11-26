@@ -401,11 +401,12 @@ public sealed class PlaybackTracker
                 if (cachedFlac != null)
                 {
                     var localUrl = StreamProxy.Instance.RegisterCached(cachedFlac);
+                    int estKbps = (cachedFlac.Length > 0 && durationSec > 1) ? (int)Math.Round(cachedFlac.Length * 8.0 / durationSec / 1000.0) : 0;
                     UiThread.Post(() =>
                     {
                         if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen) || _p.CurrentVideoId != id) return;
-                        _p.AttachLosslessTrack(localUrl, "Cache", autoSelect: true);
-                        Paths.Log($"lossless {id}: instant attach from disk cache");
+                        _p.AttachLosslessTrack(localUrl, "Cache", autoSelect: true, expectedBitrateKbps: estKbps);
+                        Paths.Log($"lossless {id}: instant attach from disk cache ({estKbps} kbps)");
                         CurrentChanged?.Invoke();
                     });
                     return;
@@ -426,11 +427,17 @@ public sealed class PlaybackTracker
                 }
 
                 var proxyUrl = StreamProxy.Instance.RegisterLossless(match.Url, id, match.ContentLength, match.Mime);
+                // Pre-buffer the first 512 KB (FLAC header + seektable + opening audio) BEFORE attaching to mpv = zero stutter!
+                await StreamProxy.Instance.PrefillAsync(proxyUrl).ConfigureAwait(false);
+                StreamProxy.Instance.StartBackgroundDownload(proxyUrl);
+
+                double refDur = match.DurationSec > 1 ? match.DurationSec : durationSec;
+                int matchKbps = (match.ContentLength > 0 && refDur > 1) ? (int)Math.Round(match.ContentLength * 8.0 / refDur / 1000.0) : 0;
                 UiThread.Post(() =>
                 {
                     if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen) || _p.CurrentVideoId != id) return;
                     bool autoSelect = manual || match.ExactTiming || AppSettings.Current.AudioOnlyMode;
-                    _p.AttachLosslessTrack(proxyUrl, match.SourceLabel, autoSelect, timingDiff: !match.ExactTiming);
+                    _p.AttachLosslessTrack(proxyUrl, match.SourceLabel, autoSelect, timingDiff: !match.ExactTiming, expectedBitrateKbps: matchKbps);
                     if (autoSelect)
                         _p.ShowText($"ULTRA FLAC · {match.SourceLabel}", 2000);
                     CurrentChanged?.Invoke();
