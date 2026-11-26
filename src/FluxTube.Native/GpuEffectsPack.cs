@@ -184,59 +184,48 @@ float edgeFade(float2 uv)
     return e.x * e.y;
 }
 
-// ==================== 1. WINAMP MILKDROP / GEISS (GPU Feedback Spiral Warp!) ====================
+// ==================== 1. REFINED MILKDROP ECHO (Clean, Subtle Translucent Neon Rings — Zero Acid Overload!) ====================
 float4 PS_MilkdropStep(VSOut i) : SV_Target
 {
     float2 p = i.uv - 0.5;
-    float rad = length(p);
-    // Classic MilkDrop zoom-in + subtle spiral twist + harmonic ripple warp!
-    float zoom = 0.980 - bass * 0.016 - hit * 0.010;
-    float ang = (0.012 + pan * 0.018 + sin(time * 0.7) * 0.010) * calm;
+    float zoom = 0.986 - bass * 0.008;
+    float ang = (0.004 + pan * 0.008) * calm;
     float cs = cos(ang), sn = sin(ang);
     float2 wp = float2(p.x * cs - p.y * sn, p.x * sn + p.y * cs) * zoom;
-    wp += float2(sin(p.y * 8.0 + time * 2.4), cos(p.x * 8.0 - time * 2.1)) * (0.0022 + mid * 0.0042) * calm;
+    wp += float2(sin(p.y * 5.0 + time * 1.1), cos(p.x * 5.0 - time * 0.9)) * (0.0009 + mid * 0.0016) * calm;
     float2 sampleUv = wp + 0.5;
 
-    // Subtle RGB chromatic trail dispersion (iconic MilkDrop look!)
-    float2 shift = normalize(p + 1e-4) * (0.0025 + bass * 0.004);
+    // Very subtle chromatic shimmer instead of harsh rainbow smear
+    float2 shift = normalize(p + 1e-4) * (0.0008 + bass * 0.0012);
     float3 prev;
     prev.r = tex0.Sample(linClamp, sampleUv + shift).r;
     prev.g = tex0.Sample(linClamp, sampleUv).g;
     prev.b = tex0.Sample(linClamp, sampleUv - shift).b;
-    prev *= (0.935 + 0.032 * calm);
+    prev *= (0.875 + 0.025 * calm);
 
-    // Glowing audio-reactive waveform ring + rotating energy flares in center
     float2 ap = p * float2(aspect, 1.0);
     float r = length(ap);
     float a = atan2(ap.y, ap.x);
-    float wave = sin(a * 6.0 + time * 4.5) * (0.025 + bass * 0.075)
-               + cos(a * 12.0 - time * 7.2) * (0.012 + high * 0.045)
-               + sin(a * 3.0 + time * 2.2) * (0.02 + mid * 0.04);
-    float ringR = 0.24 + bass * 0.09 + hit * 0.05 + wave;
+    float wave = sin(a * 4.0 + time * 2.2) * (0.014 + bass * 0.036)
+               + cos(a * 8.0 - time * 3.4) * (0.006 + high * 0.020);
+    float ringR = 0.25 + bass * 0.055 + wave;
     float dRing = abs(r - ringR);
-    float glow = exp(-dRing * 48.0) * (0.65 + bass * 0.95 + hit * 0.75) * calm;
-    float core = exp(-dRing * 160.0) * (0.55 + high * 0.85) * calm;
+    float glow = exp(-dRing * 72.0) * (0.42 + bass * 0.55 + hit * 0.45) * calm;
+    float core = exp(-dRing * 220.0) * (0.38 + high * 0.48) * calm;
 
-    float cMix = 0.5 + 0.5 * sin(a * 2.0 + time * 1.4);
-    float3 ringCol = lerp(lerp(col0, col1, cMix), col2, 0.5 + 0.5 * cos(a * 3.0 - time * 1.1));
-    float3 addCol = ringCol * glow + lerp(ringCol, float3(1, 1, 1), 0.7) * core;
+    float cMix = 0.5 + 0.5 * sin(a * 2.0 + time * 0.65);
+    float3 ringCol = lerp(col0, col1, cMix);
+    float3 addCol = ringCol * glow + lerp(ringCol, float3(1, 1, 1), 0.65) * core;
 
-    // Beat burst stars along the ring
-    if (beat > 0.5)
-    {
-        float spokes = pow(abs(sin(a * 4.0 + time * 3.0)), 12.0) * exp(-abs(r - ringR) * 18.0);
-        addCol += lerp(col1, float3(1, 1, 1), 0.5) * spokes * (0.6 + bass * 0.8);
-    }
-
-    float3 outC = min(prev + addCol * 0.62, float3(2.2, 2.2, 2.2));
+    float3 outC = min(prev + addCol * 0.48, float3(1.25, 1.25, 1.25));
     return float4(outC, 1.0);
 }
 
 float4 PS_MilkdropDisplay(VSOut i) : SV_Target
 {
     float3 c = tex0.Sample(linClamp, i.uv).rgb;
-    c = c / (1.0 + 0.35 * c);
-    float a = clamp(max(c.r, max(c.g, c.b)) * 1.12, 0.0, 0.92) * edgeFade(i.uv);
+    c = c / (1.0 + 0.55 * c);
+    float a = clamp(max(c.r, max(c.g, c.b)) * 0.72, 0.0, 0.58) * edgeFade(i.uv);
     return float4(c * a, a);
 }
 
@@ -279,12 +268,11 @@ float2 TunnelPath(float x)
 {
     const float TAU = 6.2831853071795865;
     float2 offs;
-    offs.x = 0.20 * sin(TAU * x * 0.5) + 0.40 * sin(TAU * x * 0.2 + 0.3);
-    offs.y = 0.30 * cos(TAU * x * 0.3) + 0.20 * cos(TAU * x * 0.1);
-    // Mix smooth Perlin/value noise so the tunnel meanders organically
-    float nx = vnoise(float2(x * 0.65, 1.37)) - 0.5;
-    float ny = vnoise(float2(x * 0.65, 7.91)) - 0.5;
-    offs += float2(nx, ny) * 0.26;
+    offs.x = (0.12 * sin(TAU * x * 0.35) + 0.22 * sin(TAU * x * 0.14 + 0.3));
+    offs.y = (0.16 * cos(TAU * x * 0.22) + 0.12 * cos(TAU * x * 0.08));
+    float nx = vnoise(float2(x * 0.45, 1.37)) - 0.5;
+    float ny = vnoise(float2(x * 0.45, 7.91)) - 0.5;
+    offs += float2(nx, ny) * 0.14;
     offs *= smoothstep(0.0, 2.0, x + 1.5);
     return offs;
 }
@@ -295,11 +283,11 @@ float4 PS_Tunnel(VSOut i) : SV_Target
     const int TUNNEL_LAYERS = 96;
     const float RING_POINTS = 128.0;
 
-    // Exact Shadertoy aspect-normalized coords centered at (0,0)
-    float2 uv = (i.uv - 0.5) * float2(aspect, 1.0);
-    float invResY = texel.y; // 1.0 / 576.0
+    // Wider cinematic FOV (1.45x) so the tunnel feels deeper, grander, and further ahead!
+    float2 uv = (i.uv - 0.5) * float2(aspect, 1.0) * 1.45;
+    float invResY = texel.y * 1.45;
     float repAngle = TAU / RING_POINTS;
-    float pointSize = (2.1 + bass * 0.75 + hit * 0.55) * 0.5 * invResY;
+    float pointSize = (2.1 + bass * 0.70 + hit * 0.50) * 0.5 * invResY;
 
     // Integrated audio-reactive camera Z (param0) + stereo L/R steer (param1) + treble/loudness Y steer (extra)!
     float camZ = param0;
@@ -945,14 +933,13 @@ float4 PS_GpuFire(VSOut i) : SV_Target
                 break;
             case "tunnel":
             {
-                // Smooth C1 integrated tunnel speed driven by track loudness + bass + drop energy!
+                // Smooth, hypnotic cruise speed without motion sickness (accelerates gently on loud parts & drops)
                 float loud = Math.Clamp(AudioAnalyzer.Loudness, 0f, 1f);
-                float tSpeed = (0.30f + loud * 0.85f + bass * 0.65f + AudioAnalyzer.DropImpact * 0.65f) * calm;
+                float tSpeed = (0.11f + loud * 0.22f + bass * 0.16f + AudioAnalyzer.DropImpact * 0.18f) * calm;
                 _tunnelZ += dt * tSpeed;
-                // Stereo L/R pan steers tunnel horizontally; treble centroid + loudness steers vertically!
-                float targetSteerX = Math.Clamp(pan * 0.42f, -0.45f, 0.45f);
-                float targetSteerY = Math.Clamp((AudioAnalyzer.SpectralCentroid - 0.35f) * 0.65f + (loud - 0.42f) * 0.38f - bass * 0.22f, -0.42f, 0.42f);
-                float sAlpha = 1f - MathF.Exp(-dt * 4.5f);
+                float targetSteerX = Math.Clamp(pan * 0.24f, -0.26f, 0.26f);
+                float targetSteerY = Math.Clamp((AudioAnalyzer.SpectralCentroid - 0.35f) * 0.36f + (loud - 0.42f) * 0.22f - bass * 0.12f, -0.24f, 0.24f);
+                float sAlpha = 1f - MathF.Exp(-dt * 2.2f);
                 _tunnelSteerX += (targetSteerX - _tunnelSteerX) * sAlpha;
                 _tunnelSteerY += (targetSteerY - _tunnelSteerY) * sAlpha;
                 cb.Param0 = _tunnelZ;
