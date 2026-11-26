@@ -208,9 +208,16 @@ public static unsafe class App
         if (Hwnd == 0) return;
         int dark = Th.Light ? 0 : 1;
         W.DwmSetWindowAttribute(Hwnd, 20, &dark, 4);
+        int corner = 2; // DWMWCP_ROUND (native Windows 11 rounded corners & smooth Aero Snap)
+        W.DwmSetWindowAttribute(Hwnd, 33, &corner, 4);
         var bg = Th.Bg;
         uint caption = W.Rgb((byte)(bg >> 16), (byte)(bg >> 8), (byte)bg);
         W.DwmSetWindowAttribute(Hwnd, 35, &caption, 4);
+        var borderCol = Gfx.Mix(Th.Bg, Th.Ink, Th.Light ? 0.14f : 0.12f);
+        uint border = W.Rgb((byte)(borderCol >> 16), (byte)(borderCol >> 8), (byte)borderCol);
+        W.DwmSetWindowAttribute(Hwnd, 34, &border, 4);
+        var margins = new W.MARGINS { L = 0, R = 0, T = 0, B = 1 };
+        W.DwmExtendFrameIntoClientArea(Hwnd, &margins);
     }
 
     private static void Frame()
@@ -326,21 +333,27 @@ public static unsafe class App
                     W.RECT rc;
                     W.GetClientRect(h, &rc);
                     var sc = W.GetDpiForWindow(h) / 96f;
+                    float lx = p.X / Gfx.Scale, ly = p.Y / Gfx.Scale;
                     if (!W.IsZoomed(h))
                     {
                         int b = (int)(6 * sc);
                         bool left = p.X < b, right = p.X >= rc.R - b, top = p.Y < b, bottom = p.Y >= rc.B - b;
-                        if (top && left) return 13;
-                        if (top && right) return 14;
+                        // Never let the 6px top-right resize edge steal clicks from the close/max/min buttons!
+                        bool onTopControl = ly < Shell.TopH && Shell.TopBarControlAt(lx, ly);
+                        if (!onTopControl)
+                        {
+                            if (top && left) return 13;
+                            if (top && right) return 14;
+                            if (top) return 12;
+                        }
                         if (bottom && left) return 16;
                         if (bottom && right) return 17;
                         if (left) return 10;
                         if (right) return 11;
-                        if (top) return 12;
                         if (bottom) return 15;
                     }
                     // the top bar drags the window wherever it has no control of its own
-                    if (p.Y / Gfx.Scale < Shell.TopH && !Shell.TopBarControlAt(p.X / Gfx.Scale, p.Y / Gfx.Scale)) return 2;
+                    if (ly < Shell.TopH && !Shell.TopBarControlAt(lx, ly)) return 2;
                     return 1;
                 }
                 case W.WM_SIZE:
@@ -572,6 +585,16 @@ public static unsafe class App
                             Invalidate();
                         }
                     }
+                    else if (w == 4)
+                    {
+                        // Keep live animations smooth during Win32 modal move/resize loop
+                        if (_animating && !Gfx.Occluded && !W.IsIconic(h))
+                        {
+                            Frame();
+                            W.ValidateRect(h, null);
+                            if (UI.TakeAnimate()) _animating = true;
+                        }
+                    }
                     return 0;
                 case W.WM_ACTIVATE:
                     if (((int)w & 0xFFFF) == 0) { Suggest.Hide(); Shell.CancelSpace2x(); Loupe.Hide(); PreviewPlayer.HideNow(); }
@@ -586,12 +609,16 @@ public static unsafe class App
                     break;
                 case W.WM_MOVE:
                     Suggest.Hide();
-                    Edit.RepaintAll();
                     break;
-                case W.WM_ENTERSIZEMOVE:
+                case W.WM_SIZING:
                     Gfx.IsLiveResizing = true;
                     break;
+                case W.WM_ENTERSIZEMOVE:
+                    // Keep animations running smoothly during modal drag/resize without flashing glass on plain window moves
+                    W.SetTimer(h, 4, 16, 0);
+                    break;
                 case W.WM_EXITSIZEMOVE:
+                    W.KillTimer(h, 4);
                     Gfx.IsLiveResizing = false;
                     Edit.RepaintAll();
                     Invalidate();

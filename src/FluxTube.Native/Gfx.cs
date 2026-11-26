@@ -191,7 +191,7 @@ public static unsafe class Gfx
         {
             Width = (uint)PxW, Height = (uint)PxH, Format = Format.B8G8R8A8_UNorm,
             SampleDescription = new SampleDescription(1, 0), BufferUsage = Usage.RenderTargetOutput, BufferCount = 3,
-            Scaling = Scaling.Stretch, SwapEffect = SwapEffect.FlipDiscard, AlphaMode = Vortice.DXGI.AlphaMode.Ignore,
+            Scaling = Scaling.None, SwapEffect = SwapEffect.FlipDiscard, AlphaMode = Vortice.DXGI.AlphaMode.Ignore,
         };
         _swap = factory.CreateSwapChainForHwnd(_dev, _hwnd, desc);
         factory.MakeWindowAssociation(_hwnd, WindowAssociationFlags.IgnoreAll);

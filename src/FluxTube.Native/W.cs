@@ -10,7 +10,8 @@ internal static unsafe partial class W
         WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105, WM_COMMAND = 0x0111, WM_TIMER = 0x0113, WM_CTLCOLOREDIT = 0x0133, WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201,
         WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203, WM_RBUTTONDOWN = 0x0204, WM_RBUTTONUP = 0x0205, WM_MBUTTONDOWN = 0x0207, WM_MBUTTONUP = 0x0208, WM_MOUSEWHEEL = 0x020A,
         WM_XBUTTONUP = 0x020C, WM_CAPTURECHANGED = 0x0215, WM_MOUSELEAVE = 0x02A3, WM_DPICHANGED = 0x02E0, WM_MOVE = 0x0003, WM_ACTIVATE = 0x0006, WM_APP = 0x8000,
-        WM_MOUSEACTIVATE = 0x0021, WM_COPYDATA = 0x004A, WM_NCCALCSIZE = 0x0083, WM_NCHITTEST = 0x0084, WM_GETTEXTLENGTH = 0x000E, WM_ENTERSIZEMOVE = 0x0231, WM_EXITSIZEMOVE = 0x0232, WM_CLIPBOARDUPDATE = 0x031D;
+        WM_MOUSEACTIVATE = 0x0021, WM_COPYDATA = 0x004A, WM_NCCALCSIZE = 0x0083, WM_NCHITTEST = 0x0084, WM_GETTEXTLENGTH = 0x000E,
+        WM_SIZING = 0x0214, WM_ENTERSIZEMOVE = 0x0231, WM_EXITSIZEMOVE = 0x0232, WM_CLIPBOARDUPDATE = 0x031D;
 
     public const uint WS_OVERLAPPEDWINDOW = 0x00CF0000, WS_VISIBLE = 0x10000000, WS_CHILD = 0x40000000, WS_CLIPCHILDREN = 0x02000000,
         WS_CLIPSIBLINGS = 0x04000000, WS_POPUP = 0x80000000, WS_VSCROLL = 0x00200000,
@@ -141,7 +142,10 @@ internal static unsafe partial class W
     [LibraryImport("gdi32.dll")] public static partial int SetBkMode(nint dc, int mode);
     [LibraryImport("gdi32.dll")] public static partial nint SelectObject(nint dc, nint obj);
 
+    [StructLayout(LayoutKind.Sequential)] public struct MARGINS { public int L, R, T, B; }
+
     [LibraryImport("dwmapi.dll")] public static partial int DwmSetWindowAttribute(nint h, uint attr, void* value, uint size);
+    [LibraryImport("dwmapi.dll")] public static partial int DwmExtendFrameIntoClientArea(nint h, MARGINS* margins);
     [LibraryImport("uxtheme.dll", EntryPoint = "#135")] public static partial int SetPreferredAppMode(int mode);
     [LibraryImport("uxtheme.dll", EntryPoint = "#136")] public static partial void FlushMenuThemes();
     [LibraryImport("uxtheme.dll", StringMarshalling = StringMarshalling.Utf16)] public static partial int SetWindowTheme(nint h, string? app, string? ids);
