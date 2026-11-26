@@ -889,12 +889,24 @@ float4 PS_GpuFire(VSOut i) : SV_Target
         ctx.PSSetConstantBuffer(0, _cb);
         ctx.PSSetSampler(0, _sampler);
 
-        // Rich evolving 3-color triad anchored to cover art (always multi-hue violet/cyan/gold/cover gradient — never flat monochrome!)
+        // Rich evolving 3-color triad anchored to cover art for classic/tunnel/milkdrop modes;
+        // "water" uses the exact cover-faithful dom1/dom2 palette (natural cyan/amber caustics without artificial purple hue shift).
         uint c1 = dom1 != 0 ? dom1 : Th.Brand;
         var (br, bg, bb) = MusicStageEffects.VividPaletteColor(c1);
-        var (r0, g0, b0) = RotateHue(br, bg, bb, MathF.Sin(t * 0.15f) * 0.55f);
-        var (r1, g1, b1) = RotateHue(br, bg, bb, 2.15f + MathF.Cos(t * 0.20f) * 0.55f);
-        var (r2, g2, b2) = RotateHue(br, bg, bb, -2.10f + MathF.Sin(t * 0.24f) * 0.55f);
+        float r0, g0, b0, r1, g1, b1, r2, g2, b2;
+        if (mode == "water")
+        {
+            (r0, g0, b0) = (br, bg, bb);
+            uint c2 = dom2 != 0 && dom2 != dom1 ? dom2 : Gfx.Mix(c1, 0xFF00E5FF, 0.45f);
+            (r1, g1, b1) = MusicStageEffects.VividPaletteColor(c2);
+            (r2, g2, b2) = (r1, g1, b1);
+        }
+        else
+        {
+            (r0, g0, b0) = RotateHue(br, bg, bb, MathF.Sin(t * 0.15f) * 0.55f);
+            (r1, g1, b1) = RotateHue(br, bg, bb, 2.15f + MathF.Cos(t * 0.20f) * 0.55f);
+            (r2, g2, b2) = RotateHue(br, bg, bb, -2.10f + MathF.Sin(t * 0.24f) * 0.55f);
+        }
         float calm = Math.Clamp(1f - quietDim * 0.88f, 0.08f, 1f);
 
         int sd = beatHit ? ++_seed : _seed;
