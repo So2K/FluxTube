@@ -3,10 +3,14 @@ using System.Numerics;
 namespace FluxTube;
 
 /// <summary>
-/// Bidirectional top-down audio-reactive JDM Drift Car simulation for Music Stage (~0.15ms, zero-alloc):
-/// - Audio + Perlin/Lissajous racing trajectory: Loudness integrates speed, StereoPan pulls L/R, SpectralCentroid pulls Up/Down!
-/// - Dynamic left &amp; right drift transitions (slip angle follows real turn curvature -> crisp S-bend whip transitions!)
-/// - Visible counter-steering front wheels, soft 3-layer headlight beams, fluffy 2-layer tire smoke, skid marks &amp; exhaust backfire!
+/// Fourier Epicycle Beat-Locked JDM Drift Car ("Дрифт", ~0.16ms, zero-alloc):
+/// - Analytical C-infinity 3-harmonic Fourier trajectory driven by smoothed live FFT bands:
+///   * 1st harmonic (Bass/Loudness): wide Gymkhana oval
+///   * 2nd harmonic (Mids): Figure-8 transition bends (crisp left &lt;-&gt; right whip transitions!)
+///   * 3rd harmonic (Treble): sharp hairpin loops on energetic drops
+/// - Exact analytical signed curvature kappa = (x'y'' - y'x'') / (x'^2 + y'^2)^(3/2) drives smooth slip angle &amp; counter-steer!
+/// - Beat-locked "clutch kick" impulses amplify slip angle, tire smoke, and blue nitro backfire right on the kick!
+/// - Draws a subtle glowing future racing-line ribbon ahead of the car showing the live Fourier curve!
 /// </summary>
 public static class DriftCarFx
 {
@@ -14,14 +18,14 @@ public static class DriftCarFx
     private struct SmokePuff { public float X, Y, Vx, Vy, R, Life, MaxLife; public uint Col; }
     private struct Spark { public float X, Y, Vx, Vy, Life; public uint Col; }
 
-    private const int MaxSkids = 200, MaxSmoke = 110, MaxSparks = 48;
+    private const int MaxSkids = 220, MaxSmoke = 120, MaxSparks = 56;
     private static readonly SkidSeg[] _skids = new SkidSeg[MaxSkids];
     private static readonly SmokePuff[] _smoke = new SmokePuff[MaxSmoke];
     private static readonly Spark[] _sparks = new Spark[MaxSparks];
     private static int _skidIdx, _smokeIdx, _sparkIdx;
 
-    private static float _cx, _cy, _vx, _vy, _heading, _angVel, _steerWheel, _pathS, _backfire;
-    private static float _smoothPan, _smoothVert, _driftBias;
+    private static float _theta, _cx, _cy, _heading, _slipAngle, _steerWheel, _clutchKick, _backfire;
+    private static float _a1 = 0.85f, _a2 = 0.25f, _a3 = 0.0f, _phi2, _tilt;
     private static float _prevRLx, _prevRLy, _prevRRx, _prevRRy;
     private static bool _inited;
     private static long _lastBeat;
@@ -35,30 +39,45 @@ public static class DriftCarFx
         return (x & 0xFFFF) * (1f / 65535f);
     }
 
-    private static float Hash1(int n)
+    /// <summary>
+    /// Exact analytical 3-harmonic Fourier Epicycle position (x, y), velocity (dx, dy), and signed curvature kappa.
+    /// Zero numerical jitter — guarantees silky left &amp; right drift transitions through inflection points!
+    /// </summary>
+    private static void EvalFourier(float th, float midX, float midY, float rx, float ry,
+        out float x, out float y, out float dx, out float dy, out float kappa)
     {
-        uint x = (uint)(n * 374761393 + 668265263);
-        x = (x ^ (x >> 13)) * 1274126177u;
-        return ((x ^ (x >> 16)) & 0xFFFF) * (1f / 65535f) - 0.5f;
-    }
+        float c1 = MathF.Cos(th), s1 = MathF.Sin(th);
+        float t2 = 2f * th + _phi2;
+        float c2 = MathF.Cos(t2), s2 = MathF.Sin(t2);
+        float t3 = 3f * th;
+        float c3 = MathF.Cos(t3), s3 = MathF.Sin(t3);
 
-    /// <summary>Smooth 1D Perlin-like cubic value noise for organic unpredictable drift corners.</summary>
-    private static float Noise1D(float x)
-    {
-        int i = (int)MathF.Floor(x);
-        float f = x - i;
-        f = f * f * (3f - 2f * f);
-        return Hash1(i) + (Hash1(i + 1) - Hash1(i)) * f;
-    }
+        // X uses cos(th) + figure-8 harmonic + hairpin harmonic; Y uses sin(th) + figure-8 sin(2th) for classic Gymkhana S-bends!
+        float lx = _a1 * c1 + _a2 * 0.45f * c2 + _a3 * c3;
+        float ly = _a1 * 0.72f * s1 + _a2 * 0.92f * s2 + _a3 * 0.75f * s3;
 
-    private static (float x, float y) TrackPoint(float s, float midX, float midY, float rx, float ry, float pan, float vert)
-    {
-        // Figure-8 / Lissajous + Perlin meanders + live Stereo L/R & Treble/Bass audio pull -> drifts BOTH left & right!
-        float nx = Noise1D(s * 0.55f + 1.7f) * 0.48f;
-        float ny = Noise1D(s * 0.55f + 19.3f) * 0.48f;
-        float ux = 0.72f * MathF.Sin(s * 1.00f) + 0.28f * MathF.Sin(s * 2.13f + 0.6f) + nx + pan * 0.36f;
-        float uy = 0.68f * MathF.Sin(s * 1.618f + 0.4f) + 0.32f * MathF.Cos(s * 0.77f) + ny + vert * 0.38f;
-        return (midX + Math.Clamp(ux, -1.05f, 1.05f) * rx, midY + Math.Clamp(uy, -1.05f, 1.05f) * ry);
+        float ldx = -_a1 * s1 - _a2 * 0.90f * s2 - _a3 * 3f * s3;
+        float ldy =  _a1 * 0.72f * c1 + _a2 * 1.84f * c2 + _a3 * 2.25f * c3;
+
+        float lddx = -_a1 * c1 - _a2 * 1.80f * c2 - _a3 * 9f * c3;
+        float lddy = -_a1 * 0.72f * s1 - _a2 * 3.68f * s2 - _a3 * 6.75f * s3;
+
+        // Apply gentle StereoPan rotation to the whole Fourier arena
+        float ct = MathF.Cos(_tilt), st = MathF.Sin(_tilt);
+        float sx = lx * rx, sy = ly * ry;
+        float sdx = ldx * rx, sdy = ldy * ry;
+        float sddx = lddx * rx, sddy = lddy * ry;
+
+        x = midX + sx * ct - sy * st;
+        y = midY + sx * st + sy * ct;
+        dx = sdx * ct - sdy * st;
+        dy = sdx * st + sdy * ct;
+        float ddx = sddx * ct - sddy * st;
+        float ddy = sddx * st + sddy * ct;
+
+        float spd2 = dx * dx + dy * dy + 1e-3f;
+        float spd3 = spd2 * MathF.Sqrt(spd2);
+        kappa = (dx * ddy - dy * ddx) / spd3; // exact signed curvature (rad/px)
     }
 
     public static void Draw(R stage, uint dom1, uint dom2)
@@ -70,8 +89,8 @@ public static class DriftCarFx
         float hit = AudioAnalyzer.SharpWaveHit;
         float kick = MusicBounce.Kick;
         float loud = Math.Clamp(AudioAnalyzer.Loudness, 0f, 1f);
-        float calm = Math.Clamp(1f - AudioAnalyzer.QuietDim * 0.85f, 0.12f, 1f);
-        bool beat = AudioAnalyzer.BeatStamp != _lastBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.36f;
+        float calm = Math.Clamp(1f - AudioAnalyzer.QuietDim * 0.85f, 0.14f, 1f);
+        bool beat = AudioAnalyzer.BeatStamp != _lastBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.34f;
         if (beat) _lastBeat = AudioAnalyzer.BeatStamp;
 
         uint bodyCol = dom1 != 0 ? Gfx.Mix(dom1, 0xFFFF3B6B, 0.22f) : 0xFFFF2E63;
@@ -81,73 +100,65 @@ public static class DriftCarFx
 
         float midX = stage.X + stage.W * 0.5f;
         float midY = stage.Y + stage.H * 0.48f;
-        float rx = MathF.Max(140f, stage.W * 0.39f);
-        float ry = MathF.Max(90f, stage.H * 0.31f);
+        float rx = MathF.Max(140f, stage.W * 0.38f);
+        float ry = MathF.Max(85f, stage.H * 0.30f);
 
-        float sAlpha = 1f - MathF.Exp(-dt * 4.0f);
-        _smoothPan += (Math.Clamp(AudioAnalyzer.StereoPan, -1f, 1f) - _smoothPan) * sAlpha;
-        float targetVert = Math.Clamp(-(AudioAnalyzer.SpectralCentroid - 0.36f) * 1.35f + (bass - 0.35f) * 0.55f, -1f, 1f);
-        _smoothVert += (targetVert - _smoothVert) * sAlpha;
+        // 1. Smoothly morph Fourier Epicycle harmonics from live FFT spectrum (slow ~1.2s envelope so curve never jerks!)
+        float envA = 1f - MathF.Exp(-dt * 1.35f);
+        float targetA1 = Math.Clamp(0.76f + bass * 0.16f, 0.65f, 0.92f);
+        // Mids & Drops open up the 2nd harmonic -> smooth Figure-8 left/right Gymkhana transitions!
+        float targetA2 = Math.Clamp((0.28f + mid * 0.36f + AudioAnalyzer.DropImpact * 0.20f) * calm, 0.10f, 0.52f);
+        // Highs & energy add subtle 3rd-harmonic hairpin corners
+        float targetA3 = Math.Clamp((high * 0.16f + hit * 0.08f) * calm, 0.0f, 0.16f);
+        _a1 += (targetA1 - _a1) * envA;
+        _a2 += (targetA2 - _a2) * envA;
+        _a3 += (targetA3 - _a3) * envA;
+        _phi2 += dt * (0.14f + mid * 0.18f) * calm; // slowly precesses figure-8 so every lap explores new corners!
+        _tilt += (Math.Clamp(AudioAnalyzer.StereoPan * 0.24f, -0.26f, 0.26f) - _tilt) * (1f - MathF.Exp(-dt * 2.0f));
 
-        if (!_inited || _cx < stage.X - 100 || _cx > stage.Right + 100 || _cy < stage.Y - 100 || _cy > stage.Bottom + 100)
+        // 2. Arc-length normalized constant-feel speed integrated smoothly from Loudness + Bass!
+        EvalFourier(_theta, midX, midY, rx, ry, out float curX, out float curY, out float dx0, out float dy0, out float curKappa);
+        float curArcSpd = MathF.Max(60f, MathF.Sqrt(dx0 * dx0 + dy0 * dy0));
+        float desiredPxPerSec = (175f + loud * 160f + bass * 140f + AudioAnalyzer.DropImpact * 110f) * calm;
+        _theta += (desiredPxPerSec / curArcSpd) * dt;
+        if (_theta > MathF.Tau * 100f) _theta -= MathF.Tau * 100f;
+
+        EvalFourier(_theta, midX, midY, rx, ry, out float x, out float y, out float dx, out float dy, out float kappa);
+        x = Math.Clamp(x, stage.X + 42f, stage.Right - 42f);
+        y = Math.Clamp(y, stage.Y + 42f, stage.Bottom - 42f);
+
+        if (!_inited)
         {
-            _pathS = 0f;
-            (_cx, _cy) = TrackPoint(0f, midX, midY, rx, ry, 0f, 0f);
-            _vx = 180f; _vy = 0f;
-            _heading = 0f; _angVel = 0f; _driftBias = 0f;
+            _cx = x; _cy = y;
+            _heading = MathF.Atan2(dy, dx);
+            _slipAngle = 0f;
             _prevRLx = _prevRRx = _cx; _prevRLy = _prevRRy = _cy;
             Array.Clear(_skids); Array.Clear(_smoke); Array.Clear(_sparks);
             _inited = true;
         }
 
-        // 1. C1 loudness-integrated progression along the bidirectional S-bend audio track!
-        float speedMul = (0.55f + loud * 0.85f + bass * 0.55f + AudioAnalyzer.DropImpact * 0.55f) * calm;
-        _pathS += dt * 0.72f * speedMul;
-        var (tx, ty) = TrackPoint(_pathS + 0.32f, midX, midY, rx, ry, _smoothPan, _smoothVert);
-        var (tx2, ty2) = TrackPoint(_pathS + 0.62f, midX, midY, rx, ry, _smoothPan, _smoothVert);
+        // Smooth position tracking
+        float posA = 1f - MathF.Exp(-dt * 18f);
+        float vx = (x - _cx) / MathF.Max(dt, 0.004f);
+        float vy = (y - _cy) / MathF.Max(dt, 0.004f);
+        _cx += (x - _cx) * posA;
+        _cy += (y - _cy) * posA;
 
-        float targetAng = MathF.Atan2(ty - _cy, tx - _cx);
-        float aheadAng = MathF.Atan2(ty2 - ty, tx2 - tx);
+        // 3. Beat-Locked Clutch Kick + Exact Signed Curvature Drift Angle!
+        if (beat) _clutchKick = MathF.Max(_clutchKick, 0.55f + bass * 0.55f);
+        _clutchKick *= MathF.Exp(-dt * 6.5f);
 
-        // Compute REAL signed turn curvature (negative = left turn, positive = right turn!)
-        float turnCurv = aheadAng - targetAng;
-        while (turnCurv > MathF.PI) turnCurv -= MathF.Tau;
-        while (turnCurv < -MathF.PI) turnCurv += MathF.Tau;
+        float tangentAng = MathF.Atan2(dy, dx);
+        // Curvature kappa directly sets drift direction: left turn -> tail right; right turn -> tail left!
+        float normCurv = Math.Clamp(kappa * 145f, -1.0f, 1.0f);
+        float targetSlip = normCurv * (0.48f + bass * 0.28f + _clutchKick * 0.36f) * calm;
+        _slipAngle += (targetSlip - _slipAngle) * (1f - MathF.Exp(-dt * 8.5f));
+        _heading = tangentAng + _slipAngle;
+        _steerWheel = Math.Clamp(-_slipAngle * 0.92f, -0.54f, 0.54f); // front wheels counter-steer into the drift!
 
-        // Tail swings opposite to turn direction -> true bidirectional left & right whip drifts!
-        float targetDrift = Math.Clamp(turnCurv * (0.95f + bass * 0.85f + kick * 0.55f), -0.78f, 0.78f);
-        _driftBias += (targetDrift - _driftBias) * (1f - MathF.Exp(-dt * 6.5f));
-
-        float desiredHeading = targetAng + _driftBias;
-        float hDiff = desiredHeading - _heading;
-        while (hDiff > MathF.PI) hDiff -= MathF.Tau;
-        while (hDiff < -MathF.PI) hDiff += MathF.Tau;
-
-        _angVel += (hDiff * 13.5f - _angVel * 5.6f) * dt;
-        _heading += _angVel * dt;
-
-        // Front wheels visibly counter-steer into the slide!
-        float velAng = MathF.Atan2(_vy, _vx);
-        float slipAng = velAng - _heading;
-        while (slipAng > MathF.PI) slipAng -= MathF.Tau;
-        while (slipAng < -MathF.PI) slipAng += MathF.Tau;
-        _steerWheel = Math.Clamp(slipAng * 0.85f, -0.52f, 0.52f);
-
+        float driftAmt = Math.Clamp(MathF.Abs(_slipAngle) / 0.65f, 0f, 1.25f);
         float fwdX = MathF.Cos(_heading), fwdY = MathF.Sin(_heading);
         float rightX = -fwdY, rightY = fwdX;
-        float aimX = MathF.Cos(targetAng), aimY = MathF.Sin(targetAng);
-
-        float targetSpeed = (165f + loud * 165f + bass * 155f + kick * 95f + hit * 75f) * calm;
-        float desiredVx = (aimX * 0.78f + fwdX * 0.22f) * targetSpeed;
-        float desiredVy = (aimY * 0.78f + fwdY * 0.22f) * targetSpeed;
-        float grip = 2.9f;
-        _vx += (desiredVx - _vx) * (1f - MathF.Exp(-dt * grip));
-        _vy += (desiredVy - _vy) * (1f - MathF.Exp(-dt * grip));
-        _cx = Math.Clamp(_cx + _vx * dt, stage.X + 42f, stage.Right - 42f);
-        _cy = Math.Clamp(_cy + _vy * dt, stage.Y + 42f, stage.Bottom - 42f);
-
-        float latSpeed = MathF.Abs(_vx * rightX + _vy * rightY);
-        float driftAmt = Math.Clamp((latSpeed - 18f) / 135f, 0f, 1.2f);
 
         const float carLen = 44f, carWid = 22f;
         float rlX = _cx - fwdX * (carLen * 0.36f) - rightX * (carWid * 0.44f);
@@ -157,31 +168,46 @@ public static class DriftCarFx
         float exX = _cx - fwdX * (carLen * 0.52f) + rightX * (carWid * 0.22f);
         float exY = _cy - fwdY * (carLen * 0.52f) + rightY * (carWid * 0.22f);
 
-        // 2. Emit Skid Marks + Fluffy Smoke when drifting in either direction!
-        if (driftAmt > 0.14f)
+        // 4. Draw Subtle Glowing Future Fourier Racing Line ahead of the car!
+        float rpx = _cx, rpy = _cy;
+        const int lineSteps = 22;
+        for (int s = 1; s <= lineSteps; s++)
+        {
+            float f = s / (float)lineSteps;
+            EvalFourier(_theta + f * 0.95f, midX, midY, rx, ry, out float nx, out float ny, out _, out _, out _);
+            nx = Math.Clamp(nx, stage.X + 42f, stage.Right - 42f);
+            ny = Math.Clamp(ny, stage.Y + 42f, stage.Bottom - 42f);
+            float fade = (1f - f) * (1f - f) * (0.20f + bass * 0.22f) * calm;
+            if (fade > 0.01f)
+                Gfx.Line(rpx, rpy, nx, ny, Gfx.Fade(Gfx.Mix(accentCol, bodyCol, f), fade), 2.0f);
+            rpx = nx; rpy = ny;
+        }
+
+        // 5. Emit Skid Marks, Tire Smoke & Beat Backfire Sparks
+        if (driftAmt > 0.16f)
         {
             float distRL = MathF.Sqrt((rlX - _prevRLx) * (rlX - _prevRLx) + (rlY - _prevRLy) * (rlY - _prevRLy));
-            if (distRL > 3f && distRL < 55f)
+            if (distRL > 2.5f && distRL < 55f)
             {
-                uint skCol = Gfx.Mix(0xFF0A0A12, accentCol, 0.28f + bass * 0.35f);
+                uint skCol = Gfx.Mix(0xFF0A0A12, accentCol, 0.30f + bass * 0.35f);
                 _skids[_skidIdx] = new SkidSeg { X0 = _prevRLx, Y0 = _prevRLy, X1 = rlX, Y1 = rlY, Life = 1f, Col = skCol };
                 _skidIdx = (_skidIdx + 1) % MaxSkids;
                 _skids[_skidIdx] = new SkidSeg { X0 = _prevRRx, Y0 = _prevRRy, X1 = rrX, Y1 = rrY, Life = 1f, Col = skCol };
                 _skidIdx = (_skidIdx + 1) % MaxSkids;
             }
 
-            if (Rand01() < 0.58f + driftAmt * 0.40f)
+            if (Rand01() < 0.55f + driftAmt * 0.42f)
             {
-                bool leftWheel = Rand01() < 0.5f;
+                bool leftW = Rand01() < 0.5f;
                 float ml = 0.55f + Rand01() * 0.50f;
                 _smoke[_smokeIdx] = new SmokePuff
                 {
-                    X = leftWheel ? rlX : rrX, Y = leftWheel ? rlY : rrY,
-                    Vx = -_vx * 0.10f + (Rand01() - 0.5f) * 26f,
-                    Vy = -_vy * 0.10f + (Rand01() - 0.5f) * 26f,
+                    X = leftW ? rlX : rrX, Y = leftW ? rlY : rrY,
+                    Vx = -vx * 0.06f + (Rand01() - 0.5f) * 24f,
+                    Vy = -vy * 0.06f + (Rand01() - 0.5f) * 24f,
                     R = 4.5f + driftAmt * 6.5f + bass * 4.5f,
                     Life = ml, MaxLife = ml,
-                    Col = leftWheel ? smokeCol1 : smokeCol2,
+                    Col = leftW ? smokeCol1 : smokeCol2,
                 };
                 _smokeIdx = (_smokeIdx + 1) % MaxSmoke;
             }
@@ -209,16 +235,14 @@ public static class DriftCarFx
         }
         _backfire *= MathF.Exp(-dt * 12f);
 
-        // 3. Draw Tire Skid Marks
+        // 6. Render Skid Marks, Fluffy Smoke, Sparks
         for (int i = 0; i < MaxSkids; i++)
         {
             if (_skids[i].Life <= 0.01f) continue;
-            _skids[i].Life -= dt * 0.40f;
+            _skids[i].Life -= dt * 0.36f;
             if (_skids[i].Life <= 0.01f) continue;
-            Gfx.Line(_skids[i].X0, _skids[i].Y0, _skids[i].X1, _skids[i].Y1, Gfx.Fade(_skids[i].Col, _skids[i].Life * 0.42f * calm), 3.0f);
+            Gfx.Line(_skids[i].X0, _skids[i].Y0, _skids[i].X1, _skids[i].Y1, Gfx.Fade(_skids[i].Col, _skids[i].Life * 0.44f * calm), 3.0f);
         }
-
-        // 4. Draw Soft 2-Layer Fluffy Drift Smoke
         for (int i = 0; i < MaxSmoke; i++)
         {
             if (_smoke[i].Life <= 0.01f) continue;
@@ -232,8 +256,6 @@ public static class DriftCarFx
             Gfx.Circle(_smoke[i].X, _smoke[i].Y, _smoke[i].R * 1.45f, Gfx.Fade(_smoke[i].Col, a * 0.45f));
             Gfx.Circle(_smoke[i].X, _smoke[i].Y, _smoke[i].R * 0.85f, Gfx.Fade(_smoke[i].Col, a));
         }
-
-        // 5. Draw Exhaust Sparks
         for (int i = 0; i < MaxSparks; i++)
         {
             if (_sparks[i].Life <= 0.01f) continue;
@@ -246,12 +268,11 @@ public static class DriftCarFx
             _sparks[i].Vx *= MathF.Exp(-dt * 4f); _sparks[i].Vy *= MathF.Exp(-dt * 4f);
         }
 
-        // 6. Draw Styled Top-Down Coupe with Counter-Steering Front Wheels & Soft Layered Headlight Cones!
+        // 7. Render Top-Down Coupe with Counter-Steering Front Wheels & Soft Layered Headlight Cones
         var savedTf = Gfx.DC.Transform;
         var carTf = Matrix3x2.CreateRotation(_heading) * Matrix3x2.CreateTranslation(_cx, _cy) * savedTf;
         Gfx.DC.Transform = carTf;
 
-        // Soft 3-step feathered headlight beams (no hard rectangle edges!)
         float beamLen = 74f + high * 32f;
         for (int side = -1; side <= 1; side += 2)
         {
@@ -262,7 +283,6 @@ public static class DriftCarFx
             Gfx.Circle(sx + beamLen * 0.12f, ly + side * 1.5f, 6.5f, Gfx.Fade(0xFFFFFFFF, 0.16f * calm));
         }
 
-        // Visible counter-steering front wheels sticking slightly out of front fenders during hard drifts!
         for (int side = -1; side <= 1; side += 2)
         {
             Gfx.DC.Transform = Matrix3x2.CreateRotation(_steerWheel) * Matrix3x2.CreateTranslation(carLen * 0.28f, side * carWid * 0.50f) * carTf;
@@ -270,10 +290,8 @@ public static class DriftCarFx
         }
         Gfx.DC.Transform = carTf;
 
-        // Soft underglow neon aura pulsing to bass
         Gfx.Fill(new R(-carLen * 0.55f, -carWid * 0.60f, carLen * 1.10f, carWid * 1.20f), Gfx.Fade(accentCol, (0.24f + bass * 0.32f) * calm), 10f);
 
-        // Exhaust backfire nitro flame
         if (_backfire > 0.08f)
         {
             float fLen = 10f + _backfire * 20f;

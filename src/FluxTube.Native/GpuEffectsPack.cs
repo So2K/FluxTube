@@ -280,20 +280,19 @@ float2 TunnelPath(float x)
 float4 PS_Tunnel(VSOut i) : SV_Target
 {
     const float TAU = 6.2831853071795865;
-    const int TUNNEL_LAYERS = 96;
+    const int TUNNEL_LAYERS = 104;
     const float RING_POINTS = 128.0;
 
-    // Wider cinematic FOV (1.45x) so the tunnel feels deeper, grander, and further ahead!
-    float2 uv = (i.uv - 0.5) * float2(aspect, 1.0) * 1.45;
-    float invResY = texel.y * 1.45;
+    // Exact Shadertoy Xlt3R8 1:1 coords (reaches ALL 4 screen corners with zero cutoff!)
+    float2 uv = (i.uv - 0.5) * float2(aspect, 1.0);
+    float invResY = texel.y; // 1.0 / 576.0
     float repAngle = TAU / RING_POINTS;
-    float pointSize = (2.1 + bass * 0.70 + hit * 0.50) * 0.5 * invResY;
+    float pointSize = (1.8 + bass * 0.45) * 0.5 * invResY;
 
-    // Integrated audio-reactive camera Z (param0) + stereo L/R steer (param1) + treble/loudness Y steer (extra)!
     float camZ = param0;
     float2 camOffs = TunnelPath(camZ);
     float2 audioSteer = float2(param1, extra);
-    float layerScroll = camZ - (4.0 / (float)TUNNEL_LAYERS) * floor(camZ / (4.0 / (float)TUNNEL_LAYERS));
+    float layerScroll = camZ - (4.0 / 96.0) * floor(camZ / (4.0 / 96.0));
 
     float3 color = 0;
     float maxAlpha = 0.0;
@@ -301,38 +300,35 @@ float4 PS_Tunnel(VSOut i) : SV_Target
     [loop]
     for (int k = 1; k <= TUNNEL_LAYERS; k++)
     {
-        float pz = 1.0 - ((float)k / (float)TUNNEL_LAYERS);
+        float pz = 1.0 - ((float)k / 96.0);
         pz -= layerScroll;
-        if (pz < -0.15) continue;
+        float denom = pz * 0.8 + 0.36;
+        if (denom < 0.14) continue;
 
-        // Curve ahead bends smoothly with Perlin path + live Stereo L/R & Treble/Bass audio steering!
         float ahead = max(0.0, pz);
-        float2 offs = (TunnelPath(camZ + pz) - camOffs) + audioSteer * (ahead * ahead * 1.15);
-
-        float denom = pz * 0.8 + 0.4;
-        float ringRad = (0.15 + bass * 0.014 * (1.0 - ahead)) * (1.0 / (denom * denom));
+        float2 offs = (TunnelPath(camZ + pz) - camOffs) + audioSteer * (ahead * ahead * 0.95);
+        float ringRad = 0.15 / (denom * denom);
         float distFromRing = abs(length(uv + offs) - ringRad);
 
         if (distFromRing < pointSize * 2.2)
         {
             float2 aruv = AngRep(uv + offs, repAngle);
             float pdist = length(aruv - float2(ringRad, 0.0)) - pointSize;
-            float blend = 1.0 - smoothstep(0.0, invResY * 1.35, pdist);
+            float blend = 1.0 - smoothstep(0.0, invResY * 1.45, pdist);
             if (blend > 0.005)
             {
-                // Classic Xlt3R8 alternating stripes tinted with crisp white + evolving cover triad!
                 float stripe = fmod(floor((float)k * 0.5), 2.0);
-                float3 colA = lerp(col2, float3(1.0, 1.0, 1.0), 0.74);
-                float3 colB = lerp(col0, col1, clamp(ahead * 1.2, 0.0, 1.0));
+                float3 colA = lerp(col2, float3(1.0, 1.0, 1.0), 0.78);
+                float3 colB = lerp(col0, col1, clamp(ahead * 1.2, 0.0, 1.0)) * 0.78;
                 float3 ptColor = (stripe < 0.5) ? colA : colB;
-                float shade = clamp(1.0 - ahead, 0.05, 1.0) * (0.78 + bass * 0.35 + high * 0.25);
+                float shade = clamp(1.0 - ahead, 0.04, 1.0);
                 color = lerp(color, ptColor * shade, blend);
                 maxAlpha = max(maxAlpha, blend * shade);
             }
         }
     }
 
-    float a = clamp(maxAlpha * 1.15, 0.0, 0.95) * calm * edgeFade(i.uv);
+    float a = clamp(maxAlpha * 1.10, 0.0, 0.94) * calm;
     return float4(color * a, a);
 }
 
