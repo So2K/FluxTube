@@ -964,6 +964,12 @@ public static unsafe class AudioAnalyzer
                                             float sL = fp[baseIdx], sR = fp[baseIdx + 1];
                                             sumSqL += sL * sL;
                                             sumSqR += sR * sR;
+                                            if (VinylEngine.WantCapture) VinylEngine.FeedStereo(sL, sR);
+                                        }
+                                        else if (VinylEngine.WantCapture)
+                                        {
+                                            float m = fp[baseIdx];
+                                            VinylEngine.FeedStereo(m, m);
                                         }
                                         for (int c = 0; c < channels; c++) sum += fp[baseIdx + c];
                                         float raw = sum * invRaw;
@@ -990,6 +996,12 @@ public static unsafe class AudioAnalyzer
                                             float sL = sp[baseIdx] / 32768f, sR = sp[baseIdx + 1] / 32768f;
                                             sumSqL += sL * sL;
                                             sumSqR += sR * sR;
+                                            if (VinylEngine.WantCapture) VinylEngine.FeedStereo(sL, sR);
+                                        }
+                                        else if (VinylEngine.WantCapture)
+                                        {
+                                            float m = sp[baseIdx] / 32768f;
+                                            VinylEngine.FeedStereo(m, m);
                                         }
                                         for (int c = 0; c < channels; c++) sum += sp[baseIdx + c];
                                         float raw = sum * rawScale;

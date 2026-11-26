@@ -117,6 +117,8 @@ public static class AudioStudioPanel
         _tab = tab;
         if (!Open) _openedAt = UI.Now;
         Open = true;
+        VinylEngine.WantCapture = true;
+        AudioAnalyzer.KeepAlive();
         _dragBand = -1;
         _dragCurveBand = -1;
         _dragKnob = null;
@@ -132,6 +134,7 @@ public static class AudioStudioPanel
         if (!Open) return;
         ReleaseHoldIfNeeded();
         EndScratchIfNeeded();
+        VinylEngine.WantCapture = false;
         Open = false;
         _dragBand = -1;
         _dragCurveBand = -1;
@@ -303,32 +306,31 @@ public static class AudioStudioPanel
         }
         else if (_brakeState == 4)
         {
-            // Signature DJ Vinyl Backspin: rapid pitch whip down -> jump back 1.8s -> crisp spin up!
-            float t = Math.Clamp((now - _brakeStartMs) / 560f, 0f, 1f);
-            if (t < 0.48f)
+            // TRUE REVERSE DJ Vinyl Backspin via zero-latency VinylEngine RAM buffer (-3.8x reverse -> 0x -> drop back into beat!)
+            float t = Math.Clamp((now - _brakeStartMs) / 580f, 0f, 1f);
+            if (!VinylEngine.Active && !_backspinJumped)
             {
-                float k = t / 0.48f;
-                float sp = 2.45f - 2.15f * k; // 2.45x -> 0.30x audible vinyl whip!
-                _platterAngle = (_platterAngle - 0.52f) % MathF.Tau;
-                if (now - _lastBrakeCmdMs >= 28) { _lastBrakeCmdMs = now; mpv.SetSpeed(sp); }
+                if (VinylEngine.BeginScratch(-3.8f))
+                    mpv.Command("set", "mute", "yes");
+            }
+            if (VinylEngine.Active)
+            {
+                float revVel = -3.8f * (1f - t) * (1f - t);
+                VinylEngine.SetVelocity(revVel);
+                _platterAngle = (_platterAngle + revVel * 0.16f) % MathF.Tau;
             }
             else
             {
-                if (!_backspinJumped)
-                {
-                    _backspinJumped = true;
-                    double backTo = Math.Max(0, mpv.TimePos - 1.8);
-                    mpv.Command("seek", backTo.ToString("0.###", CultureInfo.InvariantCulture), "absolute+exact");
-                }
-                float k = (t - 0.48f) / 0.52f;
-                float ease = 1f - (1f - k) * (1f - k);
-                float sp = 0.30f + (_brakeTargetSpeed - 0.30f) * ease;
-                if (now - _lastBrakeCmdMs >= 28 || t >= 1f) { _lastBrakeCmdMs = now; mpv.SetSpeed(sp); }
+                _platterAngle = (_platterAngle - 0.52f) % MathF.Tau;
             }
             UI.Animate();
             if (t >= 1f)
             {
                 _brakeState = 0;
+                double deltaSec = VinylEngine.EndScratch();
+                double backTo = Math.Max(0, mpv.TimePos + (deltaSec < -0.15 ? deltaSec : -1.5));
+                mpv.Command("seek", backTo.ToString("0.###", CultureInfo.InvariantCulture), "absolute+exact");
+                mpv.Command("set", "mute", mpv.Muted ? "yes" : "no");
                 mpv.SetSpeed(_brakeTargetSpeed);
                 mpv.Command("set", "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
             }
@@ -355,8 +357,19 @@ public static class AudioStudioPanel
         _scratchVel = 0f;
         var mpv = MpvPlayer.Instance;
         var s = AppSettings.Current;
+        bool wasEngine = VinylEngine.Active;
+        double deltaSec = VinylEngine.EndScratch();
         if (mpv.IsReady && mpv.HasMedia)
         {
+            if (wasEngine)
+            {
+                if (Math.Abs(deltaSec) > 0.06)
+                {
+                    double target = Math.Max(0, _scratchPos + deltaSec);
+                    mpv.Command("seek", target.ToString("0.###", CultureInfo.InvariantCulture), "absolute+exact");
+                }
+                mpv.Command("set", "mute", mpv.Muted ? "yes" : "no");
+            }
             mpv.SetSpeed(_scratchBaseSpeed);
             mpv.Command("set", "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
             if (!_scratchWasPlaying) mpv.SetPause(true);
@@ -1094,10 +1107,17 @@ public static class AudioStudioPanel
             _scratchBaseSpeed = s.AudioFxEnabled ? Math.Clamp(s.FxSpeed, 0.5f, 1.6f) : 1.0f;
             _scratchWasPlaying = !mpv.Paused;
             _lastScratchCmdMs = 0;
-            // Live audible vinyl touch! Keep playback running with vinyl pitch unlocked (Technics SL-1200 / CDJ jog wheel!)
-            mpv.Command("set", "audio-pitch-correction", "no");
-            if (mpv.Paused) mpv.SetPause(false);
-            mpv.SetSpeed(0.28); // audible hand-on-vinyl drag slowdown immediately!
+            // Zero-latency Reaper/Serato RAM-buffer scratch (forward AND true reverse, ZERO mpv seek stutters!)
+            if (VinylEngine.BeginScratch(0f))
+            {
+                mpv.Command("set", "mute", "yes");
+            }
+            else
+            {
+                mpv.Command("set", "audio-pitch-correction", "no");
+                if (mpv.Paused) mpv.SetPause(false);
+                mpv.SetSpeed(0.28);
+            }
             Sfx.Tick();
         }
         if (_scratching && UI.Down && mpv.HasMedia)
@@ -1109,29 +1129,21 @@ public static class AudioStudioPanel
             _scratchLastAngle = ang;
             _platterAngle = (_platterAngle + dAng) % (MathF.PI * 2f);
 
-            // Angular velocity (rad/s) -> live audible vinyl speed & pitch warp!
-            float instVel = dAng / MathF.Max(0.008f, dt);
-            _scratchVel += (instVel - _scratchVel) * 0.42f;
-            _scratchPos = mpv.TimePos;
-
-            if (now - _lastScratchCmdMs >= 32)
+            // Angular velocity (rad/s) -> live 1:1 vinyl scratch speed (-4.2x reverse .. 0 hold .. +4.2x forward)!
+            float instVel = dAng / MathF.Max(0.006f, dt);
+            _scratchVel += (instVel - _scratchVel) * 0.48f;
+            if (VinylEngine.Active)
+            {
+                // 33.3 RPM = 3.49 rad/s = 1.0x normal playback speed!
+                float targetSpeed = Math.Clamp(_scratchVel / 3.49f, -4.2f, 4.2f);
+                VinylEngine.SetVelocity(targetSpeed);
+                UI.Animate();
+            }
+            else if (now - _lastScratchCmdMs >= 32)
             {
                 _lastScratchCmdMs = now;
-                if (_scratchVel < -1.1f)
-                {
-                    // Counter-clockwise flick -> audible vinyl back-scratch zip + crisp step back!
-                    double stepBack = Math.Clamp(-_scratchVel * 0.055, 0.08, 0.42);
-                    double target = Math.Max(0, mpv.TimePos - stepBack);
-                    mpv.SetSpeed(Math.Clamp(0.45f + MathF.Min(1.6f, -_scratchVel * 0.14f), 0.45f, 2.1f));
-                    mpv.Command("seek", target.ToString("0.###", CultureInfo.InvariantCulture), "absolute+exact");
-                    _scratchPos = target;
-                }
-                else
-                {
-                    // Holding still = deep 0.22x drag; clockwise spin = live pitch-up 0.30x..2.50x!
-                    float sp = Math.Clamp(0.22f + MathF.Max(0f, _scratchVel) * 0.34f, 0.22f, 2.50f);
-                    mpv.SetSpeed(sp);
-                }
+                float sp = Math.Clamp(0.22f + MathF.Max(0f, _scratchVel) * 0.34f, 0.22f, 2.50f);
+                mpv.SetSpeed(sp);
             }
             UI.Hand();
         }

@@ -2322,8 +2322,14 @@ public static unsafe class Gfx
             for (int i = 95; i < 145; i++) if (secs[i] == 3) dropCnt++;
             Assert(chillCnt >= 40 && buildCnt >= 3 && dropCnt >= 40,
                 $"Drop/Buildup analyzer misclassified synthetic track (chill={chillCnt}, buildup={buildCnt}, drop={dropCnt})");
-            var msg5 = $"PASS [5/5] Track Drop/Buildup Analyzer (chill={chillCnt}/55, buildup={buildCnt}/7, drop={dropCnt}/50)";
+            var msg5 = $"PASS [5/6] Track Drop/Buildup Analyzer (chill={chillCnt}/55, buildup={buildCnt}/7, drop={dropCnt}/50)";
             Services.Paths.Log("self-test: " + msg5); Console.WriteLine(msg5);
+
+            // TEST 6: Zero-latency VinylEngine Catmull-Rom forward & TRUE REVERSE scratch synthesis
+            var (vOk, fwdD, revD, vPeak) = VinylEngine.SelfTestScratch();
+            Assert(vOk, $"VinylEngine scratch test failed (fwd={fwdD:0}, rev={revD:0}, peak={vPeak:0.00})");
+            var msg6 = $"PASS [6/6] VinylEngine Catmull-Rom Scratch (fwd=+{fwdD:0} smp, rev={revD:0} smp, peak={vPeak:0.00})";
+            Services.Paths.Log("self-test: " + msg6); Console.WriteLine(msg6);
 
             MusicBounce.Update(false, 0.016f);
             DisposeMotionBlurResources();

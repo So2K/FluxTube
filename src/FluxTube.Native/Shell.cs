@@ -3153,6 +3153,7 @@ public static class Shell
             Loupe.Shutdown();
             PreviewPlayer.Shutdown();
             AudioAnalyzer.Shutdown();
+            VinylEngine.Shutdown();
             Sfx.Shutdown();
             BgPlayers.DisposeAll();
             AppSettings.Current.Save();
