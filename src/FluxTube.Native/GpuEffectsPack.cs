@@ -25,8 +25,8 @@ namespace FluxTube;
 /// </summary>
 public static unsafe partial class GpuEffectsPack
 {
-    private const int OutW = 1024, OutH = 576;
-    private const int WaterW = 384, WaterH = 216;
+    private const int OutW = 1280, OutH = 720;
+    private const int WaterW = 640, WaterH = 360;
     private const int SimW = 512, SimH = 288;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -411,46 +411,91 @@ float4 PS_Synthwave(VSOut i) : SV_Target
     return float4(c * a, a);
 }
 
-// ==================== 6. WATER RIPPLES + CAUSTICS ====================
+// ==================== 6. HD ISOTROPIC WATER RIPPLES + CAUSTICS (640x360, 2x Sub-steps, 9-pt Laplacian, Scharr 3x3 Normals) ====================
 float4 PS_WaterStep(VSOut i) : SV_Target
 {
-    float2 c = tex0.Sample(linClamp, i.uv).rg;
-    float l = tex0.Sample(linClamp, i.uv - float2(texel.x, 0)).r;
-    float r = tex0.Sample(linClamp, i.uv + float2(texel.x, 0)).r;
-    float t = tex0.Sample(linClamp, i.uv - float2(0, texel.y)).r;
-    float b = tex0.Sample(linClamp, i.uv + float2(0, texel.y)).r;
+    // Aspect-compensated isotropic stencil so ripples stay perfectly circular at ANY window aspect ratio!
+    float ax = clamp((16.0 / 9.0) / max(aspect, 0.45), 0.55, 1.95);
+    float2 dx = float2(texel.x * ax, 0.0);
+    float2 dy = float2(0.0, texel.y);
 
-    float h = ((l + r + t + b) * 0.5 - c.g) * (0.972 + 0.014 * calm);
-    float2 p0 = float2(0.5 + 0.34 * sin(time * 0.85) + pan * 0.10, 0.5 + 0.28 * cos(time * 1.12));
-    float2 p1 = float2(0.5 - 0.36 * cos(time * 0.72 + 1.3), 0.5 + 0.26 * sin(time * 0.94));
-    float2 d0 = (i.uv - p0) * float2(aspect, 1.0);
-    float2 d1 = (i.uv - p1) * float2(aspect, 1.0);
-    h += exp(-dot(d0, d0) / 0.0012) * (0.14 + bass * 0.42 + hit * 0.35) * calm * sin(time * 18.0);
-    h += exp(-dot(d1, d1) / 0.0010) * (0.10 + mid * 0.36 + high * 0.25) * calm * cos(time * 15.0);
-    if (beat > 0.5)
+    float2 c = tex0.Sample(linClamp, i.uv).rg;
+    float l  = tex0.Sample(linClamp, i.uv - dx).r;
+    float r  = tex0.Sample(linClamp, i.uv + dx).r;
+    float t  = tex0.Sample(linClamp, i.uv - dy).r;
+    float b  = tex0.Sample(linClamp, i.uv + dy).r;
+    float tl = tex0.Sample(linClamp, i.uv - dx - dy).r;
+    float tr = tex0.Sample(linClamp, i.uv + dx - dy).r;
+    float bl = tex0.Sample(linClamp, i.uv - dx + dy).r;
+    float br = tex0.Sample(linClamp, i.uv + dx + dy).r;
+
+    // 9-point isotropic Laplacian (eliminates diamond/chewed grid artifacts completely)
+    float avg = (l + r + t + b) * 0.20 + (tl + tr + bl + br) * 0.05;
+    float lap = avg - c.r;
+    float damp = 0.986 + 0.008 * calm;
+    float h = (2.0 * c.r - c.g + lap * 1.18) * damp;
+
+    // Inject audio droplets only on the primary sub-step (extra > 0.5) to keep impulses crisp & un-doubled
+    if (extra > 0.5)
     {
-        float2 db = (i.uv - float2(param0, param1)) * float2(aspect, 1.0);
-        h += exp(-dot(db, db) / 0.0028) * (0.55 + bass * 0.65) * calm;
+        float2 p0 = float2(0.5 + 0.33 * sin(time * 0.85) + pan * 0.10, 0.5 + 0.28 * cos(time * 1.12));
+        float2 p1 = float2(0.5 - 0.35 * cos(time * 0.72 + 1.3), 0.5 + 0.26 * sin(time * 0.94));
+        float2 p2 = float2(0.5 + 0.26 * cos(time * 1.28 - 0.6), 0.5 - 0.30 * sin(time * 0.88 + 0.9));
+        float2 d0 = (i.uv - p0) * float2(aspect, 1.0);
+        float2 d1 = (i.uv - p1) * float2(aspect, 1.0);
+        float2 d2 = (i.uv - p2) * float2(aspect, 1.0);
+        h += exp(-dot(d0, d0) / 0.0014) * (0.11 + bass * 0.30 + hit * 0.24) * calm * sin(time * 16.0);
+        h += exp(-dot(d1, d1) / 0.0011) * (0.08 + mid * 0.26 + high * 0.18) * calm * cos(time * 14.0);
+        h += exp(-dot(d2, d2) / 0.00075) * (0.05 + high * 0.22 + mid * 0.10) * calm * sin(time * 21.0 + 1.1);
+        if (beat > 0.5)
+        {
+            float2 db = (i.uv - float2(param0, param1)) * float2(aspect, 1.0);
+            h += exp(-dot(db, db) / 0.0032) * (0.38 + bass * 0.44) * calm;
+        }
     }
-    return float4(clamp(h, -1.8, 1.8), c.r, 0, 1);
+
+    // Smooth C-infinity rational soft-clip (prevents flat blown-out circular pancakes on heavy bass!)
+    h = (1.65 * h) / (1.65 + abs(h) * 0.52);
+    return float4(h, c.r, 0, 1);
 }
 
 float4 PS_WaterDisplay(VSOut i) : SV_Target
 {
-    float l = tex0.Sample(linClamp, i.uv - float2(texel.x, 0)).r;
-    float r = tex0.Sample(linClamp, i.uv + float2(texel.x, 0)).r;
-    float t = tex0.Sample(linClamp, i.uv - float2(0, texel.y)).r;
-    float b = tex0.Sample(linClamp, i.uv + float2(0, texel.y)).r;
-    float h = tex0.Sample(linClamp, i.uv).r;
-    float3 n = normalize(float3((l - r) * 3.8, (t - b) * 3.8, 1.0));
-    float ndl = max(0.0, dot(n, normalize(float3(-0.35, -0.55, 0.75))));
-    float spec = pow(ndl, 28.0) * 1.15;
-    float caustic = pow(clamp(1.0 - abs(n.x) - abs(n.y), 0.0, 1.0), 4.0) * abs(h) * 2.2;
-    float fresnel = pow(1.0 - n.z, 2.5);
-    float3 waterCol = lerp(col0, col1, clamp(0.5 + n.x * 1.4 + n.y * 0.8, 0.0, 1.0));
-    float3 c = waterCol * (caustic * 0.85 + fresnel * 1.35 + abs(h) * 0.55) + spec * lerp(waterCol, float3(1, 1, 1), 0.75);
-    c = c / (1.0 + 0.35 * c);
-    float a = clamp(max(c.r, max(c.g, c.b)) * 1.15, 0.0, 0.88) * edgeFade(i.uv);
+    float ax = clamp((16.0 / 9.0) / max(aspect, 0.45), 0.55, 1.95);
+    float2 dx = float2(texel.x * ax * 1.15, 0.0);
+    float2 dy = float2(0.0, texel.y * 1.15);
+
+    // 3x3 Scharr gradient filter for razor-smooth, artifact-free 3D water normals
+    float tl = tex0.Sample(linClamp, i.uv - dx - dy).r;
+    float t  = tex0.Sample(linClamp, i.uv - dy).r;
+    float tr = tex0.Sample(linClamp, i.uv + dx - dy).r;
+    float l  = tex0.Sample(linClamp, i.uv - dx).r;
+    float h  = tex0.Sample(linClamp, i.uv).r;
+    float r  = tex0.Sample(linClamp, i.uv + dx).r;
+    float bl = tex0.Sample(linClamp, i.uv - dx + dy).r;
+    float b  = tex0.Sample(linClamp, i.uv + dy).r;
+    float br = tex0.Sample(linClamp, i.uv + dx + dy).r;
+
+    float gx = (3.0 * tl + 10.0 * l + 3.0 * bl - 3.0 * tr - 10.0 * r - 3.0 * br) * (1.0 / 16.0);
+    float gy = (3.0 * tl + 10.0 * t + 3.0 * tr - 3.0 * bl - 10.0 * b - 3.0 * br) * (1.0 / 16.0);
+    float3 n = normalize(float3(gx * 4.2, gy * 4.2, 1.0));
+
+    // Dual-light studio reflection + glass Fresnel + multi-layer refractive caustics
+    float ndl1 = max(0.0, dot(n, normalize(float3(-0.36, -0.54, 0.76))));
+    float ndl2 = max(0.0, dot(n, normalize(float3(0.48, 0.32, 0.82))));
+    float spec = pow(ndl1, 34.0) * 1.10 + pow(ndl2, 22.0) * 0.42;
+
+    float slope = length(n.xy);
+    float caustic = pow(clamp(1.0 - slope * 1.15, 0.0, 1.0), 3.6) * abs(h) * 2.35;
+    float crest = smoothstep(0.10, 0.75, slope) * (0.45 + abs(h) * 0.55);
+    float fresnel = pow(1.0 - n.z, 2.3);
+
+    float3 waterCol = lerp(col0, col1, clamp(0.5 + n.x * 1.45 + n.y * 0.85, 0.0, 1.0));
+    float3 c = waterCol * (caustic * 0.82 + fresnel * 1.40 + crest * 0.42 + abs(h) * 0.50)
+             + spec * lerp(waterCol, float3(1.0, 1.0, 1.0), 0.78);
+    // Filmic shoulder tone-mapping so bright crests stay glossy & dimensional instead of clipping flat
+    c = c / (1.0 + 0.38 * c);
+    float a = clamp(max(c.r, max(c.g, c.b)) * 1.16, 0.0, 0.88) * edgeFade(i.uv);
     return float4(c * a, a);
 }
 
@@ -738,15 +783,17 @@ float4 PS_GpuFire(VSOut i) : SV_Target
     private static long _lastStepMs;
     private static int _seed;
     private static float _tunnelZ, _tunnelSteerX, _tunnelSteerY;
+    private static float _reqAspect = (float)OutW / OutH;
 
     public static ID2D1Bitmap1? OutputBitmap => _d2dBmp;
 
-    public static void RequestStep(string mode, uint dom1, uint dom2, float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit)
+    public static void RequestStep(string mode, uint dom1, uint dom2, float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float aspect = 16f / 9f)
     {
         _reqMode = mode;
         _reqDom1 = dom1; _reqDom2 = dom2;
         _reqBass = bass; _reqMid = mid; _reqHigh = high;
         _reqHit = hit; _reqPan = pan; _reqQuiet = quietDim;
+        _reqAspect = Math.Clamp(aspect, 0.5f, 3.2f);
         if (beatHit) _reqBeat = true;
     }
 
@@ -875,11 +922,11 @@ float4 PS_GpuFire(VSOut i) : SV_Target
         float dt = _lastStepMs == 0 ? 0.016f : Math.Clamp((now - _lastStepMs) * 0.001f, 0.008f, 0.025f);
         _lastStepMs = now;
         bool beat = _reqBeat; _reqBeat = false;
-        ExecuteStep(mode, (now - UI.StartTick) * 0.001f, dt, _reqDom1, _reqDom2, _reqBass, _reqMid, _reqHigh, _reqHit, _reqPan, _reqQuiet, beat);
+        ExecuteStep(mode, (now - UI.StartTick) * 0.001f, dt, _reqDom1, _reqDom2, _reqBass, _reqMid, _reqHigh, _reqHit, _reqPan, _reqQuiet, beat, _reqAspect);
     }
 
     private static void ExecuteStep(string mode, float t, float dt, uint dom1, uint dom2,
-        float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit)
+        float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float stageAspect = 16f / 9f)
     {
         if (!EnsureInit()) return;
         var dev = Gfx.D3DDevice;
@@ -920,7 +967,7 @@ float4 PS_GpuFire(VSOut i) : SV_Target
             R0 = r0, G0 = g0, B0 = b0, Param0 = bx,
             R1 = r1, G1 = g1, B1 = b1, Param1 = by,
             R2 = r2, G2 = g2, B2 = b2, Beat = beatHit ? 1f : 0f,
-            TexelX = 1f / OutW, TexelY = 1f / OutH, Aspect = (float)OutW / OutH,
+            TexelX = 1f / OutW, TexelY = 1f / OutH, Aspect = Math.Clamp(stageAspect, 0.5f, 3.2f),
         };
 
         switch (mode)
@@ -970,8 +1017,14 @@ float4 PS_GpuFire(VSOut i) : SV_Target
                     ctx.ClearRenderTargetView(_waterRt.RtvB, new Color4(0, 0, 0, 0));
                 }
                 cb.TexelX = 1f / WaterW; cb.TexelY = 1f / WaterH;
-                QuadPass(ctx, _psWaterStep!, _waterRt.RtvB, WaterW, WaterH, _waterRt.SrvA, cb);
-                _waterRt.Swap();
+                // 2 isotropic sub-steps per frame at 640x360 for silky, crisp high-res wave propagation
+                for (int s = 0; s < 2; s++)
+                {
+                    cb.Extra = s == 0 ? 1f : 0f;
+                    cb.Beat = (s == 0 && beatHit) ? 1f : 0f;
+                    QuadPass(ctx, _psWaterStep!, _waterRt.RtvB, WaterW, WaterH, _waterRt.SrvA, cb);
+                    _waterRt.Swap();
+                }
                 QuadPass(ctx, _psWaterDisp!, _outRtv!, OutW, OutH, _waterRt.SrvA, cb);
                 break;
             case "ferro":

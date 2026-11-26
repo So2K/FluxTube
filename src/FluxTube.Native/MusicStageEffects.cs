@@ -870,16 +870,17 @@ public static unsafe class MusicStageEffects
         {
             bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.34f;
             if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
+            float stageAspect = stage.W / MathF.Max(stage.H, 1f);
             GpuEffectsPack.RequestStep(mode, dom1, dom2,
                 AudioAnalyzer.BassEnergy, AudioAnalyzer.MidEnergy, AudioAnalyzer.HighEnergy,
-                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit);
+                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit, stageAspect);
 
             var fxBmp = GpuEffectsPack.OutputBitmap;
             if (fxBmp != null)
             {
                 float fxOp = Math.Clamp(0.76f + AudioAnalyzer.BassEnergy * 0.20f, 0.52f, 0.96f) * Math.Clamp(1f - qDim * 0.72f, 0.20f, 1f);
                 Gfx.DC.DrawBitmap(fxBmp, new RawRectF(stage.X, stage.Y, stage.Right, stage.Bottom), fxOp,
-                    Vortice.Direct2D1.InterpolationMode.Linear, null, null);
+                    Vortice.Direct2D1.InterpolationMode.HighQualityCubic, null, null);
             }
             UI.Animate();
         }
