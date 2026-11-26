@@ -1895,10 +1895,14 @@ public sealed class WatchPage : IPage
             float spectrumH = Math.Clamp(video.H * (fullArtMode ? 0.17f : 0.18f), 68f, 128f);
             var vizR = new R(video.X + 20f, scY - spectrumH - 14f, video.W - 40f, spectrumH);
             if (isThisStagePlaying && sOpt.VisualizerStyle != "off")
+            {
+                var tfViz = MusicBounce.Push(vizR, 3, amp: 0.85f, rotAmp: 0.40f, textSafe: true);
                 AudioAnalyzer.DrawStageVisualizer(vizR, sOpt.VisualizerStyle,
-                    opacity: fullArtMode ? 0.66f : 0.92f,
-                    gain: 1.05f + kick * 0.25f + (sOpt.MusicImpactEffects ? 0.16f : 0f),
+                    opacity: fullArtMode ? 0.72f : 0.96f,
+                    gain: 1.15f + kick * 0.35f + (sOpt.MusicImpactEffects ? 0.22f : 0f),
                     primary: visCol1, secondary: visCol2);
+                MusicBounce.Pop(tfViz);
+            }
 
             // 3. Top Controls Row (dark frosted pills laid right-to-left, zero overlap!)
             float topRx = video.Right - 16;

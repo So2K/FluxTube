@@ -690,6 +690,9 @@ public static unsafe class Gfx
         _dashStyle = null;
         _imgBrush?.Dispose();
         _imgBrush = null;
+        _roundLayer?.Dispose();
+        _roundLayer = null;
+        _roundClipDepth = 0;
         DisposeDanceAtlas();
         BgEngine.DisposeGpuResources();
         MusicArt.OnDeviceLost();
@@ -1742,6 +1745,8 @@ public static unsafe class Gfx
 
     private static readonly R[] _clips = new R[16];
     private static int _clipDepth;
+    private static ID2D1Layer? _roundLayer;
+    private static int _roundClipDepth;
 
     public static R Clip => _clipDepth > 0 ? _clips[_clipDepth - 1] : new R(0, 0, W, H);
 
@@ -1756,6 +1761,35 @@ public static unsafe class Gfx
     {
         _clipDepth--;
         DC.PopAxisAlignedClip();
+    }
+
+    /// <summary>Hardware anti-aliased rounded-rectangle mask clip using a reusable cached ID2D1Layer.</summary>
+    public static bool PushRoundedClip(R r, float radius)
+    {
+        float cr = ClampRad(r, radius);
+        if (cr <= 0.5f) { PushClip(r); return false; }
+        _roundLayer ??= DC.CreateLayer(null);
+        using var geom = _d2dFactory.CreateRoundedRectangleGeometry(new RoundedRectangle { Rect = Raw(r), RadiusX = cr, RadiusY = cr });
+        var lp = new LayerParameters1
+        {
+            ContentBounds = Raw(r),
+            GeometricMask = geom,
+            MaskAntialiasMode = AntialiasMode.PerPrimitive,
+            MaskTransform = Matrix3x2.Identity,
+            Opacity = 1f,
+            OpacityBrush = null,
+            LayerOptions = LayerOptions1.None,
+        };
+        DC.PushLayer(lp, _roundLayer);
+        _roundClipDepth++;
+        return true;
+    }
+
+    public static void PopRoundedClip(bool usedLayer)
+    {
+        if (!usedLayer) { PopClip(); return; }
+        _roundClipDepth--;
+        DC.PopLayer();
     }
 
     // ---------------- text ----------------
@@ -2038,7 +2072,7 @@ public static unsafe class Gfx
         }
 
         // Pre-warm any unseen glyphs into the GPU sprite atlas BEFORE switching AntialiasMode
-        bool atlasOk = _activeTarget != null && _mbDepth == 0;
+        bool atlasOk = _activeTarget != null && _mbDepth == 0 && _roundClipDepth == 0;
         if (atlasOk)
         {
             for (int i = 0; i < slots.Length; i++)
@@ -2328,10 +2362,29 @@ public static unsafe class Gfx
             // TEST 6: Zero-latency VinylEngine Catmull-Rom forward & TRUE REVERSE scratch synthesis
             var (vOk, fwdD, revD, vPeak) = VinylEngine.SelfTestScratch();
             Assert(vOk, $"VinylEngine scratch test failed (fwd={fwdD:0}, rev={revD:0}, peak={vPeak:0.00})");
-            var msg6 = $"PASS [6/6] VinylEngine Catmull-Rom Scratch (fwd=+{fwdD:0} smp, rev={revD:0} smp, peak={vPeak:0.00})";
+            var msg6 = $"PASS [6/7] VinylEngine Catmull-Rom Scratch (fwd=+{fwdD:0} smp, rev={revD:0} smp, peak={vPeak:0.00})";
             Services.Paths.Log("self-test: " + msg6); Console.WriteLine(msg6);
 
+            // TEST 7: PushRoundedClip pixel-exact corner masking (zero corner bleed) + RGB Curl-Vorticity Fluid speed
+            DC.BeginDraw();
+            DC.Clear(new Color4(0, 0, 0, 1));
+            var stageBox = new R(100, 100, 400, 300);
+            bool rl = PushRoundedClip(stageBox, 22f);
+            Fill(stageBox, 0xFF1060FF);
+            PopRoundedClip(rl);
+            var hr7 = DC.EndDraw();
+            Assert(hr7.Success, $"PushRoundedClip EndDraw failed: 0x{hr7.Code:X}");
+            uint pCorner = ReadPixel((int)(101 * Scale), (int)(101 * Scale));
+            uint pInside = ReadPixel((int)(250 * Scale), (int)(200 * Scale));
+            byte bCorner = (byte)(pCorner & 255), bInside = (byte)(pInside & 255);
+            Assert(bCorner < 20 && bInside > 200, $"PushRoundedClip failed (cornerB={bCorner}, insideB={bInside})");
+            var (flOk, flMs, flLit) = MusicStageEffects.SelfTestFluid();
+            Assert(flOk, $"RGB Fluid self-test failed (ms={flMs:0.00}, lit={flLit})");
+            var msg7 = $"PASS [7/7] PushRoundedClip (cornerB={bCorner}, insideB={bInside}) + RGB Silk Fluid ({flMs:0.00} ms/step, lit={flLit})";
+            Services.Paths.Log("self-test: " + msg7); Console.WriteLine(msg7);
+
             MusicBounce.Update(false, 0.016f);
+            _roundLayer?.Dispose(); _roundLayer = null; _roundClipDepth = 0;
             DisposeMotionBlurResources();
             DisposeDanceAtlas();
             ClearTextCache();

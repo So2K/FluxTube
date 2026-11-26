@@ -182,7 +182,7 @@ public static unsafe class AudioAnalyzer
         if (_lastStepFrame == Gfx.Frame) return;
         _lastStepFrame = Gfx.Frame;
 
-        float dt = (float)Math.Clamp(UI.Dt, 0.004, 0.05);
+        float dt = (float)Math.Clamp(UI.Dt, 0.002, 0.05);
         float rise = 1f - MathF.Exp(-dt * 28f);
         float fall = 1f - MathF.Exp(-dt * 11f);
         float peakFall = dt * 0.42f;

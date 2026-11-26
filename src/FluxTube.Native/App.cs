@@ -161,11 +161,10 @@ public static unsafe class App
                     if (quit) break;
                     if (_animating && !Gfx.Occluded && !W.IsIconic(Hwnd))
                     {
-                        // Adaptive GPU Pacing: full 144/240Hz while interacting/scrolling, silky 60fps when passively listening
-                        // -> cuts Music Mode GPU usage 3-4x on high-refresh 2.7K/4K monitors with zero input latency!
+                        // Adaptive GPU Pacing: full native 144/240Hz when focused or interacting; silky 60fps power-saver when unfocused in background
                         long nowMs = Environment.TickCount64;
-                        bool passiveMusic = !Bench && !Test && !UI.Down && (nowMs - UI.LastInput > 450);
-                        if (passiveMusic)
+                        bool unfocusedBg = !Bench && !Test && !UI.Down && (nowMs - UI.LastInput > 450) && W.GetForegroundWindow() != Hwnd;
+                        if (unfocusedBg)
                         {
                             long sinceLast = nowMs - _lastPresentedAt;
                             if (sinceLast < 15)
