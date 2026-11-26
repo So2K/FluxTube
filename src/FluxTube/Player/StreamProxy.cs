@@ -185,11 +185,11 @@ public sealed class StreamProxy
             e.Url = url;
             e.AvailableAt = DateTime.UtcNow;
             e.Headers = headers ?? new Dictionary<string, string> { ["User-Agent"] = "FluxTube/9.2" };
-            e.HeadBytes = 512 * 1024; // cache FLAC header + seektable + first seconds before mpv attaches
+            e.HeadBytes = 128 * 1024; // fast ~100ms header + seektable prefill before mpv attaches
             e.Fragile = false;
             e.External = true;
             e.Retries = 4;
-            e.Chunk = 4 * 1024 * 1024; // 4 MB chunks = minimal Cloudflare round-trips for 30-50 MB Hi-Res FLAC
+            e.Chunk = 2 * 1024 * 1024; // snappy 2 MB chunks: fast first-byte & seek response on Cloudflare
             if (knownLength > 0) e.Length = knownLength;
             e.Mime = string.IsNullOrWhiteSpace(mime) ? "audio/flac" : mime;
             if (e.Cache == null && e.Length > 0) e.Cache = MediaCache.Open(videoId, itag, e.Length, e.Mime);
@@ -201,8 +201,8 @@ public sealed class StreamProxy
     }
 
     /// <summary>
-    /// Progressively caches an active Lossless FLAC stream to MediaCache in the background so seeking &amp; looping
-    /// hit SSD at zero latency and never stutter on CDN hiccups.
+    /// Progressively caches an active Lossless FLAC stream to MediaCache in the background after a short grace delay
+    /// so it never competes with mpv's initial seek/playback buffer, then makes all future seeks instant from SSD.
     /// </summary>
     public void StartBackgroundDownload(string localUrl)
     {
@@ -212,7 +212,8 @@ public sealed class StreamProxy
         {
             try
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(3));
+                using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(4));
+                await Task.Delay(1800, cts.Token).ConfigureAwait(false);
                 if (e.Length <= 0) await ProbeLengthAsync(e, cts.Token).ConfigureAwait(false);
                 var cache = e.Cache;
                 if (cache == null || e.Length <= 0 || cache.Complete) return;
@@ -220,7 +221,7 @@ public sealed class StreamProxy
                 try
                 {
                     long pos = 0;
-                    const long chunk = 4 * 1024 * 1024;
+                    const long chunk = 2 * 1024 * 1024;
                     while (pos < e.Length && !cts.IsCancellationRequested)
                     {
                         var cov = cache.Covered(pos);
@@ -234,6 +235,7 @@ public sealed class StreamProxy
                         if (bytes.Length == 0) break;
                         cache.Write(pos, bytes);
                         pos += bytes.Length;
+                        await Task.Delay(120, cts.Token).ConfigureAwait(false); // yield bandwidth to active mpv reads
                     }
                 }
                 finally { Interlocked.Decrement(ref cache.Users); }

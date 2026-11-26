@@ -21,9 +21,7 @@ public sealed class MpvPlayer : IDisposable
     private int _loadGen;
     private int _volRampGen;
     private double _volTarget = -1;
-    private volatile bool _softwareBoostActive;
     private string _lastAppliedAf = "";
-    private string? _pendingInitialBoostArg;
     private static Win32.WndProc? _wndProcKeep;
 
     public double TimePos { get; private set; }
@@ -228,11 +226,6 @@ public sealed class MpvPlayer : IDisposable
 
             // Publish _ctx only after full initialization so other threads never touch an uninitialized handle
             Volatile.Write(ref _ctx, ctx);
-            if (_pendingInitialBoostArg is { } initBoost)
-            {
-                _pendingInitialBoostArg = null;
-                Command("af-command", AudioDsp.BoostFilterLabel, "volume", initBoost);
-            }
             _eventThread = new Thread(EventLoop) { IsBackground = true, Name = "mpv-events" };
             _eventThread.Start();
         }
@@ -248,11 +241,8 @@ public sealed class MpvPlayer : IDisposable
         var s = AppSettings.Current;
         var vol = Math.Clamp(s.Volume, 0, 150);
         Volume = vol;
-        bool useBoost = vol > 100.5 && !s.AudioFxEnabled && !s.PlayerAudio8D;
-        _softwareBoostActive = useBoost;
-        double mpvVol = useBoost ? 100.0 : vol;
         mpv_set_option_string(ctx, "ytdl-format", s.PlayerFormat);
-        mpv_set_option_string(ctx, "volume", mpvVol.ToString(CultureInfo.InvariantCulture));
+        mpv_set_option_string(ctx, "volume", vol.ToString(CultureInfo.InvariantCulture));
         mpv_set_option_string(ctx, "ytdl-raw-options", "");
         foreach (var kv in YtDlp.CommonRawOptions(forPlayer: true))
             mpv_set_option_string(ctx, "ytdl-raw-options-append", kv);
@@ -260,12 +250,10 @@ public sealed class MpvPlayer : IDisposable
         mpv_set_option_string(ctx, "http-proxy", "");
         _lastAppliedAf = AudioDsp.BuildEffectiveFilterGraph(s, vol);
         mpv_set_option_string(ctx, "af", _lastAppliedAf);
-        bool ex = s.AudioWasapiExclusive && !s.AudioFxEnabled && !s.PlayerAudio8D && vol <= 100.5;
+        bool ex = s.AudioWasapiExclusive && !s.AudioFxEnabled && !s.PlayerAudio8D;
         WasapiExclusiveActive = ex;
         mpv_set_option_string(ctx, "audio-exclusive", ex ? "yes" : "no");
         mpv_set_option_string(ctx, "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
-        if (useBoost)
-            _pendingInitialBoostArg = AudioDsp.BoostVolumeArg(vol);
         if (s.AudioFxEnabled && MathF.Abs(s.FxSpeed - 1f) > 0.01f)
         {
             Speed = s.FxSpeed;
@@ -288,25 +276,20 @@ public sealed class MpvPlayer : IDisposable
         ApplyAudioDsp(syncSpeed: false);
     }
 
-    /// <summary>Live-applies the Reaper-style DSP EQ/reverb/pitch chain + zero-clipping &gt;100% limiter without restarting playback.</summary>
+    /// <summary>Live-applies the Reaper-style DSP EQ/reverb/pitch chain without restarting playback.</summary>
     public void ApplyAudioDsp(bool syncSpeed = false)
     {
         if (!IsReady) return;
         var s = AppSettings.Current;
         var vol = Math.Clamp(Volume, 0, 150);
-        bool useBoost = vol > 100.5 && !s.AudioFxEnabled && !s.PlayerAudio8D;
-        _softwareBoostActive = useBoost;
-        double mpvVol = useBoost ? 100.0 : vol;
-        Set("volume", mpvVol.ToString("0.#", CultureInfo.InvariantCulture));
+        Set("volume", vol.ToString("0.#", CultureInfo.InvariantCulture));
         var af = AudioDsp.BuildEffectiveFilterGraph(s, vol);
         if (af != _lastAppliedAf)
         {
             _lastAppliedAf = af;
             Set("af", af);
         }
-        if (useBoost)
-            Command("af-command", AudioDsp.BoostFilterLabel, "volume", AudioDsp.BoostVolumeArg(vol));
-        bool wantEx = s.AudioWasapiExclusive && !s.AudioFxEnabled && !s.PlayerAudio8D && vol <= 100.5;
+        bool wantEx = s.AudioWasapiExclusive && !s.AudioFxEnabled && !s.PlayerAudio8D;
         if (wantEx != WasapiExclusiveActive)
         {
             WasapiExclusiveActive = wantEx;
@@ -357,26 +340,11 @@ public sealed class MpvPlayer : IDisposable
             Set("mute", "no");
         }
         var delta = target - start;
-        var s = AppSettings.Current;
-        bool targetBoost = target > 100.5 && !s.AudioFxEnabled && !s.PlayerAudio8D;
-        if (Math.Abs(delta) <= 2.5 || durationMs <= 0 || targetBoost || _softwareBoostActive)
+        if (Math.Abs(delta) <= 2.5 || durationMs <= 0)
         {
             Interlocked.Increment(ref _volRampGen);
             Volume = target;
-            bool wasBoost = _softwareBoostActive;
-            _softwareBoostActive = targetBoost;
-            double mpvVol = targetBoost ? 100.0 : target;
-            if (!targetBoost || !wasBoost)
-                Set("volume", mpvVol.ToString("0.#", CultureInfo.InvariantCulture));
-            var af = AudioDsp.BuildEffectiveFilterGraph(s, target);
-            if (af != _lastAppliedAf)
-            {
-                _lastAppliedAf = af;
-                Set("af", af);
-            }
-            // Live gain update inside FFmpeg volume filter via af-command: ZERO graph rebuild, ZERO FLAC freeze!
-            if (targetBoost)
-                Command("af-command", AudioDsp.BoostFilterLabel, "volume", AudioDsp.BoostVolumeArg(target));
+            Set("volume", target.ToString("0.#", CultureInfo.InvariantCulture));
             return;
         }
         var gen = Interlocked.Increment(ref _volRampGen);
@@ -634,8 +602,6 @@ public sealed class MpvPlayer : IDisposable
                 {
                     var gen = Volatile.Read(ref _loadGen);
                     if (VideoEnabled) EnsureVideoTrackSynced();
-                    if (_softwareBoostActive && Volume > 100.5)
-                        Command("af-command", AudioDsp.BoostFilterLabel, "volume", AudioDsp.BoostVolumeArg(Volume));
                     Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) FileLoaded?.Invoke(); });
                     break;
                 }
@@ -719,12 +685,6 @@ public sealed class MpvPlayer : IDisposable
                         case 6:
                         {
                             var v = Marshal.PtrToStructure<double>(p.data);
-                            // When >100% zero-clipping software boost is active, mpv stays at 100% unity so ignore the 100 echo
-                            if (_softwareBoostActive && Math.Abs(v - 100.0) < 0.6 && Volume > 100.5)
-                            {
-                                volSeen = true;
-                                break;
-                            }
                             Volume = v;
                             if (volSeen) Ui(() => VolumeChanged?.Invoke(v));
                             volSeen = true;

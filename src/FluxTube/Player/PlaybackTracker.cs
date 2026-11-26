@@ -396,7 +396,7 @@ public sealed class PlaybackTracker
         {
             try
             {
-                // 1. Instant hit from local FLAC disk cache (0 ms, works offline!)
+                // 1. Instant hit from local FLAC disk cache (0 ms, works offline when complete; auto-resumes URL when partial!)
                 var cachedFlac = MediaCache.FindLossless(id);
                 if (cachedFlac != null)
                 {
@@ -405,10 +405,19 @@ public sealed class PlaybackTracker
                     UiThread.Post(() =>
                     {
                         if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen) || _p.CurrentVideoId != id) return;
-                        _p.AttachLosslessTrack(localUrl, "Cache", autoSelect: true, expectedBitrateKbps: estKbps);
-                        Paths.Log($"lossless {id}: instant attach from disk cache ({estKbps} kbps)");
+                        _p.AttachLosslessTrack(localUrl, cachedFlac.Complete ? "Cache" : "FLAC", autoSelect: true, expectedBitrateKbps: estKbps);
+                        Paths.Log($"lossless {id}: instant attach from disk cache ({estKbps} kbps{(cachedFlac.Complete ? ", complete" : ", partial -> resuming")})");
                         CurrentChanged?.Invoke();
                     });
+                    if (cachedFlac.Complete) return;
+
+                    // Partial FLAC cache: immediately supply upstream URL to the SAME StreamProxy entry so playback never truncates!
+                    var resumeMatch = await LosslessResolver.ResolveAsync(id, title, channel, durationSec, manualRequest: true).ConfigureAwait(false);
+                    if (resumeMatch != null)
+                    {
+                        var resumedUrl = StreamProxy.Instance.RegisterLossless(resumeMatch.Url, id, cachedFlac.Length, resumeMatch.Mime);
+                        StreamProxy.Instance.StartBackgroundDownload(resumedUrl);
+                    }
                     return;
                 }
 
