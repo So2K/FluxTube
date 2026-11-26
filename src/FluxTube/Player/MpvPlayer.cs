@@ -41,10 +41,49 @@ public sealed class MpvPlayer : IDisposable
 
     // Live audio stream telemetry observed asynchronously from libmpv (zero UI stalls!)
     public string AudioCodec { get; private set; } = "";
+    public string AudioSampleFormat { get; private set; } = "";
     public int AudioSampleRate { get; private set; }
     public int AudioBitrateKbps { get; private set; }
     public bool IsLosslessAudio => AudioCodec is "flac" or "alac" or "wav" or "ape" or "wv" || AudioCodec.StartsWith("pcm", StringComparison.OrdinalIgnoreCase) || AudioCodec.StartsWith("dsd", StringComparison.OrdinalIgnoreCase);
+    public bool IsHiResLossless => IsLosslessAudio && (AudioSampleRate > 48000 || AudioBitDepth >= 24);
     public bool IsHiFiAudio => IsLosslessAudio || AudioBitrateKbps >= 220;
+
+    /// <summary>Effective bit depth for lossless streams (16 or 24 bit), inferred honestly from libmpv sample format &amp; rate/bitrate.</summary>
+    public int AudioBitDepth
+    {
+        get
+        {
+            if (!IsLosslessAudio) return 0;
+            if (AudioSampleFormat is "s24" or "s32" or "s32p" or "s24p") return 24;
+            if (AudioSampleRate > 48000 || AudioBitrateKbps > 1420) return 24;
+            return 16;
+        }
+    }
+
+    /// <summary>TIDAL-style compact badge label, e.g. "16-bit 44.1kHz" or "24-bit 96kHz" for Lossless FLAC.</summary>
+    public string TidalQualityLabel
+    {
+        get
+        {
+            string sr = AudioSampleRate >= 1000
+                ? (AudioSampleRate % 1000 == 0 ? $"{AudioSampleRate / 1000}kHz" : $"{AudioSampleRate / 1000.0:0.0}kHz")
+                : "";
+            if (IsLosslessAudio)
+            {
+                int bits = AudioBitDepth > 0 ? AudioBitDepth : 16;
+                string ex = WasapiExclusiveActive ? " · EX" : "";
+                return sr.Length > 0 ? $"{bits}-bit {sr}{ex}" : $"{bits}-bit FLAC{ex}";
+            }
+            return AudioQualityBadge;
+        }
+    }
+
+    // Zero-Wait Lossless FLAC state for the currently playing item
+    public bool HasLosslessTrack { get; private set; }
+    public bool LosslessSearching { get; set; }
+    public bool LosslessTimingDiff { get; private set; }
+    public string? LosslessSourceLabel { get; private set; }
+    public bool WasapiExclusiveActive { get; private set; }
 
     public string AudioQualityBadge
     {
@@ -67,11 +106,12 @@ public sealed class MpvPlayer : IDisposable
                 ? (AudioSampleRate % 1000 == 0 ? $"{AudioSampleRate / 1000} kHz" : $"{AudioSampleRate / 1000.0:0.0} kHz")
                 : "";
             string br = AudioBitrateKbps > 0 ? $"{AudioBitrateKbps} kbps" : "";
-            string prefix = IsLosslessAudio ? "LOSSLESS " : (AudioBitrateKbps >= 220 ? "HI-FI " : "");
-            if (sr.Length > 0 && br.Length > 0) return $"{prefix}{codec} · {sr} · {br}";
-            if (br.Length > 0) return $"{prefix}{codec} · {br}";
-            if (sr.Length > 0) return $"{prefix}{codec} · {sr}";
-            return $"{prefix}{codec}";
+            string prefix = IsLosslessAudio ? "ULTRA " : (AudioBitrateKbps >= 220 ? "HI-FI " : "");
+            string ex = WasapiExclusiveActive ? " · EX" : "";
+            if (sr.Length > 0 && br.Length > 0) return $"{prefix}{codec} · {sr} · {br}{ex}";
+            if (br.Length > 0) return $"{prefix}{codec} · {br}{ex}";
+            if (sr.Length > 0) return $"{prefix}{codec} · {sr}{ex}";
+            return $"{prefix}{codec}{ex}";
         }
     }
 
@@ -178,6 +218,7 @@ public sealed class MpvPlayer : IDisposable
             mpv_observe_property(ctx, 10, "audio-codec-name", Format.String);
             mpv_observe_property(ctx, 11, "audio-params/samplerate", Format.Int64);
             mpv_observe_property(ctx, 12, "audio-bitrate", Format.Double);
+            mpv_observe_property(ctx, 13, "audio-params/format", Format.String);
 
             // Publish _ctx only after full initialization so other threads never touch an uninitialized handle
             Volatile.Write(ref _ctx, ctx);
@@ -208,6 +249,9 @@ public sealed class MpvPlayer : IDisposable
         mpv_set_option_string(ctx, "http-proxy", "");
         _lastAppliedAf = AudioDsp.BuildEffectiveFilterGraph(s, vol);
         mpv_set_option_string(ctx, "af", _lastAppliedAf);
+        bool ex = s.AudioWasapiExclusive && !s.AudioFxEnabled && !s.PlayerAudio8D && vol <= 100.5;
+        WasapiExclusiveActive = ex;
+        mpv_set_option_string(ctx, "audio-exclusive", ex ? "yes" : "no");
         mpv_set_option_string(ctx, "audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
         if (s.AudioFxEnabled && MathF.Abs(s.FxSpeed - 1f) > 0.01f)
         {
@@ -246,6 +290,13 @@ public sealed class MpvPlayer : IDisposable
         {
             _lastAppliedAf = af;
             Set("af", af);
+        }
+        bool wantEx = s.AudioWasapiExclusive && !s.AudioFxEnabled && !s.PlayerAudio8D && vol <= 100.5;
+        if (wantEx != WasapiExclusiveActive)
+        {
+            WasapiExclusiveActive = wantEx;
+            Set("audio-exclusive", wantEx ? "yes" : "no");
+            if (HasMedia) Command("ao-reload");
         }
         Set("audio-pitch-correction", (s.AudioFxEnabled && s.FxTapePitch) ? "no" : "yes");
         if (syncSpeed)
@@ -333,7 +384,8 @@ public sealed class MpvPlayer : IDisposable
         CurrentAudioUrl = url;
         CurrentVideoId = videoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
-        AudioCodec = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
+        AudioCodec = ""; AudioSampleFormat = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
+        HasLosslessTrack = false; LosslessSearching = false; LosslessTimingDiff = false; LosslessSourceLabel = null;
         if (startPaused) { Paused = true; Set("pause", "yes"); }
         // Keep vid strictly as a global property (never a sticky per-file loadfile option, which races with SetVideoEnabled(true)!)
         Set("vid", VideoEnabled ? "auto" : "no");
@@ -351,7 +403,8 @@ public sealed class MpvPlayer : IDisposable
         CurrentAudioUrl = s.Audio ?? s.Video;
         CurrentVideoId = s.VideoId;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
-        AudioCodec = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
+        AudioCodec = ""; AudioSampleFormat = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
+        HasLosslessTrack = false; LosslessSearching = false; LosslessTimingDiff = false; LosslessSourceLabel = null;
         if (keepPause) { Paused = true; Set("pause", "yes"); }
         // Direct HLS manifests (live streams) bypass StreamProxy, so pass the user's proxy directly when non-loopback
         bool directRemote = s.Video.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !s.Video.StartsWith("http://127.0.0.1", StringComparison.OrdinalIgnoreCase)
@@ -375,7 +428,35 @@ public sealed class MpvPlayer : IDisposable
         Interlocked.Increment(ref _loadGen);
         Command("stop");
         CurrentUrl = null; CurrentVideoId = null;
+        HasLosslessTrack = false; LosslessSearching = false; LosslessTimingDiff = false; LosslessSourceLabel = null;
         TimePos = 0; Duration = 0; _lastTimePosted = double.NaN;
+    }
+
+    /// <summary>
+    /// Attaches a Lossless FLAC stream to the currently playing media without restarting video or losing playback position.
+    /// When autoSelect is true, mpv switches immediately to the FLAC track; otherwise it stays staged for 1-click A/B switch.
+    /// </summary>
+    public void AttachLosslessTrack(string localProxyUrl, string sourceLabel, bool autoSelect, bool timingDiff = false)
+    {
+        if (!IsReady || !HasMedia) return;
+        HasLosslessTrack = true;
+        LosslessSearching = false;
+        LosslessSourceLabel = sourceLabel;
+        LosslessTimingDiff = timingDiff;
+        Command("audio-add", localProxyUrl, autoSelect ? "select" : "auto", $"FLAC ({sourceLabel})", "flac");
+    }
+
+    /// <summary>Instant A/B toggle between the attached Lossless FLAC track (aid=2) and the original YouTube audio track (aid=1).</summary>
+    public bool ToggleLosslessAB()
+    {
+        if (!IsReady || !HasMedia || !HasLosslessTrack) return false;
+        if (IsLosslessAudio)
+        {
+            Set("aid", "1");
+            return false; // switched back to YouTube
+        }
+        Set("aid", "2");
+        return true; // switched to FLAC
     }
 
     public void TogglePause() => Command("cycle", "pause");
@@ -677,6 +758,13 @@ public sealed class MpvPlayer : IDisposable
                                     Ui(() => { });
                                 }
                             }
+                            break;
+                        }
+                        case 13:
+                        {
+                            var strPtr = Marshal.ReadIntPtr(p.data);
+                            var fmt = strPtr != IntPtr.Zero ? (PtrToUtf8(strPtr) ?? "").Trim().ToLowerInvariant() : "";
+                            if (fmt != AudioSampleFormat) { AudioSampleFormat = fmt; Ui(() => { }); }
                             break;
                         }
                     }

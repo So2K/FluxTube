@@ -239,6 +239,17 @@ public static class MediaCache
         return new CachedVideo(videoId, quality, video, audio);
     }
 
+    /// <summary>A previously cached Lossless FLAC track for this video (ready on disk, zero network delay).</summary>
+    public static CachedStream? FindLossless(string videoId)
+    {
+        if (!Enabled || string.IsNullOrEmpty(videoId)) return null;
+        var row = Db.CacheStream(videoId, LosslessResolver.LosslessItag);
+        if (row == null) return null;
+        var cs = Open(videoId, LosslessResolver.LosslessItag, row.Value.Length, row.Value.Mime);
+        if (cs == null || cs.Covered(0) < Math.Min(cs.Length, 64 * 1024)) return null;
+        return cs;
+    }
+
     /// <summary>Counts a play: frequency and recency decide what survives.</summary>
     public static void NotePlay(string videoId, string quality, int vitag, int aitag)
     {

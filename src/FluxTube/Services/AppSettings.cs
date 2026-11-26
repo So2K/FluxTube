@@ -197,6 +197,12 @@ public sealed class AppSettings
     public string MusicShakeLevel { get; set; } = "med";
     public bool MusicImpactEffects { get; set; } = true;
     public bool VideoBeatShake { get; set; } = true;
+    /// <summary>Automatically upgrade music playback to Lossless FLAC via Monochrome / HiFi-API / local cache without delaying start.</summary>
+    public bool LosslessAutoUpgrade { get; set; } = true;
+    /// <summary>Optional private self-hosted hifi-api base URL (highest priority over public pool).</summary>
+    public string CustomHifiApiUrl { get; set; } = "";
+    /// <summary>Bit-Perfect WASAPI Exclusive mode (bypasses Windows mixer when DSP/8D are off).</summary>
+    public bool AudioWasapiExclusive { get; set; } = false;
     /// <summary>User-saved custom DSP Studio presets.</summary>
     public List<SavedAudioPreset> CustomAudioPresets { get; set; } = [];
     /// <summary>Optional custom sound display names per UI sound slot (normalized WAV copies stored in .fluxtube/sfx).</summary>

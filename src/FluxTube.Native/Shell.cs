@@ -76,7 +76,8 @@ public static class Shell
         {
             if (Pip.Active) Pip.Exit();
             if (_cur is not ShortsPage) P.SetVideoEnabled(false);
-            Toast(L.T("Режим «Только звук» включён — видео не декодируется (0% GPU)", "Audio-only mode on — video decoder suspended (0% GPU)"), Th.Good, 2400);
+            PlaybackTracker.Instance.EnsureBestAudioForMusicMode();
+            Toast(L.T("Режим «Только звук» включён — максимум качества (0% GPU)", "Audio-only mode on — maximum audio quality (0% GPU)"), Th.Good, 2400);
         }
         else
         {

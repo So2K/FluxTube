@@ -37,6 +37,7 @@ public sealed class StreamProxy
         public Task? HeadTask;
         public long Chunk = 3 * 1024 * 1024;
         public bool Fragile;       // no retries on refusal
+        public bool External;      // non-YouTube stream (e.g. Monochrome / hifi-api FLAC): never refresh via QuickStream
         public int Retries = 3;    // 0 until a link from a quick request has proved itself on the first bytes
         // token-less link from the quick player request: serves the beginning of the stream at once, then answers 403
         public string? StarterUrl;
@@ -169,10 +170,44 @@ public sealed class StreamProxy
             e.Cache?.Invalidate();
     }
 
-    /// <summary>Does this look like the start of an mp4 or a webm?</summary>
+    /// <summary>
+    /// Registers an external lossless FLAC stream (Monochrome / hifi-api) under the dedicated virtual itag (9999)
+    /// so it streams through the local proxy and caches seamlessly to MediaCache on disk.
+    /// </summary>
+    public string RegisterLossless(string url, string videoId, long knownLength = 0, string mime = "audio/flac", Dictionary<string, string>? headers = null)
+    {
+        Start();
+        const int itag = LosslessResolver.LosslessItag;
+        var key = $"{videoId}.{itag}";
+        var e = _entries.GetOrAdd(key, k => new Entry { Key = k });
+        lock (e)
+        {
+            e.Url = url;
+            e.AvailableAt = DateTime.UtcNow;
+            e.Headers = headers ?? new Dictionary<string, string> { ["User-Agent"] = "FluxTube/9.2" };
+            e.HeadBytes = 256 * 1024;
+            e.Fragile = false;
+            e.External = true;
+            e.Retries = 3;
+            e.Chunk = 2 * 1024 * 1024;
+            if (knownLength > 0) e.Length = knownLength;
+            e.Mime = string.IsNullOrWhiteSpace(mime) ? "audio/flac" : mime;
+            if (e.Cache == null && e.Length > 0) e.Cache = MediaCache.Open(videoId, itag, e.Length, e.Mime);
+            e.Touched = DateTime.UtcNow;
+        }
+        e.UrlReady.TrySetResult(true);
+        Trim();
+        return Local(key);
+    }
+
+    /// <summary>Does this look like the start of an mp4, webm, flac, wav, ogg or id3 media file?</summary>
     private static bool PlausibleStart(ReadOnlySpan<byte> b)
         => b.Length >= 12 && ((b[4] == (byte)'f' && b[5] == (byte)'t' && b[6] == (byte)'y' && b[7] == (byte)'p')
-                              || (b[0] == 0x1A && b[1] == 0x45 && b[2] == 0xDF && b[3] == 0xA3));
+                              || (b[0] == 0x1A && b[1] == 0x45 && b[2] == 0xDF && b[3] == 0xA3)
+                              || (b[0] == (byte)'f' && b[1] == (byte)'L' && b[2] == (byte)'a' && b[3] == (byte)'C')
+                              || (b[0] == (byte)'R' && b[1] == (byte)'I' && b[2] == (byte)'F' && b[3] == (byte)'F')
+                              || (b[0] == (byte)'O' && b[1] == (byte)'g' && b[2] == (byte)'g' && b[3] == (byte)'S')
+                              || (b[0] == (byte)'I' && b[1] == (byte)'D' && b[2] == (byte)'3'));
 
     /// <summary>Length of a registered stream, 0 when unknown: lets the caller check a new link is for the same bytes.</summary>
     public long LengthOf(string videoId, int itag) => _entries.TryGetValue($"{videoId}.{itag}", out var e) ? e.Length : 0;
@@ -273,7 +308,17 @@ public sealed class StreamProxy
     {
         using var own = ct.CanBeCanceled ? null : new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var resp = await FetchAsync(e, 0, 0, own?.Token ?? ct);
-        if (resp.Content.Headers.ContentRange?.Length is { } len) e.Length = len;
+        long len = resp.Content.Headers.ContentRange?.Length ?? resp.Content.Headers.ContentLength ?? 0;
+        if (len > 0)
+        {
+            e.Length = len;
+            if (e.External && e.Cache == null)
+            {
+                var dot = e.Key.IndexOf('.');
+                if (dot > 0 && int.TryParse(e.Key[(dot + 1)..], out var itag))
+                    e.Cache = MediaCache.Open(e.Key[..dot], itag, len, e.Mime);
+            }
+        }
     }
 
     /// <summary>Sends and waits for the response headers, 10 s at most (the body is read by the caller).</summary>
@@ -291,6 +336,7 @@ public sealed class StreamProxy
     /// </summary>
     private static async Task<bool> RefreshLinkAsync(Entry e, bool force = false, bool preferResolver = false)
     {
+        if (e.External) return false;
         var dot = e.Key.IndexOf('.');
         var cooldown = force ? TimeSpan.FromSeconds(8) : TimeSpan.FromSeconds(25);
         if (dot != 11 || DateTime.UtcNow - e.RefreshedAt < cooldown) return false;

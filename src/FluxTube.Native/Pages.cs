@@ -1993,18 +1993,34 @@ public sealed class WatchPage : IPage
             if (maxChipW > 90)
             {
                 string liveAudioInfo = isThisStagePlaying ? mpv.AudioQualityBadge : "";
+                string losslessHint = isThisStagePlaying && mpv.LosslessSearching ? L.T(" · Поиск FLAC…", " · Finding FLAC…")
+                    : (isThisStagePlaying && mpv.HasLosslessTrack && !mpv.IsLosslessAudio ? L.T(" · FLAC готов", " · FLAC ready") : "");
                 var chipTxt = sOpt.AudioFxEnabled
                     ? L.T($"Только звук · FX: {AudioDsp.DisplayPresetName(sOpt)}", $"Audio only · FX: {AudioDsp.DisplayPresetName(sOpt)}")
                     : (liveAudioInfo.Length > 0 && liveAudioInfo != "HD"
-                        ? L.T($"Только звук · {liveAudioInfo}", $"Audio only · {liveAudioInfo}")
-                        : L.T("Только звук · Видео отключено", "Audio only · Video disabled"));
+                        ? L.T($"Только звук · {liveAudioInfo}{losslessHint}", $"Audio only · {liveAudioInfo}{losslessHint}")
+                        : L.T($"Только звук · Видео отключено{losslessHint}", $"Audio only · Video disabled{losslessHint}"));
                 var chip = Gfx.Text(chipTxt, 11.5f, 600, maxChipW - 22);
                 var cb = new R(video.X + 16, video.Y + 14, MathF.Min(maxChipW, chip.W + 22), 26);
                 var tfCb = MusicBounce.Push(cb, 6, amp: 0.65f, rotAmp: 0.30f, textSafe: true);
+                bool losslessChip = isThisStagePlaying && mpv.IsLosslessAudio;
                 bool hiFiChip = isThisStagePlaying && mpv.IsHiFiAudio;
-                Gfx.Fill(cb, hiFiChip ? Gfx.Fade(0xFF281D0A, 0.84f) : darkPill, 13);
-                Gfx.Stroke(cb, hiFiChip ? Gfx.Fade(0xFFFFD166, 0.65f) : Gfx.Fade(0xFFFFFFFF, 0.14f), 13, 1f);
-                Gfx.Draw(chip, cb.X + 11, cb.Y + (cb.H - chip.H) / 2, hiFiChip ? 0xFFFFE18A : 0xFFF2F2F7);
+                bool overCb = isThisStagePlaying && UI.Hover(cb);
+                uint cbBg = losslessChip ? Gfx.Fade(0xFF0A2A1E, overCb ? 0.94f : 0.86f)
+                    : (hiFiChip ? Gfx.Fade(0xFF281D0A, overCb ? 0.92f : 0.84f) : darkPill);
+                uint cbStroke = losslessChip ? Gfx.Fade(0xFF39E68B, 0.80f)
+                    : (hiFiChip ? Gfx.Fade(0xFFFFD166, 0.65f) : Gfx.Fade(0xFFFFFFFF, overCb ? 0.34f : 0.14f));
+                uint cbFg = losslessChip ? 0xFF7CFFB8 : (hiFiChip ? 0xFFFFE18A : 0xFFF2F2F7);
+                Gfx.Fill(cb, cbBg, 13);
+                Gfx.Stroke(cb, cbStroke, 13, losslessChip ? 1.3f : 1f);
+                Gfx.Draw(chip, cb.X + 11, cb.Y + (cb.H - chip.H) / 2, cbFg);
+                if (isThisStagePlaying && UI.Click(UI.Id("ms:flacchip", _infoScroll), cb))
+                {
+                    var res = PlaybackTracker.Instance.RequestOrToggleLossless();
+                    if (res == "flac") Shell.Toast($"ULTRA FLAC · {mpv.LosslessSourceLabel ?? "Lossless"}", 0xFF39E68B, 1800);
+                    else if (res == "youtube") Shell.Toast(L.T("A/B: YouTube аудио", "A/B: YouTube audio"), Th.Sub, 1600);
+                    else if (res == "searching") Shell.Toast(L.T("Ищем ULTRA FLAC…", "Searching ULTRA FLAC…"), 0xFFFFD166, 1800);
+                }
                 MusicBounce.Pop(tfCb);
             }
 
@@ -2068,16 +2084,23 @@ public sealed class WatchPage : IPage
                 float titleX = Gfx.Snap(centerX - MathF.Min(titleMeas.W, txtMaxW) * 0.5f);
                 DrawWaveText(Title, titleX, titleY, titleSize, 0xFFFFFFFF, 700, txtMaxW, maxLines: 1, shadow: true, accentColor: dom1);
 
-                // Centered Row below Title: Play/Pause + Channel + Live Codec/Bitrate/FX badge
+                // Centered Row below Title: Play/Pause + Channel + TIDAL-Style Lossless Quality Pill
                 float rowY = Gfx.Snap(titleY + titleMeas.H + 8f);
                 float playSz = 34f;
-                var chMeas = Gfx.Text(chText, 13.5f, 500, MathF.Min(320f, txtMaxW - 180f), 1);
-                string liveBadge = isThisStagePlaying ? mpv.AudioQualityBadge : "HD";
+                var chMeas = Gfx.Text(chText, 13.5f, 500, MathF.Min(320f, txtMaxW - 200f), 1);
+                bool bdLossless = isThisStagePlaying && mpv.IsLosslessAudio;
+                bool bdHiRes = isThisStagePlaying && mpv.IsHiResLossless;
+                bool bdHiFi = isThisStagePlaying && mpv.IsHiFiAudio;
+                string liveBadge = isThisStagePlaying
+                    ? (mpv.LosslessSearching && !bdLossless ? L.T("Поиск FLAC…", "Finding FLAC…") : mpv.TidalQualityLabel)
+                    : "HD";
                 var badgeTxt = sOpt.AudioFxEnabled
                     ? $"{AudioDsp.DisplayPresetName(sOpt)} · {liveBadge}"
                     : liveBadge;
-                var bdRun = Gfx.Text(badgeTxt, 10.5f, 700);
-                float bdW = bdRun.W + 12f;
+                var bdRun = Gfx.Text(badgeTxt, bdLossless ? 11.5f : 10.5f, 600);
+                float bdH = bdLossless ? 26f : 22f;
+                float bdPadX = bdLossless ? 13f : 9f;
+                float bdW = bdRun.W + bdPadX * 2f;
                 float rowTotalW = playSz + 12f + chMeas.W + 10f + bdW;
                 float rx0 = Gfx.Snap(centerX - rowTotalW * 0.5f);
 
@@ -2092,13 +2115,42 @@ public sealed class WatchPage : IPage
 
                 float chX = playR.Right + 12f;
                 float chY = rowY + (playSz - chMeas.H) * 0.5f;
-                Gfx.DrawDancingText(chText, chX, chY, 13.5f, Gfx.Fade(0xFFFFFFFF, 0.86f), 500, MathF.Min(360f, txtMaxW - 120f), 1, shadow: true, amp: 0.80f);
+                Gfx.DrawDancingText(chText, chX, chY, 13.5f, Gfx.Fade(0xFFFFFFFF, 0.86f), 500, MathF.Min(360f, txtMaxW - 140f), 1, shadow: true, amp: 0.80f);
 
-                var bdR = new R(chX + chMeas.W + 10f, rowY + (playSz - 19f) * 0.5f, bdW, 19f);
+                var bdR = new R(chX + chMeas.W + 10f, rowY + (playSz - bdH) * 0.5f, bdW, bdH);
                 var tfBd = MusicBounce.Push(bdR, 14, amp: 0.90f, textSafe: true);
-                Gfx.Fill(bdR, Gfx.Fade(0xFFFFFFFF, 0.16f), 4f);
-                Gfx.Stroke(bdR, Gfx.Fade(0xFFFFFFFF, 0.22f), 4f, 1f);
-                Gfx.Draw(bdRun, bdR.X + 6f, bdR.Y + (bdR.H - bdRun.H) * 0.5f, 0xFFFFFFFF);
+                bool overBd = isThisStagePlaying && UI.Hover(bdR);
+                float bdRad = bdH * 0.5f;
+                if (bdLossless)
+                {
+                    // TIDAL-style dark capsule with subtle bottom cyan/gold inner glow & crisp border
+                    Gfx.Fill(bdR, Gfx.Fade(0xFF080C0C, 0.94f), bdRad);
+                    Gfx.PushClip(bdR);
+                    if (bdHiRes)
+                        Gfx.RadialGlow(bdR.X + bdR.W * 0.5f, bdR.Bottom + 2f, bdR.W * 0.58f, bdR.H * 0.92f, 1.00f, 0.82f, 0.32f, overBd ? 0.34f : 0.24f);
+                    else
+                        Gfx.RadialGlow(bdR.X + bdR.W * 0.5f, bdR.Bottom + 2f, bdR.W * 0.58f, bdR.H * 0.92f, 0.11f, 0.91f, 0.71f, overBd ? 0.34f : 0.24f);
+                    Gfx.PopClip();
+                    uint borderCol = bdHiRes
+                        ? Gfx.Fade(0xFFFFD166, overBd ? 0.85f : 0.52f)
+                        : Gfx.Fade(0xFF1DE9B6, overBd ? 0.82f : 0.45f);
+                    uint textCol = bdHiRes ? 0xFFFFD86B : 0xFF20F0BE;
+                    Gfx.Stroke(bdR, borderCol, bdRad, 1.25f);
+                    Gfx.Draw(bdRun, bdR.X + bdPadX, bdR.Y + (bdR.H - bdRun.H) * 0.5f, textCol);
+                }
+                else
+                {
+                    Gfx.Fill(bdR, bdHiFi ? Gfx.Fade(0xFF1E170A, 0.88f) : Gfx.Fade(0xFF0C0F12, overBd ? 0.86f : 0.74f), bdRad);
+                    Gfx.Stroke(bdR, bdHiFi ? Gfx.Fade(0xFFFFD166, 0.55f) : Gfx.Fade(0xFFFFFFFF, overBd ? 0.34f : 0.20f), bdRad, 1f);
+                    Gfx.Draw(bdRun, bdR.X + bdPadX, bdR.Y + (bdR.H - bdRun.H) * 0.5f, bdHiFi ? 0xFFFFE18A : 0xFFFFFFFF);
+                }
+                if (isThisStagePlaying && UI.Click(UI.Id("ms:flacbd", _infoScroll), bdR))
+                {
+                    var res = PlaybackTracker.Instance.RequestOrToggleLossless();
+                    if (res == "flac") Shell.Toast($"FLAC {mpv.TidalQualityLabel} · {mpv.LosslessSourceLabel ?? "Lossless"}", 0xFF20F0BE, 1800);
+                    else if (res == "youtube") Shell.Toast(L.T("A/B: YouTube аудио", "A/B: YouTube audio"), Th.Sub, 1600);
+                    else if (res == "searching") Shell.Toast(L.T("Ищем ULTRA FLAC…", "Searching ULTRA FLAC…"), 0xFF20F0BE, 1800);
+                }
                 MusicBounce.Pop(tfBd);
             }
             else

@@ -142,6 +142,8 @@ public sealed class PlaybackTracker
     {
         Flush();
         var gen = ++_gen;
+        Interlocked.Increment(ref _losslessGen);
+        _losslessAttemptedId = null;
         Retrying = false;
         _fileLoaded = _timeValid = false;
         Current = v;
@@ -307,6 +309,8 @@ public sealed class PlaybackTracker
     public bool IsPreview { get; private set; }
     public IReadOnlyList<Extras.Segment> Segments => _segments;
     private string? _countedPlay;
+    private string? _losslessAttemptedId;
+    private int _losslessGen;
 
     private void LoadFull(StreamInfo s, string? title, double start, bool keepPause)
     {
@@ -317,6 +321,134 @@ public sealed class PlaybackTracker
             var q = AppSettings.Current.PlayerQuality;
             ThreadPool.QueueUserWorkItem(_ => MediaCache.NotePlay(s.VideoId, q, s.Vitag, s.Aitag));
         }
+        bool wantLossless = (AppSettings.Current.LosslessAutoUpgrade || AppSettings.Current.AudioOnlyMode)
+            && !IsLocal && Current != null && !Current.IsShort && !Current.IsLive && _losslessAttemptedId != s.VideoId;
+        if (wantLossless)
+        {
+            _losslessAttemptedId = s.VideoId;
+            double dur = s.Duration > 0 ? s.Duration : ParseDuration(Current!.Duration);
+            StartLosslessUpgrade(Current!, dur, manual: AppSettings.Current.AudioOnlyMode);
+        }
+    }
+
+    /// <summary>Called when user enables Headphones / Audio-Only mode: immediately switches to attached FLAC or searches for it now.</summary>
+    public void EnsureBestAudioForMusicMode()
+    {
+        if (Current == null || IsLocal || Current.IsShort || Current.IsLive) return;
+        if (_p.IsLosslessAudio) return;
+        if (_p.HasLosslessTrack)
+        {
+            _p.ToggleLosslessAB();
+            CurrentChanged?.Invoke();
+            return;
+        }
+        if (_p.LosslessSearching) return;
+        _losslessAttemptedId = Current.VideoId;
+        double dur = _p.Duration > 0 ? _p.Duration : ParseDuration(Current.Duration);
+        StartLosslessUpgrade(Current, dur, manual: true);
+    }
+
+    private static double ParseDuration(string? d)
+    {
+        if (string.IsNullOrWhiteSpace(d)) return 0;
+        var parts = d.Split(':');
+        double total = 0;
+        foreach (var p in parts)
+        {
+            if (!int.TryParse(p.Trim(), out var v) || v < 0) return 0;
+            total = total * 60 + v;
+        }
+        return total;
+    }
+
+    /// <summary>
+    /// Manual 1-click action from UI badge:
+    ///  - if FLAC is already attached -> instant A/B toggle between FLAC and YouTube Opus;
+    ///  - otherwise -> searches public/custom lossless sources right now and switches immediately when found.
+    /// </summary>
+    public string RequestOrToggleLossless()
+    {
+        if (Current == null || IsLocal) return "unavailable";
+        if (_p.HasLosslessTrack)
+        {
+            bool nowFlac = _p.ToggleLosslessAB();
+            CurrentChanged?.Invoke();
+            return nowFlac ? "flac" : "youtube";
+        }
+        if (_p.LosslessSearching) return "searching";
+        _losslessAttemptedId = Current.VideoId;
+        double dur = _p.Duration > 0 ? _p.Duration : ParseDuration(Current.Duration);
+        StartLosslessUpgrade(Current, dur, manual: true);
+        return "searching";
+    }
+
+    private void StartLosslessUpgrade(VideoItem v, double durationSec, bool manual)
+    {
+        var playGen = _gen;
+        var lGen = Interlocked.Increment(ref _losslessGen);
+        var id = v.VideoId;
+        var title = v.Title;
+        var channel = v.Channel;
+        _p.LosslessSearching = true;
+        CurrentChanged?.Invoke();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // 1. Instant hit from local FLAC disk cache (0 ms, works offline!)
+                var cachedFlac = MediaCache.FindLossless(id);
+                if (cachedFlac != null)
+                {
+                    var localUrl = StreamProxy.Instance.RegisterCached(cachedFlac);
+                    UiThread.Post(() =>
+                    {
+                        if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen) || _p.CurrentVideoId != id) return;
+                        _p.AttachLosslessTrack(localUrl, "Cache", autoSelect: true);
+                        Paths.Log($"lossless {id}: instant attach from disk cache");
+                        CurrentChanged?.Invoke();
+                    });
+                    return;
+                }
+
+                // 2. Auto-resolve from live Monochrome / HiFi-API / custom self-hosted pool
+                var match = await LosslessResolver.ResolveAsync(id, title, channel, durationSec, manualRequest: manual).ConfigureAwait(false);
+                if (match == null)
+                {
+                    UiThread.Post(() =>
+                    {
+                        if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen)) return;
+                        _p.LosslessSearching = false;
+                        if (manual) _p.ShowText(L.T("FLAC для этого трека не найден", "No Lossless FLAC found for this track"), 2400);
+                        CurrentChanged?.Invoke();
+                    });
+                    return;
+                }
+
+                var proxyUrl = StreamProxy.Instance.RegisterLossless(match.Url, id, match.ContentLength, match.Mime);
+                UiThread.Post(() =>
+                {
+                    if (playGen != _gen || lGen != Volatile.Read(ref _losslessGen) || _p.CurrentVideoId != id) return;
+                    bool autoSelect = manual || match.ExactTiming || AppSettings.Current.AudioOnlyMode;
+                    _p.AttachLosslessTrack(proxyUrl, match.SourceLabel, autoSelect, timingDiff: !match.ExactTiming);
+                    if (autoSelect)
+                        _p.ShowText($"ULTRA FLAC · {match.SourceLabel}", 2000);
+                    CurrentChanged?.Invoke();
+                });
+            }
+            catch (Exception ex)
+            {
+                Paths.Log($"lossless upgrade {id}: {ex.Message}");
+                UiThread.Post(() =>
+                {
+                    if (playGen == _gen && lGen == Volatile.Read(ref _losslessGen))
+                    {
+                        _p.LosslessSearching = false;
+                        CurrentChanged?.Invoke();
+                    }
+                });
+            }
+        });
     }
 
     public void PlayFile(DownloadItem d)
@@ -324,6 +456,8 @@ public sealed class PlaybackTracker
         var v = new VideoItem { VideoId = d.VideoId ?? d.File ?? d.Url, Title = d.Title, Channel = d.Channel };
         Flush();
         ++_gen;
+        Interlocked.Increment(ref _losslessGen);
+        _losslessAttemptedId = null;
         Retrying = false;
         _fileLoaded = _timeValid = false;
         Current = v;
@@ -397,6 +531,8 @@ public sealed class PlaybackTracker
     {
         Flush();
         ++_gen;
+        Interlocked.Increment(ref _losslessGen);
+        _losslessAttemptedId = null;
         Retrying = false;
         _fileLoaded = _timeValid = false;
         _p.Stop();

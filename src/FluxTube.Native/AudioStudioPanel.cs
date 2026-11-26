@@ -658,6 +658,31 @@ public static class AudioStudioPanel
             bx += tw + 6;
         }
 
+        MiniToggle("dsp:flac", "ULTRA FLAC", s.LosslessAutoUpgrade, () =>
+        {
+            s.LosslessAutoUpgrade = !s.LosslessAutoUpgrade;
+            s.Save();
+            if (s.LosslessAutoUpgrade)
+            {
+                var res = PlaybackTracker.Instance.RequestOrToggleLossless();
+                Shell.Toast(res == "flac" ? "ULTRA FLAC" : L.T("Авто-апгрейд FLAC включён", "Auto FLAC upgrade ON"), 0xFF39E68B, 1800);
+            }
+            else
+            {
+                if (MpvPlayer.Instance.IsLosslessAudio) MpvPlayer.Instance.ToggleLosslessAB();
+                Shell.Toast(L.T("Авто-апгрейд FLAC выключен", "Auto FLAC upgrade OFF"), Th.Sub, 1500);
+            }
+            App.Invalidate();
+        });
+        MiniToggle("dsp:bitperf", "Bit-Perfect", s.AudioWasapiExclusive, () =>
+        {
+            s.AudioWasapiExclusive = !s.AudioWasapiExclusive;
+            ApplyNow();
+            Shell.Toast(s.AudioWasapiExclusive
+                ? L.T("WASAPI Exclusive (Bit-Perfect) включён", "WASAPI Exclusive (Bit-Perfect) ON")
+                : L.T("WASAPI Shared 32-bit float", "WASAPI Shared 32-bit float"), s.AudioWasapiExclusive ? 0xFF39E68B : Th.Sub, 1800);
+            App.Invalidate();
+        });
         MiniToggle("dsp:tape", L.T("Тон=Скорость", "Tape pitch"), s.FxTapePitch, () => { s.FxTapePitch = !s.FxTapePitch; AudioDsp.MarkCustom(s); ApplyNow(syncSpeed: true); });
         MiniToggle("dsp:bs2b", "3D BS2B", s.FxHeadphone3D, () => { s.FxHeadphone3D = !s.FxHeadphone3D; AudioDsp.MarkCustom(s); ApplyNow(); });
         MiniToggle("dsp:8d", "8D", s.PlayerAudio8D, () => { s.PlayerAudio8D = !s.PlayerAudio8D; AudioDsp.MarkCustom(s); ApplyNow(); });
