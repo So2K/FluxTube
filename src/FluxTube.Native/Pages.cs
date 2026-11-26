@@ -403,7 +403,7 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
 
     // ---- search: YouTube's own filters plus a relevance check of our own ----
     public static int TestSort; // scripted checks: the order a new search page starts with
-    private int _sSort = TestSort, _sDate, _sType = 1, _sDur;
+    private int _sSort = TestSort, _sDate, _sType = 0, _sDur;
     private bool _strict = AppSettings.Current.SearchStrict;
     private int _hidden, _autoMore;
     private string[][]? _need; // per query word: the spellings that count as a match
@@ -866,10 +866,25 @@ public sealed class FeedPage(string kind, string? arg, string? title) : IPage
                 Menus.Popup(names.Select((n, i) => new MenuItem(n, () => { set(i); Refilter(); }, null, i == current)).ToList());
             cx += pw + 8;
         }
-        Choice("type", TypeNames[_sType], TypeNames, _sType, i => _sType = i);
-        if (_sSort != 4) Choice("date", DateNames[_sDate], DateNames, _sDate, i => _sDate = i);
-        var durIdx = Array.FindIndex(DurSpecs, d => d.Code == _sDur);
-        Choice("dur", DurLabel(durIdx), Enumerable.Range(0, DurSpecs.Length).Select(DurLabel).ToArray(), durIdx, i => _sDur = DurSpecs[i].Code);
+        // Direct 1-click content type pills: Всё / Видео / Плейлисты / Каналы (shows albums & releases immediately!)
+        ReadOnlySpan<int> typeOrder = [0, 1, 3, 2];
+        foreach (int ti in typeOrder)
+        {
+            bool active = _sType == ti;
+            if (UI.Pill(UI.Id("sf:type:" + ti, _scroll), cx, y, 32, null, TypeNames[ti], out var tw,
+                active ? Gfx.Fade(Th.Brand, 0.85f) : Th.A(0.08f), active ? Th.OnBrand : Th.Text))
+            {
+                if (!active) { _sType = ti; Refilter(); }
+            }
+            cx += tw + 6;
+        }
+        cx += 4;
+        if (_sSort != 4 && _sType is 0 or 1) Choice("date", DateNames[_sDate], DateNames, _sDate, i => _sDate = i);
+        if (_sType is 0 or 1)
+        {
+            var durIdx = Array.FindIndex(DurSpecs, d => d.Code == _sDur);
+            Choice("dur", DurLabel(durIdx), Enumerable.Range(0, DurSpecs.Length).Select(DurLabel).ToArray(), durIdx, i => _sDur = DurSpecs[i].Code);
+        }
         Choice("sort", SortNames[_sSort], SortNames, _sSort, i => _sSort = i);
         // our own check on top of YouTube's answer
         if (UI.Pill(UI.Id("sf:strict", _scroll), cx, y, 32, _strict ? Th.Check : null, L.T("Только по теме", "On-topic only"), out var sw, _strict ? Gfx.Fade(Th.Brand, 0.85f) : Th.A(0.08f), _strict ? Th.OnBrand : Th.Text))
@@ -1963,23 +1978,45 @@ public sealed class WatchPage : IPage
             topRx -= 7;
 
             string fxMode = !sOpt.MusicImpactEffects ? "off" : (sOpt.MusicStageEffect ?? "fluid");
-            var impLbl = fxMode switch
-            {
-                "fire" => L.T("Огонь", "Fire"),
-                "off" => L.T("Эффект: Выкл", "FX: Off"),
-                _ => L.T("Флюид", "Fluid"),
-            };
+            (string Key, string Ru, string En)[] fxPresets =
+            [
+                ("fluid", "Флюид", "Fluid"),
+                ("fluid_sparks", "Флюид+Искры", "Fluid+Sparks"),
+                ("water", "Вода", "Water"),
+                ("ferro", "Ферро", "Ferro"),
+                ("physarum", "Нейросеть", "Neural"),
+                ("rd", "Кораллы", "Coral"),
+                ("xpbd_cloth", "Шёлк XPBD", "XPBD Silk"),
+                ("xpbd_strings", "Струны XPBD", "XPBD Strings"),
+                ("fire", "Огонь", "Fire"),
+                ("off", "Эффект: Выкл", "FX: Off"),
+            ];
+            int fxIdx = Array.FindIndex(fxPresets, p => string.Equals(p.Key, fxMode, StringComparison.OrdinalIgnoreCase));
+            if (fxIdx < 0) fxIdx = 0;
+            var impLbl = L.T(fxPresets[fxIdx].Ru, fxPresets[fxIdx].En);
             var impW = UI.PillWidth(null, impLbl);
             topRx -= impW;
-            var tfImp = MusicBounce.Push(new R(topRx, topY, impW, 30), 7, amp: 0.90f, textSafe: true);
+            var impR = new R(topRx, topY, impW, 30);
+            var tfImp = MusicBounce.Push(impR, 7, amp: 0.90f, textSafe: true);
             if (UI.Pill(UI.Id("ms:impact", _infoScroll), topRx, topY, 30, null, impLbl, out _,
                 fxMode != "off" ? Th.Brand : darkPill, fxMode != "off" ? Th.OnBrand : 0xFFFFFFFF))
             {
-                string nextFx = fxMode switch { "fluid" => "fire", "fire" => "off", _ => "fluid" };
-                sOpt.MusicStageEffect = nextFx;
-                sOpt.MusicImpactEffects = nextFx != "off";
+                int nextIdx = (fxIdx + 1) % fxPresets.Length;
+                sOpt.MusicStageEffect = fxPresets[nextIdx].Key;
+                sOpt.MusicImpactEffects = fxPresets[nextIdx].Key != "off";
                 sOpt.SaveAsync();
+                Shell.Toast(L.T($"Эффект: {fxPresets[nextIdx].Ru}", $"FX: {fxPresets[nextIdx].En}"), Th.Brand, 1200);
                 App.Invalidate();
+            }
+            if (UI.RightClick(impR))
+            {
+                Menus.Popup(fxPresets.Select((p, i) => new MenuItem(L.T(p.Ru, p.En), () =>
+                {
+                    sOpt.MusicStageEffect = p.Key;
+                    sOpt.MusicImpactEffects = p.Key != "off";
+                    sOpt.SaveAsync();
+                    App.Invalidate();
+                }, null, i == fxIdx)).ToList());
             }
             MusicBounce.Pop(tfImp);
             topRx -= 7;

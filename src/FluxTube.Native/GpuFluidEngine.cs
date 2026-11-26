@@ -333,25 +333,76 @@ float4 PS_Display(VSOut i) : SV_Target
     float a = clamp(max(c.r, max(c.g, c.b)), 0.0, 0.94) * mask;
     return float4(c * a, a);
 }
+
+// ---- 16,384 GPU Flow-Field Spark Particles riding the EXACT same fluid velocity field! ----
+float pHash(float2 p)
+{
+    p = frac(p * float2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return frac(p.x * p.y);
+}
+
+float4 PS_SparkInit(VSOut i) : SV_Target
+{
+    return float4(pHash(i.uv * 19.1 + 0.17), pHash(i.uv * 41.3 + 0.53), pHash(i.uv * 67.7 + 0.31), pHash(i.uv * 91.9 + 0.89));
+}
+
+float4 PS_SparkStep(VSOut i) : SV_Target
+{
+    float4 p = tex0.Sample(linClamp, i.uv); // xy = pos, z = life, w = colorSeed
+    float2 vel = tex1.Sample(linClamp, p.xy).xy;
+    p.xy += vel * texelSize * dt * 1.45;
+    p.z -= dt * (0.28 + 0.20 * p.w);
+    if (p.z <= 0.0 || p.x < 0.01 || p.x > 0.99 || p.y < 0.01 || p.y > 0.99)
+    {
+        float h1 = pHash(i.uv * 23.7 + param);
+        float h2 = pHash(i.uv * 57.3 + param * 1.37);
+        p.xy = float2(0.08 + h1 * 0.84, 0.08 + h2 * 0.84);
+        p.z = 0.65 + 0.35 * pHash(i.uv * 83.1 + param);
+    }
+    return p;
+}
+
+struct SparkVSOut { float4 pos : SV_Position; float4 col : COLOR0; };
+
+SparkVSOut VS_SparkDraw(uint id : SV_VertexID)
+{
+    uint ax = id & 127;
+    uint ay = (id >> 7) & 127;
+    float2 auv = (float2(ax, ay) + 0.5) / 128.0;
+    float4 p = tex0.SampleLevel(linClamp, auv, 0);
+    float3 dye = tex1.SampleLevel(linClamp, p.xy, 0).rgb;
+    float speedGlow = clamp(length(dye) * 1.35 + 0.18, 0.0, 1.0);
+    float fade = sin(clamp(p.z, 0.0, 1.0) * 3.14159) * speedGlow;
+    SparkVSOut o;
+    o.pos = float4(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0, 0.0, 1.0);
+    float3 sc = lerp(splatColor.rgb, float3(1.0, 1.0, 1.0), 0.55) * fade * 0.85;
+    o.col = float4(sc, fade * 0.75);
+    return o;
+}
+
+float4 PS_SparkDraw(SparkVSOut i) : SV_Target { return i.col; }
 ";
 
     private static int _devGen = -1;
     private static bool _failed;
-    private static ID3D11VertexShader? _vs;
+    private static ID3D11VertexShader? _vs, _vsSparkDraw;
     private static ID3D11PixelShader? _psSplat, _psCurl, _psVort, _psDiv, _psClear, _psPress, _psGrad, _psAdvect;
     private static ID3D11PixelShader? _psBloomPre, _psBloomBlur, _psDisplay;
+    private static ID3D11PixelShader? _psSparkInit, _psSparkStep, _psSparkDraw;
     private static ID3D11Buffer? _cb;
     private static ID3D11SamplerState? _sampler;
     private static ID3D11RasterizerState? _rs;
     private static ID3D11BlendState? _bsOpaque, _bsAdd;
 
-    private static RtPair? _vel, _dye, _press;
+    private static RtPair? _vel, _dye, _press, _sparks;
+    private static bool _sparksInit;
     private static RtSingle? _curl, _div, _outRt;
     private static RtSingle[]? _bloom;
     private static ID2D1Bitmap1? _d2dBmp;
 
     // Pending frame request (set during DrawBackdropEffects, executed cleanly BEFORE DC.BeginDraw()!)
-    private static bool _pendingStep;
+    private static bool _pendingStep, _reqSparks;
     private static uint _reqDom1, _reqDom2;
     private static float _reqBass, _reqMid, _reqHigh, _reqHit, _reqPan, _reqQuiet, _reqBurst;
     private static bool _reqBeat;
@@ -362,11 +413,12 @@ float4 PS_Display(VSOut i) : SV_Target
 
     public static ID2D1Bitmap1? OutputBitmap => _d2dBmp;
 
-    public static void RequestStep(uint dom1, uint dom2, float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float burstPower)
+    public static void RequestStep(uint dom1, uint dom2, float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float burstPower, bool withSparks = false)
     {
         _reqDom1 = dom1; _reqDom2 = dom2;
         _reqBass = bass; _reqMid = mid; _reqHigh = high;
         _reqHit = hit; _reqPan = pan; _reqQuiet = quietDim;
+        _reqSparks = withSparks;
         if (beatHit) _reqBeat = true;
         if (burstPower > _reqBurst) _reqBurst = burstPower;
         _pendingStep = true;
@@ -379,10 +431,13 @@ float4 PS_Display(VSOut i) : SV_Target
         _vel?.Dispose(); _vel = null;
         _dye?.Dispose(); _dye = null;
         _press?.Dispose(); _press = null;
+        _sparks?.Dispose(); _sparks = null;
+        _sparksInit = false;
         _curl?.Dispose(); _curl = null;
         _div?.Dispose(); _div = null;
         if (_bloom != null) { foreach (var b in _bloom) b?.Dispose(); _bloom = null; }
         _vs?.Dispose(); _vs = null;
+        _vsSparkDraw?.Dispose(); _vsSparkDraw = null;
         _psSplat?.Dispose(); _psSplat = null;
         _psCurl?.Dispose(); _psCurl = null;
         _psVort?.Dispose(); _psVort = null;
@@ -394,6 +449,9 @@ float4 PS_Display(VSOut i) : SV_Target
         _psBloomPre?.Dispose(); _psBloomPre = null;
         _psBloomBlur?.Dispose(); _psBloomBlur = null;
         _psDisplay?.Dispose(); _psDisplay = null;
+        _psSparkInit?.Dispose(); _psSparkInit = null;
+        _psSparkStep?.Dispose(); _psSparkStep = null;
+        _psSparkDraw?.Dispose(); _psSparkDraw = null;
         _cb?.Dispose(); _cb = null;
         _sampler?.Dispose(); _sampler = null;
         _rs?.Dispose(); _rs = null;
@@ -413,6 +471,7 @@ float4 PS_Display(VSOut i) : SV_Target
         {
             var dev = Gfx.D3DDevice;
             _vs = dev.CreateVertexShader(CompileHlsl(HlslSource, "VS_Quad", "vs_5_0"));
+            _vsSparkDraw = dev.CreateVertexShader(CompileHlsl(HlslSource, "VS_SparkDraw", "vs_5_0"));
             _psSplat = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_Splat", "ps_5_0"));
             _psCurl = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_Curl", "ps_5_0"));
             _psVort = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_Vorticity", "ps_5_0"));
@@ -424,6 +483,9 @@ float4 PS_Display(VSOut i) : SV_Target
             _psBloomPre = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_BloomPrefilter", "ps_5_0"));
             _psBloomBlur = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_BloomBlur", "ps_5_0"));
             _psDisplay = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_Display", "ps_5_0"));
+            _psSparkInit = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_SparkInit", "ps_5_0"));
+            _psSparkStep = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_SparkStep", "ps_5_0"));
+            _psSparkDraw = dev.CreatePixelShader(CompileHlsl(HlslSource, "PS_SparkDraw", "ps_5_0"));
 
             _cb = dev.CreateBuffer(new BufferDescription((uint)sizeof(FluidCB), BindFlags.ConstantBuffer, ResourceUsage.Dynamic, CpuAccessFlags.Write));
             _sampler = dev.CreateSamplerState(new SamplerDescription(Vortice.Direct3D11.Filter.MinMagMipLinear, TextureAddressMode.Clamp, TextureAddressMode.Clamp, TextureAddressMode.Clamp));
@@ -535,11 +597,11 @@ float4 PS_Display(VSOut i) : SV_Target
 
         bool beat = _reqBeat; _reqBeat = false;
         float burst = _reqBurst; _reqBurst = 0f;
-        ExecuteGpuStep((now - UI.StartTick) * 0.001f, dt, _reqDom1, _reqDom2, _reqBass, _reqMid, _reqHigh, _reqHit, _reqPan, _reqQuiet, beat, burst);
+        ExecuteGpuStep((now - UI.StartTick) * 0.001f, dt, _reqDom1, _reqDom2, _reqBass, _reqMid, _reqHigh, _reqHit, _reqPan, _reqQuiet, beat, burst, _reqSparks);
     }
 
     private static void ExecuteGpuStep(float t, float dt, uint dom1, uint dom2,
-        float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float burstPower)
+        float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float burstPower, bool withSparks = false)
     {
         if (!EnsureInit()) return;
         var ctx = Gfx.D3DDevice.ImmediateContext;
@@ -665,6 +727,45 @@ float4 PS_Display(VSOut i) : SV_Target
 
         // 6. Final 1024x576 Display Pass (3D Normal Shading + Bloom + LinearToGamma -> Direct2D Shared Surface!)
         Pass(ctx, _psDisplay!, _outRt!.Rtv, DyeW, DyeH, _dye.SrvA, bl0.Srv, simCb);
+
+        // 7. Optional 16,384 GPU Flow-Field Spark Particles riding _vel directly onto _outRt!
+        if (withSparks)
+        {
+            if (_sparks == null)
+            {
+                _sparks = new RtPair(Gfx.D3DDevice, 128, 128, Format.R32G32B32A32_Float);
+                _sparksInit = false;
+            }
+            var spCb = new FluidCB
+            {
+                TexelX = 1f / SimW, TexelY = 1f / SimH,
+                Dt = dt, Param = t,
+                ColorR = r0, ColorG = g0, ColorB = b0, ColorA = 1f,
+            };
+            if (!_sparksInit)
+            {
+                Pass(ctx, _psSparkInit!, _sparks.RtvA, 128, 128, null, null, spCb);
+                _sparksInit = true;
+            }
+            Pass(ctx, _psSparkStep!, _sparks.RtvB, 128, 128, _sparks.SrvA, _vel.SrvA, spCb);
+            _sparks.Swap();
+
+            UpdateCB(ctx, spCb);
+            ctx.IASetPrimitiveTopology(PrimitiveTopology.PointList);
+            ctx.VSSetShader(_vsSparkDraw);
+            ctx.VSSetConstantBuffer(0, _cb);
+            ctx.VSSetSampler(0, _sampler);
+            ctx.VSSetShaderResource(0, _sparks.SrvA);
+            ctx.VSSetShaderResource(1, _dye.SrvA);
+            ctx.OMSetBlendState(_bsAdd);
+            ctx.RSSetViewport(0, 0, DyeW, DyeH);
+            ctx.OMSetRenderTargets(_outRt.Rtv);
+            ctx.PSSetShader(_psSparkDraw);
+            ctx.Draw(128 * 128, 0);
+            ctx.VSSetShaderResource(0, null!);
+            ctx.VSSetShaderResource(1, null!);
+        }
+
         ctx.OMSetRenderTargets((ID3D11RenderTargetView)null!);
         ctx.OMSetBlendState(null);
     }

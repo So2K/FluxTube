@@ -795,17 +795,17 @@ public static unsafe class MusicStageEffects
         if (_intensity > 0.01f || _flash > 0.01f || _fireIntensity > 0.01f) UI.Animate();
     }
 
-    /// <summary>Draws Pavel-style RGB curl-vorticity silk fluid OR cover-matched side fire + quiet breakdown starlight.</summary>
+    /// <summary>Draws active GPU/XPBD audio-reactive backdrop preset + quiet breakdown starlight.</summary>
     public static void DrawBackdropEffects(R stage, uint dom1, uint dom2)
     {
         var sOpt = AppSettings.Current;
         string mode = !sOpt.MusicImpactEffects ? "off" : (sOpt.MusicStageEffect ?? "fluid");
         if (mode == "off") return;
 
-        bool fluidMode = !string.Equals(mode, "fire", StringComparison.OrdinalIgnoreCase);
+        bool fireMode = string.Equals(mode, "fire", StringComparison.OrdinalIgnoreCase);
         float fire = _fireIntensity;
         float qDim = AudioAnalyzer.QuietDim;
-        if (!fluidMode && fire <= 0.01f && qDim <= 0.04f) return;
+        if (fireMode && fire <= 0.01f && qDim <= 0.04f) return;
 
         Gfx.PushClip(stage);
         float t = (UI.Now - UI.StartTick) * 0.001f;
@@ -834,7 +834,6 @@ public static unsafe class MusicStageEffects
                 Gfx.Circle(x, y, r, Gfx.Fade(0xFFFFFFFF, a));
                 if ((i % 4) == 0)
                 {
-                    // Tiny delicate 4-point star sparkle in silence
                     float sp = r * 2.8f;
                     Gfx.Line(x - sp, y, x + sp, y, Gfx.Fade(starCol, a * 0.65f), 1.0f);
                     Gfx.Line(x, y - sp, x, y + sp, Gfx.Fade(starCol, a * 0.65f), 1.0f);
@@ -842,8 +841,8 @@ public static unsafe class MusicStageEffects
             }
         }
 
-        // ---- 2A. HARDWARE D3D11 HLSL PAVEL FLUID (256x144 20-iter Jacobi + 1024x576 HDR Dye + 4-level Bloom!) ----
-        if (fluidMode)
+        // ---- 2A. HARDWARE D3D11 PAVEL FLUID (+ optional 16k GPU Flow-Field Sparks!) ----
+        if (mode is "fluid" or "fluid_sparks")
         {
             bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.34f;
             if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
@@ -851,7 +850,7 @@ public static unsafe class MusicStageEffects
             _fluidBurstPower = 0f;
             GpuFluidEngine.RequestStep(dom1, dom2,
                 AudioAnalyzer.BassEnergy, AudioAnalyzer.MidEnergy, AudioAnalyzer.HighEnergy,
-                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit, burst);
+                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit, burst, withSparks: mode == "fluid_sparks");
 
             var gpuBmp = GpuFluidEngine.OutputBitmap;
             if (gpuBmp != null)
@@ -862,8 +861,36 @@ public static unsafe class MusicStageEffects
             }
             UI.Animate();
         }
-        // ---- 2B. COVER-MATCHED FLUID SIDE FIRE CLIMAX (selectable "fire" mode) ----
-        else if (fire > 0.01f)
+        // ---- 2B. GPU SHADER PACK: Water Caustics / Liquid Chrome Ferrofluid / Physarum Neural Web / Gray-Scott Coral ----
+        else if (mode is "water" or "ferro" or "physarum" or "rd")
+        {
+            bool beatHit = AudioAnalyzer.BeatStamp != _lastFluidBeat && AudioAnalyzer.BeatStamp > 0 && AudioAnalyzer.BeatAttackStrength > 0.34f;
+            if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
+            GpuEffectsPack.RequestStep(mode, dom1, dom2,
+                AudioAnalyzer.BassEnergy, AudioAnalyzer.MidEnergy, AudioAnalyzer.HighEnergy,
+                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit);
+
+            var fxBmp = GpuEffectsPack.OutputBitmap;
+            if (fxBmp != null)
+            {
+                float fxOp = Math.Clamp(0.76f + AudioAnalyzer.BassEnergy * 0.20f, 0.52f, 0.96f) * Math.Clamp(1f - qDim * 0.72f, 0.20f, 1f);
+                Gfx.DC.DrawBitmap(fxBmp, new RawRectF(stage.X, stage.Y, stage.Right, stage.Bottom), fxOp,
+                    Vortice.Direct2D1.InterpolationMode.Linear, null, null);
+            }
+            UI.Animate();
+        }
+        // ---- 2C. XPBD PHYSICAL SILK MEMBRANE ----
+        else if (mode == "xpbd_cloth")
+        {
+            XpbdStageFx.DrawXpbdCloth(stage, dom1, dom2);
+        }
+        // ---- 2D. XPBD PLUCKED LASER STRINGS + SOFT-BODY MERCURY RING ----
+        else if (mode == "xpbd_strings")
+        {
+            XpbdStageFx.DrawXpbdStrings(stage, dom1, dom2);
+        }
+        // ---- 2E. COVER-MATCHED FLUID SIDE FIRE CLIMAX (selectable "fire" mode) ----
+        else if (fireMode && fire > 0.01f)
         {
             float bass = AudioAnalyzer.BassEnergy;
             StepFireSimulation(fire, t, dom1, dom2);

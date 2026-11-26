@@ -695,6 +695,8 @@ public static unsafe class Gfx
         _roundLayer = null;
         _roundClipDepth = 0;
         GpuFluidEngine.DisposeResources();
+        GpuEffectsPack.DisposeResources();
+        XpbdStageFx.DisposeGpuResources();
         DisposeDanceAtlas();
         BgEngine.DisposeGpuResources();
         MusicArt.OnDeviceLost();
@@ -1240,6 +1242,7 @@ public static unsafe class Gfx
         }
         _linearCursor = 0;
         GpuFluidEngine.StepBeforeBeginDraw();
+        GpuEffectsPack.StepBeforeBeginDraw();
         DC.Target = _activeTarget;
         DC.BeginDraw();
         DC.Clear(ToColor(clear));
@@ -2383,7 +2386,11 @@ public static unsafe class Gfx
             Assert(bCorner < 20 && bInside > 200, $"PushRoundedClip failed (cornerB={bCorner}, insideB={bInside})");
             var (flOk, flMs, flLit) = GpuFluidEngine.SelfTestGpuFluid();
             Assert(flOk, $"D3D11 GPU Fluid 1024x576 self-test failed (ms={flMs:0.00}, lit={flLit})");
-            var msg7 = $"PASS [7/7] PushRoundedClip (cornerB={bCorner}, insideB={bInside}) + D3D11 GPU Fluid 1024x576 ({flMs:0.00} ms/step, lit={flLit})";
+            var (packOk, packSummary) = GpuEffectsPack.SelfTestAllModes();
+            Assert(packOk, $"GpuEffectsPack self-test failed ({packSummary})");
+            var (xpbdOk, xpbdMs) = XpbdStageFx.SelfTestXpbd();
+            Assert(xpbdOk, $"XpbdStageFx self-test failed ({xpbdMs:0.00}ms)");
+            var msg7 = $"PASS [7/7] RoundedClip (cB={bCorner},iB={bInside}) + GPU Fluid ({flMs:0.00}ms,lit={flLit}) + Pack ({packSummary}) + XPBD ({xpbdMs:0.00}ms)";
             Services.Paths.Log("self-test: " + msg7); Console.WriteLine(msg7);
 
             MusicBounce.Update(false, 0.016f);
