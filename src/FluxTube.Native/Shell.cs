@@ -123,10 +123,11 @@ public static class Shell
             if (P.VideoEnabled) P.SetVideoEnabled(false);
             return;
         }
-        // Only suspend video when the window is genuinely minimized to taskbar OR hidden on a non-video tab for >= 4s;
-        // NEVER suspend on transient DXGI occlusion (another window briefly overlapping or multi-monitor), which caused black screens!
+        // Only suspend video when the window is genuinely minimized to taskbar OR on a completely different non-video tab for >= 15s;
+        // NEVER kill video decode simply because the user scrolled down to read comments on WatchPage (destroying DASH video mid-play causes black screens!).
         bool minimized = W.IsIconic(App.Hwnd);
-        bool visibleNow = Pip.Active || (_videoWanted && !minimized);
+        bool onActiveWatch = _cur is WatchPage || _cur is ShortsPage;
+        bool visibleNow = Pip.Active || (_videoWanted && !minimized) || (onActiveWatch && !minimized);
         if (visibleNow || !s.AutoSuspendVideoWhenHidden)
         {
             _videoHiddenSince = 0;
@@ -136,7 +137,7 @@ public static class Shell
         {
             var now = Environment.TickCount64;
             if (_videoHiddenSince == 0) _videoHiddenSince = now;
-            else if (P.VideoEnabled && now - _videoHiddenSince >= 4000) P.SetVideoEnabled(false);
+            else if (P.VideoEnabled && now - _videoHiddenSince >= 15_000) P.SetVideoEnabled(false);
         }
     }
     private static string[] _args = [];
@@ -1206,7 +1207,13 @@ public static class Shell
         Downloader.Instance.Init();
         _userMuted = App.Mute;
         P.FullscreenChanged += SetFullscreen;
-        P.PlaybackStarted += () => { VideoReady = true; PushPlayerState(); Themes.PumpLiveVideoSample(); };
+        P.PlaybackStarted += () => { VideoReady = true; PushPlayerState(); Themes.PumpLiveVideoSample(); App.Invalidate(); };
+        P.VideoRecoveredSoft += () =>
+        {
+            VideoReady = true;
+            _hostVisible = false; // force SetWindowPos + SWP_SHOWWINDOW on next frame
+            App.Invalidate();
+        };
         P.FrameSampled += () => { Themes.SyncAdaptiveFromOpenVideo(); App.WakeUi(); };
         P.DurationChanged += _ => PushPlayerState();
         P.SpeedChanged += _ => { PushPlayerState(); App.Invalidate(); };
@@ -1241,7 +1248,18 @@ public static class Shell
                            $"Could not open video ({msg}). Try another quality in Settings or refresh the page."), Th.Brand, 9000);
         };
         P.EndOfFile += OnEnded;
-        P.TimeChanged += t => { if (_cur is WatchPage near) near.NearEnd(t, P.Duration); Themes.PumpLiveVideoSample(); };
+        P.TimeChanged += t =>
+        {
+            // Never allow VideoReady to stay stuck false while audio is actively playing with a valid video track!
+            if (!VideoReady && P.VideoEnabled && (P.HasActiveVideo || (t > 0.2 && !P.Buffering)))
+            {
+                VideoReady = true;
+                PushPlayerState();
+                App.Invalidate();
+            }
+            if (_cur is WatchPage near) near.NearEnd(t, P.Duration);
+            Themes.PumpLiveVideoSample();
+        };
         T.CurrentChanged += () => { PushPlayerState(); Themes.SyncAdaptiveFromOpenVideo(); };
 
         try
@@ -1263,7 +1281,7 @@ public static class Shell
         {
             Storyboard.Forget();
             if (T.Current?.VideoId is { Length: 11 } loadedVid) Storyboard.Prewarm(loadedVid);
-            if (P.Paused) { VideoReady = true; PushPlayerState(); App.Invalidate(); }
+            if (P.Paused || P.HasActiveVideo) { VideoReady = true; PushPlayerState(); App.Invalidate(); }
             Themes.SyncAdaptiveFromOpenVideo();
             var id = _pendingBgHandoff;
             if (id == null || P.CurrentVideoId != _pendingBgVideoId) return;
@@ -2886,11 +2904,12 @@ public static class Shell
                 int pxT = (int)MathF.Round(_videoRect.Y * s);
                 var px = new W.RECT { L = pxL, T = pxT, R = pxL + vw, B = pxT + vh };
 
-                bool sizeChanged = !_hostVisible || vw != (_hostPx.R - _hostPx.L) || vh != (_hostPx.B - _hostPx.T);
+                bool winVisible = W.IsWindowVisible(App.VideoHwnd);
+                bool sizeChanged = !_hostVisible || !winVisible || vw != (_hostPx.R - _hostPx.L) || vh != (_hostPx.B - _hostPx.T);
                 bool moved = sizeChanged || px.L != _hostPx.L || px.T != _hostPx.T;
                 if (moved)
                 {
-                    bool wasVis = _hostVisible;
+                    bool wasVis = _hostVisible && winVisible;
                     _hostPx = px; _hostRect = vis; _hostVisible = true;
                     uint swpFlags = W.SWP_NOZORDER | W.SWP_NOACTIVATE | W.SWP_NOCOPYBITS
                         | (!sizeChanged && wasVis ? W.SWP_NOSIZE : 0)

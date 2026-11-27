@@ -488,63 +488,90 @@ local function render()
             end
         end
 
-        -- 2b. YouTube-style "Most Replayed" smooth mountain heatmap rising above the seekbar on hover/scrub!
+        -- 2b. Subtle Apple Liquid Glass "Most Replayed" silk wave rising gently above the seekbar on hover/scrub
         local has_hm = (not S.is_live) and (not S.pip) and S.heatmap and #S.heatmap >= 4
         if has_hm and sa > 0.02 then
-            local hm = S.heatmap
-            local n = #hm
-            local max_h = 36 * sc * sa
-            local base_y = py - th / 2 - 1.5 * sc
-            local pts_x, pts_y = {}, {}
+            local raw = S.heatmap
+            local n = #raw
+            -- 2-pass Gaussian smoothing turns spiky raw data into silky, understated organic dunes
+            local sm = {}
+            for i = 1, n do sm[i] = clamp(raw[i] or 0, 0, 1) end
+            for _ = 1, 2 do
+                local nxt = {}
+                for i = 1, n do
+                    local a = sm[math.max(1, i - 1)]
+                    local b = sm[i]
+                    local c = sm[math.min(n, i + 1)]
+                    nxt[i] = a * 0.22 + b * 0.56 + c * 0.22
+                end
+                sm = nxt
+            end
+            local max_h = 22 * sc * sa
+            local base_y = py - th / 2 - 1.0 * sc
+            local pts_x, pts_y, pts_y2, pts_v = {}, {}, {}, {}
             for i = 1, n do
                 local frac = (i - 1) / (n - 1)
                 pts_x[i] = L.px0 + pw * frac
-                local v = clamp(hm[i] or 0, 0, 1)
-                -- Slight power curve so peaks pop crisply like YouTube's Most Replayed hills
-                pts_y[i] = base_y - (1.2 * sc * sa + math.pow(v, 1.15) * max_h)
+                -- Soft noise-floor cutoff so flat uninteresting sections sit flush (zero distracting double-line!)
+                local v = clamp((sm[i] - 0.06) / 0.94, 0, 1)
+                v = math.pow(v, 1.32)
+                pts_v[i] = v
+                pts_y[i] = base_y - v * max_h
+                pts_y2[i] = base_y - v * (max_h * 0.52)
             end
-            -- Precompute smooth Catmull-Rom cubic Bezier control points (scaled properly via assdraw API!)
-            local c1x, c1y, c2x, c2y = {}, {}, {}, {}
-            local min_y = base_y - max_h - 3 * sc
-            local max_y = base_y - 0.5 * sc
-            for i = 1, n - 1 do
-                local x0, y0 = pts_x[math.max(1, i - 1)], pts_y[math.max(1, i - 1)]
-                local x1, y1 = pts_x[i], pts_y[i]
-                local x2, y2 = pts_x[i + 1], pts_y[i + 1]
-                local x3, y3 = pts_x[math.min(n, i + 2)], pts_y[math.min(n, i + 2)]
-                c1x[i] = x1 + (x2 - x0) / 6
-                c1y[i] = clamp(y1 + (y2 - y0) / 6, min_y, max_y)
-                c2x[i] = x2 - (x3 - x1) / 6
-                c2y[i] = clamp(y2 - (y3 - y1) / 6, min_y, max_y)
-            end
-            local function wave_fwd(dy)
-                A:move_to(pts_x[1], pts_y[1] + dy)
+            local function build_ctrl(ys)
+                local c1x, c1y, c2x, c2y = {}, {}, {}, {}
+                local min_y = base_y - max_h - 2 * sc
                 for i = 1, n - 1 do
-                    A:bezier_curve(c1x[i], c1y[i] + dy, c2x[i], c2y[i] + dy, pts_x[i + 1], pts_y[i + 1] + dy)
+                    local x0, y0 = pts_x[math.max(1, i - 1)], ys[math.max(1, i - 1)]
+                    local x1, y1 = pts_x[i], ys[i]
+                    local x2, y2 = pts_x[i + 1], ys[i + 1]
+                    local x3, y3 = pts_x[math.min(n, i + 2)], ys[math.min(n, i + 2)]
+                    c1x[i] = x1 + (x2 - x0) / 6
+                    c1y[i] = clamp(y1 + (y2 - y0) / 6, min_y, base_y)
+                    c2x[i] = x2 - (x3 - x1) / 6
+                    c2y[i] = clamp(y2 - (y3 - y1) / 6, min_y, base_y)
                 end
+                return c1x, c1y, c2x, c2y
             end
-            local function wave_rev(dy)
-                A:line_to(pts_x[n], pts_y[n] + dy)
-                for i = n - 1, 1, -1 do
-                    A:bezier_curve(c2x[i], c2y[i] + dy, c1x[i], c1y[i] + dy, pts_x[i], pts_y[i] + dy)
-                end
+            local c1x, c1y, c2x, c2y = build_ctrl(pts_y)
+            local d1x, d1y, d2x, d2y = build_ctrl(pts_y2)
+            -- Layer 1: whisper-soft translucent frosted mist (full silk silhouette)
+            shape("FFFFFF", 0.14 * sa)
+            A:move_to(pts_x[1], pts_y[1])
+            for i = 1, n - 1 do
+                A:bezier_curve(c1x[i], c1y[i], c2x[i], c2y[i], pts_x[i + 1], pts_y[i + 1])
             end
-            -- Subtle dark contrast silhouette behind peaks so hills stay readable on bright white frames
-            shape("000000", 0.24 * sa)
-            wave_fwd(-1.8 * sc)
             A:line_to(L.px1, base_y)
             A:line_to(L.px0, base_y)
             A:draw_stop()
-            -- Translucent frosted mountain fill (single fast ASS polygon!)
-            shape("FFFFFF", 0.30 * sa)
-            wave_fwd(0)
+            -- Layer 2: gentle bottom-anchored inner haze (creates a delicate vertical gradient fading toward the bar!)
+            shape("FFFFFF", 0.09 * sa)
+            A:move_to(pts_x[1], pts_y2[1])
+            for i = 1, n - 1 do
+                A:bezier_curve(d1x[i], d1y[i], d2x[i], d2y[i], pts_x[i + 1], pts_y2[i + 1])
+            end
             A:line_to(L.px1, base_y)
             A:line_to(L.px0, base_y)
             A:draw_stop()
-            -- Crisp luminous top ridge ribbon (symmetric forward+reverse Bezier, uniform 1.8px anti-aliased crest!)
-            shape("FFFFFF", 0.90 * sa)
-            wave_fwd(-1.1 * sc)
-            wave_rev(0.7 * sc)
+            -- Layer 3: gossamer specular top sheen that tapers to 0px on flat sections (only kisses genuine peaks!)
+            local top_y, bot_y = {}, {}
+            for i = 1, n do
+                local t_w = clamp(pts_v[i] * 4.5, 0, 1) * 1.15 * sc
+                top_y[i] = pts_y[i] - t_w * 0.55
+                bot_y[i] = math.min(base_y, pts_y[i] + t_w * 0.45)
+            end
+            local t1x, t1y, t2x, t2y = build_ctrl(top_y)
+            local b1x, b1y, b2x, b2y = build_ctrl(bot_y)
+            shape("FFFFFF", 0.42 * sa)
+            A:move_to(pts_x[1], top_y[1])
+            for i = 1, n - 1 do
+                A:bezier_curve(t1x[i], t1y[i], t2x[i], t2y[i], pts_x[i + 1], top_y[i + 1])
+            end
+            A:line_to(pts_x[n], bot_y[n])
+            for i = n - 1, 1, -1 do
+                A:bezier_curve(b2x[i], b2y[i], b1x[i], b1y[i], pts_x[i], bot_y[i])
+            end
             A:draw_stop()
         end
 
@@ -735,7 +762,7 @@ local function render()
             -- Footer height: 1 compact row (timestamp + ad badge) or 2 tidy rows (chapter + meta row)
             local foot_h = chap_txt and (46 * sc) or (28 * sc)
             local card_h = (has_thumb and (pad + S.thumb_h + 3 * sc) or (4 * sc)) + foot_h
-            local hm_lift = has_hm and (32 * sc * sa) or 0
+            local hm_lift = has_hm and (22 * sc * sa) or 0
             local cy1 = dock_t - 12 * sc - hm_lift
             local cy0 = math.max(10 * sc, cy1 - card_h)
             cy1 = cy0 + card_h

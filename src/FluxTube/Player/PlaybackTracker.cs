@@ -55,6 +55,17 @@ public sealed class PlaybackTracker
         };
         _p.LoadFailed += OnLoadFailed;
         _p.BufferingChanged += OnBufferingChanged;
+        _p.VideoStalled += OnVideoStalled;
+        _p.PlaybackHealthy += () => { _retryCount = 0; };
+        StreamProxy.Instance.StreamDied += (vid, reason) =>
+        {
+            UiThread.Post(() =>
+            {
+                if (IsLocal || Current == null || Current.VideoId != vid || _p.IsLiveStream || !_fileLoaded) return;
+                Paths.Log($"proxy stream died {vid} at {_p.TimePos:0.1}s ({reason}): triggering seamless recovery");
+                OnLoadFailed("proxy stream died: " + reason);
+            });
+        };
         _p.PlaybackStarted += () =>
         {
             if (Current == null || _p.CurrentVideoId != Current.VideoId) return;
@@ -92,6 +103,24 @@ public sealed class PlaybackTracker
                 OnLoadFailed("prolonged buffer stall");
             });
         });
+    }
+
+    private void OnVideoStalled(string msg)
+    {
+        var v = Current;
+        if (v == null) return;
+        if (IsLocal)
+        {
+            // Local file wedged decoder: reload cleanly at exact timestamp (hwdec already switched to software by watchdog)
+            var pos = _timeValid && _p.TimePos > 0.5 ? _p.TimePos : _lastPos;
+            if (!string.IsNullOrEmpty(_p.CurrentUrl))
+            {
+                Paths.Log($"local video stall {v.VideoId} at {pos:0.1}s: reloading with software decode");
+                _p.Load(_p.CurrentUrl, v.VideoId, pos, _p.Paused);
+            }
+            return;
+        }
+        OnLoadFailed(msg);
     }
 
     /// <summary>

@@ -80,6 +80,20 @@ public sealed class MpvPlayer : IDisposable
     private int _frameSampleGen;
     private int _frameDirty;
     private int _videoWidth, _videoHeight;
+    private volatile bool _voConfigured;
+    private volatile bool _fileLoadedFlag;
+    private volatile bool _forceSwDecode;
+    private int _hwdecFailCount;
+    private long _lastTransitionAt = Environment.TickCount64;
+    private long _lastHealthyAt;
+    private long _wdLastCheckTick;
+    private double _wdAnchorTime = -1;
+    private double _wdLastVpts = double.NaN;
+    private long _wdLastFnum = -1;
+    private int _wdStage;
+    private long _wdStageAt;
+    private long _wdSmoothSince;
+    private bool _wdReportedHealthy;
 
     public double TimePos { get; private set; }
     public double Duration { get; private set; }
@@ -203,6 +217,12 @@ public sealed class MpvPlayer : IDisposable
     public event Action<bool>? EndOfFile; // true = played to end
     public event Action<string>? LoadFailed;
     public event Action? FrameSampled;
+    /// <summary>Fired when the watchdog performs a Stage-1 soft video recovery (ensure host HWND is visible).</summary>
+    public event Action? VideoRecoveredSoft;
+    /// <summary>Fired when video stays black/frozen while audio plays even after Stage-1 recovery (triggers full stream reload).</summary>
+    public event Action<string>? VideoStalled;
+    /// <summary>Fired once playback has delivered healthy advancing video+audio frames for &gt;= 25s (resets retry budgets).</summary>
+    public event Action? PlaybackHealthy;
 
     public bool IsReady => Volatile.Read(ref _ctx) != IntPtr.Zero && !_disposed;
 
@@ -234,7 +254,8 @@ public sealed class MpvPlayer : IDisposable
             Opt(ctx, "audio-buffer", "0.25");
             Opt(ctx, "audio-stream-silence", "yes");
             Opt(ctx, "osd-on-seek", "no");
-            Opt(ctx, "hwdec", "auto-safe");
+            // auto-copy (d3d11va-copy on Windows): full GPU hardware decode WITHOUT zero-copy D3D11VA surface deadlocks on seeks/Alt-Tab/screenshot-raw!
+            Opt(ctx, "hwdec", "auto-copy");
             Opt(ctx, "idle", "yes");
             Opt(ctx, "input-ipc-server", @"\\.\pipe\fluxtube-mpv-" + Environment.ProcessId);
             Opt(ctx, "force-window", "immediate");
@@ -276,10 +297,7 @@ public sealed class MpvPlayer : IDisposable
             Opt(ctx, "cache-pause-initial", "no");
             Opt(ctx, "cache-pause-wait", "0.2");
             Opt(ctx, "demuxer-readahead-secs", "30");
-            Opt(ctx, "demuxer-lavf-probesize", "262144");
-            Opt(ctx, "demuxer-lavf-analyzeduration", "0.5");
-            Opt(ctx, "stream-buffer-size", "128KiB");
-            Opt(ctx, "vd-lavc-fast", "yes");
+            Opt(ctx, "stream-buffer-size", "256KiB");
             Opt(ctx, "network-timeout", "12");
             Opt(ctx, "stream-lavf-o", "reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=2");
             Opt(ctx, "hr-seek", "yes");
@@ -306,6 +324,7 @@ public sealed class MpvPlayer : IDisposable
             mpv_observe_property(ctx, 13, "audio-params/format", Format.String);
             mpv_observe_property(ctx, 14, "video-params/w", Format.Int64);
             mpv_observe_property(ctx, 15, "video-params/h", Format.Int64);
+            mpv_observe_property(ctx, 16, "vo-configured", Format.Flag);
 
             // Publish _ctx only after full initialization so other threads never touch an uninitialized handle
             Volatile.Write(ref _ctx, ctx);
@@ -426,6 +445,8 @@ public sealed class MpvPlayer : IDisposable
     {
         if (VideoEnabled == enabled) return;
         VideoEnabled = enabled;
+        Volatile.Write(ref _lastTransitionAt, Environment.TickCount64);
+        ResetWatchdogState();
         if (!enabled)
         {
             Volatile.Write(ref _videoWidth, 0);
@@ -437,8 +458,19 @@ public sealed class MpvPlayer : IDisposable
         }
         if (!IsReady) return;
         Set("vid", enabled ? "auto" : "no");
-        if (enabled && HasMedia)
-            Command("seek", "0", "relative+exact");
+        if (enabled && HasMedia && !IsLiveStream)
+            Command("seek", "0", "relative+keyframes");
+    }
+
+    private void ResetWatchdogState()
+    {
+        _wdAnchorTime = -1;
+        _wdLastVpts = double.NaN;
+        _wdLastFnum = -1;
+        _wdStage = 0;
+        _wdStageAt = 0;
+        _wdSmoothSince = 0;
+        _wdReportedHealthy = false;
     }
 
     /// <summary>Ensures mpv's live vid property matches VideoEnabled asynchronously (zero synchronous mpv_get_property stall!).</summary>
@@ -496,6 +528,9 @@ public sealed class MpvPlayer : IDisposable
         CurrentUrl = url;
         CurrentAudioUrl = url;
         CurrentVideoId = videoId;
+        _fileLoadedFlag = false;
+        Volatile.Write(ref _lastTransitionAt, Environment.TickCount64);
+        ResetWatchdogState();
         Volatile.Write(ref _videoWidth, 0);
         ClearLiveFrameSample();
         MarkFrameDirty();
@@ -503,7 +538,8 @@ public sealed class MpvPlayer : IDisposable
         AudioCodec = ""; AudioSampleFormat = ""; AudioSampleRate = 0; AudioBitrateKbps = 0;
         HasLosslessTrack = false; LosslessSearching = false; LosslessDownloadPercent = -1; LosslessTimingDiff = false; LosslessSourceLabel = null; ExpectedLosslessBitrateKbps = 0;
         if (startPaused) { Paused = true; Set("pause", "yes"); }
-        // Keep vid/aid strictly clean before loadfile (never let sticky aid=2 from a previous FLAC track starve a new 1-track file when vid=no!)
+        // Keep vid/aid/hwdec strictly clean before loadfile
+        Set("hwdec", _forceSwDecode ? "no" : "auto-copy");
         Set("vid", VideoEnabled ? "auto" : "no");
         Set("aid", "auto");
         var opts = new List<string> { startSeconds > 0.3 ? $"start={startSeconds.ToString("0.00", CultureInfo.InvariantCulture)}" : "start=0" };
@@ -520,6 +556,9 @@ public sealed class MpvPlayer : IDisposable
         CurrentAudioUrl = s.Audio ?? s.Video;
         CurrentVideoId = s.VideoId;
         IsLiveStream = s.IsLive;
+        _fileLoadedFlag = false;
+        Volatile.Write(ref _lastTransitionAt, Environment.TickCount64);
+        ResetWatchdogState();
         Volatile.Write(ref _videoWidth, 0);
         ClearLiveFrameSample();
         MarkFrameDirty();
@@ -533,7 +572,8 @@ public sealed class MpvPlayer : IDisposable
         Set("http-proxy", directRemote && !string.IsNullOrWhiteSpace(AppSettings.Current.Proxy) ? AppSettings.Current.Proxy! : "");
         if (directRemote && s.Headers.TryGetValue("User-Agent", out var ua) && !string.IsNullOrWhiteSpace(ua))
             Set("user-agent", ua);
-        // Keep vid/aid strictly clean before loadfile (prevents sticky aid=2 + vid=no -> "no audio or video data played" on next track/retry!)
+        // Keep vid/aid/hwdec strictly clean before loadfile (prevents sticky aid=2 + vid=no or wedged hwdec!)
+        Set("hwdec", _forceSwDecode ? "no" : "auto-copy");
         Set("vid", VideoEnabled ? "auto" : "no");
         Set("aid", "auto");
         var opts = new List<string>();
@@ -553,6 +593,9 @@ public sealed class MpvPlayer : IDisposable
     public void Stop()
     {
         Interlocked.Increment(ref _loadGen);
+        _fileLoadedFlag = false;
+        Volatile.Write(ref _lastTransitionAt, Environment.TickCount64);
+        ResetWatchdogState();
         Set("aid", "auto");
         Command("stop");
         CurrentUrl = null; CurrentVideoId = null; IsLiveStream = false;
@@ -700,8 +743,10 @@ public sealed class MpvPlayer : IDisposable
     public unsafe void RequestFrameColorSample()
     {
         var ctx = Volatile.Read(ref _ctx);
-        if (ctx == IntPtr.Zero || _disposed || !HasActiveVideo) return;
+        if (ctx == IntPtr.Zero || _disposed || !HasActiveVideo || Buffering || !_voConfigured) return;
         long now = Environment.TickCount64;
+        // Never issue screenshot-raw during load/seek/reconfig settling (prevents GPU readback races with VO init!)
+        if (now - Volatile.Read(ref _lastTransitionAt) < 1200) return;
         if (Interlocked.CompareExchange(ref _frameSampleInFlight, 1, 0) != 0)
         {
             if (now - Volatile.Read(ref _frameSampleSentAt) < 1800) return;
@@ -1194,6 +1239,7 @@ public sealed class MpvPlayer : IDisposable
             var ctx = Volatile.Read(ref _ctx);
             if (ctx == IntPtr.Zero) return;
             var evPtr = mpv_wait_event(ctx, 0.5);
+            CheckVideoWatchdog(ctx);
             if (evPtr == IntPtr.Zero) continue;
             var ev = Marshal.PtrToStructure<MpvEvent>(evPtr);
             switch (ev.event_id)
@@ -1203,6 +1249,9 @@ public sealed class MpvPlayer : IDisposable
                 case EventId.FileLoaded:
                 {
                     var gen = Volatile.Read(ref _loadGen);
+                    _fileLoadedFlag = true;
+                    Volatile.Write(ref _lastTransitionAt, Environment.TickCount64);
+                    ResetWatchdogState();
                     if (VideoEnabled) EnsureVideoTrackSynced();
                     MarkFrameDirty();
                     Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) FileLoaded?.Invoke(); });
@@ -1210,12 +1259,17 @@ public sealed class MpvPlayer : IDisposable
                 }
                 case EventId.Seek:
                 {
+                    Volatile.Write(ref _lastTransitionAt, Environment.TickCount64);
+                    _wdAnchorTime = -1;
+                    _wdLastVpts = double.NaN;
+                    _wdLastFnum = -1;
                     MarkFrameDirty();
                     break;
                 }
                 case EventId.PlaybackRestart:
                 {
                     var gen = Volatile.Read(ref _loadGen);
+                    Volatile.Write(ref _lastTransitionAt, Environment.TickCount64);
                     MarkFrameDirty();
                     Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) PlaybackStarted?.Invoke(); });
                     break;
@@ -1240,6 +1294,8 @@ public sealed class MpvPlayer : IDisposable
                 }
                 case EventId.EndFile:
                 {
+                    _fileLoadedFlag = false;
+                    ResetWatchdogState();
                     Volatile.Write(ref _videoWidth, 0);
                     ClearLiveFrameSample();
                     var ef = Marshal.PtrToStructure<MpvEventEndFile>(ev.data);
@@ -1279,6 +1335,11 @@ public sealed class MpvPlayer : IDisposable
                         {
                             var v = Marshal.ReadInt32(p.data) != 0;
                             Paused = v;
+                            if (!v)
+                            {
+                                Volatile.Write(ref _lastTransitionAt, Environment.TickCount64);
+                                _wdAnchorTime = -1;
+                            }
                             Ui(() => PauseChanged?.Invoke(v));
                             break;
                         }
@@ -1393,10 +1454,112 @@ public sealed class MpvPlayer : IDisposable
                             if (vh != prev) Ui(() => { });
                             break;
                         }
+                        case 16:
+                        {
+                            _voConfigured = Marshal.ReadInt32(p.data) != 0;
+                            break;
+                        }
                     }
                     break;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Real-time Video Heartbeat Watchdog: runs on the mpv event thread at ~2Hz (0% UI cost).
+    /// Guarantees that if audio keeps playing while video goes black or freezes (for ANY reason:
+    /// dead video HTTP track, D3D11VA/GPU stall, dropped vid track, seek freeze, Alt-Tab resume glitch),
+    /// FluxTube detects it within ~2.4s and heals it automatically in 2 escalating stages.
+    /// </summary>
+    private void CheckVideoWatchdog(IntPtr ctx)
+    {
+        long now = Environment.TickCount64;
+        if (now - _wdLastCheckTick < 500) return;
+        _wdLastCheckTick = now;
+
+        if (!_fileLoadedFlag || CurrentUrl == null || !VideoEnabled || Paused || Buffering
+            || AppSettings.Current.PlayerQuality == "audio")
+        {
+            _wdAnchorTime = -1;
+            _wdSmoothSince = 0;
+            return;
+        }
+        // Grace period after load/seek/unpause/recovery so mpv can settle cleanly
+        if (now - Volatile.Read(ref _lastTransitionAt) < 3000) return;
+
+        double tp = TimePos;
+        double dur = Duration;
+        // Ignore the very last 2.5s of a VOD where video can legitimately end slightly before audio
+        if (!IsLiveStream && dur > 5 && dur - tp < 2.5) return;
+
+        bool hasVpts = mpv_get_property(ctx, "video-pts", Format.Double, out double vpts) >= 0 && !double.IsNaN(vpts) && !double.IsInfinity(vpts);
+        bool hasFnum = mpv_get_property(ctx, "estimated-frame-number", Format.Int64, out long fnum) >= 0;
+        int vw = Volatile.Read(ref _videoWidth);
+        bool voOk = _voConfigured && vw > 0;
+
+        if (_wdAnchorTime < 0)
+        {
+            _wdAnchorTime = tp;
+            _wdLastVpts = hasVpts ? vpts : double.NaN;
+            _wdLastFnum = hasFnum ? fnum : -1;
+            return;
+        }
+
+        // Did video advance since anchor?
+        bool vptsMoved = hasVpts && !double.IsNaN(_wdLastVpts) && Math.Abs(vpts - _wdLastVpts) >= 0.04;
+        bool fnumMoved = hasFnum && _wdLastFnum >= 0 && fnum != _wdLastFnum;
+        if (voOk && hasVpts && (vptsMoved || fnumMoved))
+        {
+            _wdAnchorTime = tp;
+            _wdLastVpts = vpts;
+            _wdLastFnum = hasFnum ? fnum : _wdLastFnum;
+            _wdStage = 0;
+            _lastHealthyAt = now;
+            if (_wdSmoothSince == 0) _wdSmoothSince = now;
+            else if (!_wdReportedHealthy && now - _wdSmoothSince >= 25_000)
+            {
+                _wdReportedHealthy = true;
+                var gen = Volatile.Read(ref _loadGen);
+                Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) PlaybackHealthy?.Invoke(); });
+            }
+            return;
+        }
+
+        // Video did NOT advance. Check if playback clock (audio) IS advancing!
+        double audioAdvance = tp - _wdAnchorTime;
+        if (audioAdvance < 2.4) return;
+
+        // Confirmed: audio advanced >= 2.4s while video is completely black or frozen!
+        _wdSmoothSince = 0;
+        if (_wdStage == 0)
+        {
+            _wdStage = 1;
+            _wdStageAt = now;
+            Volatile.Write(ref _lastTransitionAt, now);
+            _wdAnchorTime = tp;
+            _wdLastVpts = hasVpts ? vpts : double.NaN;
+            _wdLastFnum = hasFnum ? fnum : -1;
+            Paths.Log($"video watchdog [stage 1]: video black/frozen while audio plays at {tp:0.1}s (vo={_voConfigured}, w={vw}, vpts={(hasVpts ? vpts.ToString("0.2") : "none")}) -> instant sw-decode + keyframe recovery");
+            // Re-arm video track, switch away from hardware decoder in case GPU wedged, and snap to nearest keyframe
+            Set("vid", "auto");
+            Set("hwdec", "no");
+            if (!IsLiveStream) SeekKeyframe(Math.Max(0, tp));
+            else Command("seek", "100", "absolute-percent");
+            var gen = Volatile.Read(ref _loadGen);
+            Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) VideoRecoveredSoft?.Invoke(); });
+        }
+        else if (_wdStage == 1 && now - _wdStageAt >= 3200)
+        {
+            _wdStage = 2;
+            _wdStageAt = now;
+            Volatile.Write(ref _lastTransitionAt, now);
+            _wdAnchorTime = tp;
+            if (Interlocked.Increment(ref _hwdecFailCount) >= 2) _forceSwDecode = true;
+            Paths.Log($"video watchdog [stage 2]: video still dead at {tp:0.1}s (vo={_voConfigured}, w={vw}, swLock={_forceSwDecode}) -> full stream reload");
+            var gen = Volatile.Read(ref _loadGen);
+            var msg = $"video frozen/missing at {tp:0.1}s";
+            Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) VideoStalled?.Invoke(msg); });
         }
     }
 

@@ -18,6 +18,9 @@ public sealed class StreamProxy
 {
     public static StreamProxy Instance { get; } = new();
 
+    /// <summary>Fired when a proxied YouTube video/audio stream aborts fatally after retries so PlaybackTracker can immediately recover instead of leaving frozen video while audio plays.</summary>
+    public event Action<string, string>? StreamDied;
+
     // an entry is a link and a few fields; prepared starts (QuickStream keeps up to 300 videos) point at them,
     // so the table must hold at least as many, or a click lands on a forgotten address
     private const int MaxEntries = 700;
@@ -829,7 +832,17 @@ public sealed class StreamProxy
         {
             // mpv closed the connection (seek or stop)
         }
-        catch (HttpRequestException ex) { Paths.Log("proxy request: " + ex.Message); }
+        catch (HttpRequestException ex)
+        {
+            Paths.Log("proxy request: " + ex.Message);
+            // Notify PlaybackTracker if a non-external YouTube stream died mid-playback (prevents frozen/black video while --audio-file continues!)
+            if (user != null)
+            {
+                var dot = user.VideoId.Length == 11 ? 11 : -1;
+                if (dot == 11 && user.Itag != LosslessResolver.LosslessItag)
+                    StreamDied?.Invoke(user.VideoId, ex.Message);
+            }
+        }
         catch (Exception ex) { Paths.Log("proxy: " + ex.Message); }
         finally
         {
