@@ -63,11 +63,12 @@ public static class SharePanel
             _box.Escape = Close;
             _box.Enter = () => { Copy(); Close(); };
         }
-        // rises into place
-        var t = Math.Clamp((UI.Now - _openedAt) / 150f, 0, 1);
-        if (t < 1) UI.Animate();
-        var ease = 1 - (1 - t) * (1 - t);
-        r = new R(r.X, r.Y + (1 - ease) * 10, r.W, r.H);
+        // silky quartic-out rise into place
+        var t = Math.Clamp((UI.Now - _openedAt) / 250f, 0f, 1f);
+        if (t < 1f) UI.Animate();
+        var inv = 1f - t;
+        var ease = 1f - inv * inv * inv * inv;
+        r = new R(r.X, r.Y + (1f - ease) * 16f, r.W, r.H);
         Rect = r;
 
         Gfx.Fill(new R(r.X + 2, r.Y + 4, r.W - 4, r.H), Gfx.Fade(0xFF000000, 0.35f * ease), 16);

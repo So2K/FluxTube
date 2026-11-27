@@ -97,7 +97,7 @@ public static unsafe class Gfx
     private static ID2D1Bitmap1? _sketchBmp;
     private static ID2D1BitmapBrush? _sketchBrush;
     private static ID2D1Bitmap1? _backdropBmp;
-    private static uint _backdropBg, _backdropBrand, _backdropBrand2;
+    private static uint _backdropBg, _backdropBrand, _backdropBrand2, _backdropSpatial;
     private static bool _backdropLight;
     private static string _backdropMode = "";
     private static long _backdropBakedAt;
@@ -142,7 +142,12 @@ public static unsafe class Gfx
         public float A0, A1, A2, Mid;
         public void Dispose() { Brush?.Dispose(); Stops?.Dispose(); Brush = null; Stops = null; A0 = -1; }
     }
-    private static readonly RadialSlot[] _radials = [new(), new(), new(), new(), new(), new(), new(), new(), new(), new(), new(), new()];
+    private static readonly RadialSlot[] _radials =
+    [
+        new(), new(), new(), new(), new(), new(), new(), new(),
+        new(), new(), new(), new(), new(), new(), new(), new(),
+        new(), new(), new(), new(), new(), new(), new(), new(),
+    ];
     private static readonly LinearSlot[] _linears = [new(), new(), new()];
     private static readonly GradientStop[] _radialStopsBuf = new GradientStop[6];
     private static readonly GradientStop[] _linearStopsBuf = new GradientStop[3];
@@ -419,6 +424,7 @@ public static unsafe class Gfx
     public static float Corner(float baseRadius) => Services.AppSettings.Current.UiCornerStyle switch
     {
         "sharp" => 0f,
+        "ios" => baseRadius <= 0f ? 0f : MathF.Max(baseRadius * 1.28f, baseRadius >= 8f ? 15f : baseRadius * 1.32f),
         "round" => baseRadius * 1.45f,
         _ => baseRadius,
     };
@@ -445,21 +451,26 @@ public static unsafe class Gfx
         uint bgQ = Th.Bg & 0x00FEFEFEu;
         uint brQ = Th.Brand & 0x00FEFEFEu;
         uint br2Q = Th.Brand2 & 0x00FEFEFEu;
-        if (_backdropBmp != null && _backdropBg == bgQ && _backdropBrand == brQ && _backdropBrand2 == br2Q && _backdropLight == Th.Light && _backdropMode == mode)
+        uint spQ = Themes.SpatialFieldHash;
+        if (_backdropBmp != null && _backdropBg == bgQ && _backdropBrand == brQ && _backdropBrand2 == br2Q && _backdropSpatial == spQ && _backdropLight == Th.Light && _backdropMode == mode)
             return;
         long now = Environment.TickCount64;
-        if (_backdropBmp != null && now - _backdropBakedAt < 85 && _backdropLight == Th.Light && _backdropMode == mode)
+        long throttle = Themes.IsLiveMorphing ? 65 : 85;
+        if (_backdropBmp != null && now - _backdropBakedAt < throttle && _backdropLight == Th.Light && _backdropMode == mode)
             return;
 
         _backdropBakedAt = now;
         _backdropBg = bgQ;
         _backdropBrand = brQ;
         _backdropBrand2 = br2Q;
+        _backdropSpatial = spQ;
         _backdropLight = Th.Light;
         _backdropMode = mode;
         _backdropBmp?.Dispose();
 
-        const int bw = 384, bh = 240;
+        // Lighter 224x140 mesh during live video color glides (<0.5ms CPU), full crisp 384x240 once settled!
+        int bw = (Themes.IsLiveMorphing || spQ != 0) ? 224 : 384;
+        int bh = (Themes.IsLiveMorphing || spQ != 0) ? 140 : 240;
         var px = new byte[bw * bh * 4];
 
         float bgr = ((Th.Bg >> 16) & 255) / 255f;
@@ -634,6 +645,29 @@ public static unsafe class Gfx
                     }
                 }
 
+                // True 5x3 spatial lightfield projection: localized video colors map accurately to matching screen edges!
+                if (Themes.TrySampleSpatialField(u, v, out float spR, out float spG, out float spB, out float spStr))
+                {
+                    // Stronger atmospheric color on edges/corners, cleaner calm center so text & cards pop crisply
+                    float ex = (u - 0.5f) * 2f, ey = (v - 0.5f) * 2f;
+                    float edgeBoost = 0.52f + 0.48f * MathF.Min(1f, MathF.Sqrt(ex * ex + ey * ey) * 0.85f);
+                    float spK = spStr * edgeBoost * (light ? 0.085f : (mode == "neon" || mode == "mesh" ? 0.145f : 0.105f));
+                    if (light)
+                    {
+                        r = r * (1f - spK * 0.7f) + (spR * spR * 0.55f + 0.45f) * spK;
+                        g = g * (1f - spK * 0.7f) + (spG * spG * 0.55f + 0.45f) * spK;
+                        b = b * (1f - spK * 0.7f) + (spB * spB * 0.55f + 0.45f) * spK;
+                    }
+                    else
+                    {
+                        float bgLumS = lBgR * 0.299f + lBgG * 0.587f + lBgB * 0.114f;
+                        if (bgLumS < 0.004f) spK *= 0.35f; // preserve OLED AMOLED black depth
+                        r += spR * spR * spK;
+                        g += spG * spG * spK;
+                        b += spB * spB * spK;
+                    }
+                }
+
                 r = r / (1f + 0.20f * MathF.Max(0f, r));
                 g = g / (1f + 0.20f * MathF.Max(0f, g));
                 b = b / (1f + 0.20f * MathF.Max(0f, b));
@@ -653,7 +687,7 @@ public static unsafe class Gfx
         }
         fixed (byte* p = px)
         {
-            _backdropBmp = DC.CreateBitmap(new SizeI(bw, bh), (nint)p, bw * 4,
+            _backdropBmp = DC.CreateBitmap(new SizeI(bw, bh), (nint)p, (uint)(bw * 4),
                 new BitmapProperties1(new PixelFormat(Format.B8G8R8A8_UNorm, D2DAlpha.Premultiplied), 96, 96, BitmapOptions.None));
         }
     }
@@ -1504,9 +1538,9 @@ public static unsafe class Gfx
                 uint c2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
                 float r2 = ((c2 >> 16) & 255) / 255f, g2 = ((c2 >> 8) & 255) / 255f, b2 = (c2 & 255) / 255f;
                 float scaleMul = Th.Light ? 0.55f : 1.0f;
-                RadialGlow(w * 0.22f, h * 0.26f, w * (0.34f + bass * 0.26f), h * (0.36f + bass * 0.28f), r1, g1, b1, Math.Clamp(bass * 0.30f * scaleMul, 0f, 0.36f), slot: 5);
-                RadialGlow(w * 0.78f, h * 0.72f, w * (0.32f + mid * 0.24f), h * (0.34f + hi * 0.26f), r2, g2, b2, Math.Clamp((mid * 0.20f + hi * 0.14f) * scaleMul, 0f, 0.30f), slot: 6);
-                RadialGlow(w * 0.50f, h * 0.48f, w * (0.28f + bass * 0.30f), h * (0.26f + bass * 0.28f), (r1 + r2) * 0.5f, (g1 + g2) * 0.5f, (b1 + b2) * 0.5f, Math.Clamp(bass * bass * 0.22f * scaleMul, 0f, 0.26f), slot: 7);
+                RadialGlow(w * 0.22f, h * 0.26f, w * (0.34f + bass * 0.26f), h * (0.36f + bass * 0.28f), r1, g1, b1, Math.Clamp(bass * 0.30f * scaleMul, 0f, 0.36f), slot: 15);
+                RadialGlow(w * 0.78f, h * 0.72f, w * (0.32f + mid * 0.24f), h * (0.34f + hi * 0.26f), r2, g2, b2, Math.Clamp((mid * 0.20f + hi * 0.14f) * scaleMul, 0f, 0.30f), slot: 16);
+                RadialGlow(w * 0.50f, h * 0.48f, w * (0.28f + bass * 0.30f), h * (0.26f + bass * 0.28f), (r1 + r2) * 0.5f, (g1 + g2) * 0.5f, (b1 + b2) * 0.5f, Math.Clamp(bass * bass * 0.22f * scaleMul, 0f, 0.26f), slot: 17);
                 UI.Animate();
             }
         }
@@ -1521,6 +1555,14 @@ public static unsafe class Gfx
             _grainBrush.Transform = Matrix3x2.CreateScale(1f / MathF.Max(0.5f, Scale));
             _grainBrush.Opacity = (Th.Light ? 0.044f : 0.058f) * mul;
             DC.FillRectangle(new Vortice.RawRectF(0, 0, w, h), _grainBrush);
+        }
+
+        // Deep cinema dimming veil across the entire backdrop in Audio-Only mode (tames light themes & bright videos cleanly!)
+        float audioDim = UI.Anim(UI.Id("gfx:audiodim"), Shell.IsAudioOnlyActive ? 1f : 0f, 10);
+        if (audioDim > 0.01f)
+        {
+            float dimStrength = Th.Light ? 0.62f : 0.42f;
+            Fill(new R(0, 0, w, h), Fade(0xFF030308, audioDim * dimStrength));
         }
     }
 
@@ -2041,7 +2083,7 @@ public static unsafe class Gfx
     {
         var run = Text(text, size, weight, maxW, lines);
         if (string.IsNullOrEmpty(text) || run.Layout == null) return run;
-        if (!MusicBounce.Active || text.Length > 140)
+        if (!MusicBounce.Active || Services.AppSettings.Current.MusicShakeLevel == "low" || text.Length > 140)
         {
             if (shadow) Draw(run, x + 1f, y + 1.5f, Fade(0xFF000000, 0.58f));
             Draw(run, x, y, color);
@@ -2396,8 +2438,15 @@ public static unsafe class Gfx
             Assert(xpbdOk, $"XpbdStageFx self-test failed ({xpbdMs:0.00}ms)");
             var (drOk, drL, drR, drH) = DriftCarFx.SelfTestPhysics();
             Assert(drOk, $"DriftCarFx physics self-test failed (L={drL}, R={drR}, wallHits={drH})");
-            var msg7 = $"PASS [7/7] RoundedClip + GPU Fluid ({flMs:0.00}ms) + Pack ({packSummary}) + XPBD ({xpbdMs:0.00}ms) + Drift(L={drL},R={drR},hits={drH})";
+            var msg7 = $"PASS [7/8] RoundedClip + GPU Fluid ({flMs:0.00}ms) + Pack ({packSummary}) + XPBD ({xpbdMs:0.00}ms) + Drift(L={drL},R={drR},hits={drH})";
             Services.Paths.Log("self-test: " + msg7); Console.WriteLine(msg7);
+
+            var (mpvOk, mpvMsg) = Player.MpvPlayer.SelfTestLiveFrameSampler();
+            Assert(mpvOk, $"Live mpv frame color sampler self-test failed: {mpvMsg}");
+            var (thOk, thMsg) = Themes.SelfTestLiveAdaptation();
+            Assert(thOk, $"Live theme adaptation self-test failed: {thMsg}");
+            var msg8 = $"PASS [8/8] Live Video Theme ({mpvMsg}; {thMsg})";
+            Services.Paths.Log("self-test: " + msg8); Console.WriteLine(msg8);
 
             MusicBounce.Update(false, 0.016f);
             _roundLayer?.Dispose(); _roundLayer = null; _roundClipDepth = 0;

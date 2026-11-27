@@ -103,6 +103,37 @@ public static class Db
         try { while (!_writeQueue.IsEmpty) FlushWriteBatch(); } catch { }
     }
 
+    public static (int Plays, double WatchedSec) VideoWatchStats(string videoId)
+    {
+        try
+        {
+            var rows = Query("SELECT COUNT(*), COALESCE(SUM(watched_s), 0) FROM watch WHERE video_id=$v",
+                r => (r.GetInt32(0), r.GetDouble(1)), ("$v", videoId));
+            return rows.Count > 0 ? rows[0] : (0, 0);
+        }
+        catch { return (0, 0); }
+    }
+
+    public static (int UniqueVideos, int Sessions, double WatchedSec, string? FavTitle, double FavSec) ChannelWatchStats(string channelId, string? channelName = null)
+    {
+        try
+        {
+            var rows = !string.IsNullOrEmpty(channelId)
+                ? Query("SELECT COUNT(DISTINCT video_id), COUNT(*), COALESCE(SUM(watched_s), 0) FROM watch WHERE channel_id=$c OR ($n <> '' AND channel=$n)",
+                    r => (r.GetInt32(0), r.GetInt32(1), r.GetDouble(2)), ("$c", channelId), ("$n", channelName ?? ""))
+                : Query("SELECT COUNT(DISTINCT video_id), COUNT(*), COALESCE(SUM(watched_s), 0) FROM watch WHERE channel=$n",
+                    r => (r.GetInt32(0), r.GetInt32(1), r.GetDouble(2)), ("$n", channelName ?? ""));
+            if (rows.Count == 0) return (0, 0, 0, null, 0);
+            var fav = !string.IsNullOrEmpty(channelId)
+                ? Query("SELECT title, SUM(watched_s) as ws FROM watch WHERE (channel_id=$c OR ($n <> '' AND channel=$n)) AND title IS NOT NULL AND title <> '' GROUP BY video_id ORDER BY ws DESC LIMIT 1",
+                    r => (r.GetString(0), r.GetDouble(1)), ("$c", channelId), ("$n", channelName ?? ""))
+                : Query("SELECT title, SUM(watched_s) as ws FROM watch WHERE channel=$n AND title IS NOT NULL AND title <> '' GROUP BY video_id ORDER BY ws DESC LIMIT 1",
+                    r => (r.GetString(0), r.GetDouble(1)), ("$n", channelName ?? ""));
+            return (rows[0].Item1, rows[0].Item2, rows[0].Item3, fav.Count > 0 ? fav[0].Item1 : null, fav.Count > 0 ? fav[0].Item2 : 0);
+        }
+        catch { return (0, 0, 0, null, 0); }
+    }
+
     /// <summary>Opens the DB, preloads recent resume positions into RAM, and prunes ancient seen rows off the UI thread.</summary>
     public static void Warm()
     {

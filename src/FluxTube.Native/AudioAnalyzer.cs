@@ -31,9 +31,14 @@ public static unsafe class AudioAnalyzer
     private static readonly float[] _peakHold = new float[BandCount];
     private static readonly float[] _peakVel = new float[BandCount];
     private static readonly float[] _prevBands = new float[BandCount];
+    private static readonly float[] _bandClip = new float[BandCount];
     private static readonly float[] _targetWave = new float[WavePoints];
     private static readonly float[] _smoothWave = new float[WavePoints];
     private static readonly object _dataLock = new();
+    private const float LimiterCeiling = 0.82f;
+    private static float _agcRef = 0.68f, _agcGain = 1.0f, _masterClip;
+    public static float MasterClip => _masterClip;
+    public static float AgcGain => _agcGain;
 
     private static readonly ManualResetEventSlim _wake = new(false);
     private static Thread? _thread;
@@ -205,6 +210,8 @@ public static unsafe class AudioAnalyzer
             if (!playing) _bassPressure = 0;
             if (_beatEnvelope > 0.002f) anyMotion = true;
             float bass = 0, mid = 0, high = 0;
+            float frameMaxRaw = 0f, frameClipPeak = 0f;
+            float clipDecay = 1f - MathF.Exp(-dt * 6.5f);
             for (int i = 0; i < BandCount; i++)
             {
                 float target = playing ? _targetBands[i] : 0f;
@@ -212,6 +219,14 @@ public static unsafe class AudioAnalyzer
                 float next = target > cur ? cur + (target - cur) * rise : cur + (target - cur) * fall;
                 if (next < 0.002f) next = 0f;
                 _smoothBands[i] = next;
+                if (next > frameMaxRaw) frameMaxRaw = next;
+
+                // Track per-band limiter clip overdrive (instant red flare when punching through auto-limiter ceiling!)
+                float agcScaled = next * _agcGain;
+                float over = Math.Clamp((agcScaled - LimiterCeiling) * 2.8f, 0f, 1f);
+                _bandClip[i] = over > _bandClip[i] ? over : _bandClip[i] + (over - _bandClip[i]) * clipDecay;
+                if (_bandClip[i] < 0.01f) _bandClip[i] = 0f;
+                if (_bandClip[i] > frameClipPeak) frameClipPeak = _bandClip[i];
 
                 if (next >= _peakBands[i])
                 {
@@ -229,11 +244,28 @@ public static unsafe class AudioAnalyzer
                     _peakBands[i] = MathF.Max(next, _peakBands[i] - (peakFall * 0.45f + _peakVel[i] * dt));
                 }
 
-                if (visual && (next > 0.003f || _peakBands[i] > 0.003f)) anyMotion = true;
-                if (i < 6) bass += next;
-                else if (i < 18) mid += next;
-                else high += next;
+                if (visual && (next > 0.003f || _peakBands[i] > 0.003f || _bandClip[i] > 0.01f)) anyMotion = true;
+                if (i < 6) bass += MathF.Min(1f, next);
+                else if (i < 18) mid += MathF.Min(1f, next);
+                else high += MathF.Min(1f, next);
             }
+            // Adaptive studio AGC auto-limiter reference: boosts quiet songs & tames brickwalled tracks while keeping true peak clips red!
+            if (playing && frameMaxRaw > 0.04f)
+            {
+                float agcRate = frameMaxRaw > _agcRef ? 1.85f : 0.36f;
+                _agcRef += (frameMaxRaw - _agcRef) * (1f - MathF.Exp(-dt * agcRate));
+                _agcRef = Math.Clamp(_agcRef, 0.40f, 1.38f);
+                float wantGain = Math.Clamp(0.76f / _agcRef, 0.66f, 1.48f);
+                _agcGain += (wantGain - _agcGain) * (1f - MathF.Exp(-dt * 2.4f));
+            }
+            else if (!playing)
+            {
+                _agcRef = 0.68f;
+                _agcGain = 1.0f;
+                frameClipPeak = 0f;
+            }
+            _masterClip = frameClipPeak > _masterClip ? frameClipPeak : _masterClip + (frameClipPeak - _masterClip) * clipDecay;
+            if (_masterClip < 0.01f) _masterClip = 0f;
             _bassEnergy = Math.Clamp(bass / 6f, 0f, 1f);
             _midEnergy = Math.Clamp(mid / 12f, 0f, 1f);
             _highEnergy = Math.Clamp(high / (BandCount - 18f), 0f, 1f);
@@ -1157,10 +1189,10 @@ public static unsafe class AudioAnalyzer
             for (int k = i0; k <= i1; k++)
                 sum += MathF.Sqrt(re[k] * re[k] + im[k] * im[k]);
             float avg = sum / Math.Max(1, i1 - i0 + 1);
-            // Gentle perceptual A-tilt so bass & sparkling highs look balanced and lively
+            // Gentle perceptual A-tilt + extended headroom (0..1.45) so real loud transients punch into the visual auto-limiter!
             float tilt = 0.72f + 1.55f * (b / (float)(BandCount - 1));
-            float norm = MathF.Log10(1f + avg * tilt * 0.42f) * 1.15f;
-            outBands[b] = Math.Clamp(norm, 0f, 1f);
+            float norm = MathF.Log10(1f + avg * tilt * 0.46f) * 1.18f;
+            outBands[b] = Math.Clamp(norm, 0f, 1.48f);
         }
     }
 
@@ -1226,7 +1258,50 @@ public static unsafe class AudioAnalyzer
         }
     }
 
-    /// <summary>Frequency halo hugging the rounded cover perimeter with glowing rays &amp; orbiting peak sparks.</summary>
+    private const uint ClipRed = 0xFFFF1636u;
+    private const uint ClipHot = 0xFFFFC2CAu;
+
+    /// <summary>Soft-knee studio auto-limiter (or uncapped boost mode when VisualizerUncapped is enabled).</summary>
+    private static (float Val, float Clip) ApplyAutoLimiter(float raw, float bandClipMem = 0f)
+    {
+        var s = AppSettings.Current;
+        float boosted = raw * Math.Clamp(s.VisualizerBoost, 0.5f, 3.5f);
+        if (s.VisualizerUncapped)
+        {
+            float clip = boosted > LimiterCeiling ? Math.Clamp((boosted - LimiterCeiling) * 1.8f, 0f, 1f) : bandClipMem * 0.55f;
+            return (Math.Clamp(boosted, 0f, 2.4f), MathF.Max(clip, bandClipMem * 0.6f));
+        }
+        if (boosted <= LimiterCeiling)
+            return (Math.Clamp(boosted, 0f, 1f), bandClipMem * 0.65f);
+        float over = boosted - LimiterCeiling;
+        float limited = LimiterCeiling + (1f - LimiterCeiling) * MathF.Tanh(over * 3.0f);
+        float instantClip = Math.Clamp(over * 3.1f, 0f, 1f);
+        return (Math.Clamp(limited, 0f, 1f), MathF.Max(instantClip, bandClipMem));
+    }
+
+    private static uint MixClip(uint normal, float clip)
+        => clip <= 0.02f ? normal : Gfx.Mix(normal, ClipRed, Math.Clamp(clip * 0.95f, 0f, 0.96f));
+
+    private static uint MixClipHot(uint normalHot, float clip)
+        => clip <= 0.02f ? normalHot : Gfx.Mix(ClipRed, ClipHot, Math.Clamp(0.25f + clip * 0.60f, 0f, 0.88f));
+
+    /// <summary>Draws the sleek studio auto-limiter ceiling rail that ignites blazing red whenever transients break the limit.</summary>
+    private static void DrawLimiterRail(R r, float y, float clipStrength, float opacity)
+    {
+        if (AppSettings.Current.VisualizerUncapped) return;
+        float x0 = r.X + r.W * 0.02f, x1 = r.Right - r.W * 0.02f;
+        if (clipStrength > 0.04f)
+        {
+            Gfx.Line(x0, y, x1, y, Gfx.Fade(ClipRed, clipStrength * 0.24f * opacity), 5.5f);
+            Gfx.Line(x0, y, x1, y, Gfx.Fade(Gfx.Mix(ClipRed, ClipHot, clipStrength * 0.45f), (0.28f + clipStrength * 0.66f) * opacity), 1.3f);
+        }
+        else
+        {
+            Gfx.Line(x0, y, x1, y, Gfx.Fade(0xFFFFFFFF, 0.08f * opacity), 0.9f);
+        }
+    }
+
+    /// <summary>Frequency halo hugging the rounded cover perimeter with auto-limited glowing rays &amp; red clip sparks.</summary>
     public static void DrawCoverSpectrum(R art, float opacity = 1f, uint primary = 0, uint secondary = 0)
     {
         if (AppSettings.Current.VisualizerStyle == "off") return;
@@ -1238,9 +1313,10 @@ public static unsafe class AudioAnalyzer
         var track = art.Inset(-4f);
         float rad = Gfx.Corner(16);
         float maxLen = MathF.Min(30f, MathF.Max(14f, art.H * 0.20f));
-        float kickBoost = 1f + BeatMotionStrength * 0.35f + _bassPressure * 0.2f;
+        float kickBoost = (1f + BeatMotionStrength * 0.30f + _bassPressure * 0.16f) * _agcGain;
 
-        Gfx.Stroke(art.Inset(-2f), Gfx.Fade(c1, (0.14f + _bassEnergy * 0.32f) * opacity), Gfx.Corner(15), 2f);
+        uint rimCol = MixClip(c1, _masterClip);
+        Gfx.Stroke(art.Inset(-2f), Gfx.Fade(rimCol, (0.14f + _bassEnergy * 0.32f + _masterClip * 0.26f) * opacity), Gfx.Corner(15), 2f);
 
         const int rays = 40;
         for (int i = 0; i < rays; i++)
@@ -1251,26 +1327,28 @@ public static unsafe class AudioAnalyzer
             float bandPos = sym * (BandCount - 1);
             float energy = SampleSmooth(_smoothBands, bandPos);
             float peak = SampleSmooth(_peakBands, bandPos);
-            float v = Math.Clamp(MathF.Pow(energy, 0.74f) * kickBoost, 0f, 1.15f);
-            float pv = Math.Clamp(MathF.Pow(peak, 0.76f) * kickBoost, 0f, 1.2f);
+            float clipMem = SampleSmooth(_bandClip, bandPos);
+            var (v, clip) = ApplyAutoLimiter(MathF.Pow(energy, 0.74f) * kickBoost, clipMem);
+            var (pv, pClip) = ApplyAutoLimiter(MathF.Pow(peak, 0.76f) * kickBoost, clipMem);
 
             float length = 2.5f + v * maxLen;
             float tipX = x + nx * length, tipY = y + ny * length;
-            uint color = Gfx.Mix(c1, c2, sym);
+            uint color = MixClip(Gfx.Mix(c1, c2, sym), clip);
 
-            if (v > 0.24f)
-                Gfx.Line(x, y, tipX, tipY, Gfx.Fade(color, MathF.Min(0.15f, v * 0.12f) * opacity), 6f);
-            Gfx.Line(x, y, tipX, tipY, Gfx.Fade(color, (0.14f + MathF.Min(0.80f, v * 0.72f)) * opacity), 2.1f);
+            if (v > 0.22f || clip > 0.08f)
+                Gfx.Line(x, y, tipX, tipY, Gfx.Fade(color, MathF.Min(0.28f, (v * 0.13f + clip * 0.18f)) * opacity), clip > 0.12f ? 7.5f : 6f);
+            Gfx.Line(x, y, tipX, tipY, Gfx.Fade(color, (0.16f + MathF.Min(0.82f, v * 0.74f + clip * 0.15f)) * opacity), clip > 0.15f ? 2.6f : 2.1f);
 
-            if (pv > 0.26f)
+            if (pv > 0.24f)
             {
                 float pLen = 5.5f + pv * maxLen;
-                Gfx.Circle(x + nx * pLen, y + ny * pLen, 1.5f, Gfx.Fade(tip, MathF.Min(0.88f, pv * 0.85f) * opacity));
+                uint pCol = MixClipHot(tip, pClip);
+                Gfx.Circle(x + nx * pLen, y + ny * pLen, pClip > 0.15f ? 2.1f : 1.5f, Gfx.Fade(pCol, MathF.Min(0.95f, pv * 0.88f + pClip * 0.2f) * opacity));
             }
         }
     }
 
-    /// <summary>Ultra-fast GPU Direct2D stage visualizers (7 styles, zero COM brush allocations).</summary>
+    /// <summary>Ultra-fast GPU Direct2D stage visualizers (7 styles, AGC auto-limiter + crimson peak clip overdrive, zero COM brush allocs).</summary>
     public static void DrawStageVisualizer(R r, string style, float opacity = 1f, float gain = 1f, uint primary = 0, uint secondary = 0)
     {
         if (style == "off" || r.W < 40 || r.H < 24 || opacity <= 0.01f) return;
@@ -1280,18 +1358,22 @@ public static unsafe class AudioAnalyzer
         uint c1 = primary != 0 ? primary : Th.Brand;
         uint c2 = secondary != 0 ? secondary : Gfx.Mix(c1, 0xFF73D8EB, 0.52f);
         uint hot = Gfx.Mix(c2, 0xFFFFFFFF, 0.78f);
+        float effGain = gain * _agcGain;
 
         if (style == "bars_wave")
         {
             float baseline = r.Y + r.H * 0.77f;
             float maxUp = r.H * 0.72f;
             float maxRefl = r.H * 0.21f;
+            float limitY = baseline - maxUp * LimiterCeiling;
 
-            int halfBars = Math.Clamp((int)(r.W / 24f), 14, 24);
+            int halfBars = Math.Clamp((int)(r.W / 22f), 16, 26);
             int totalBars = halfBars * 2;
             float step = r.W / totalBars;
-            float gap = Math.Clamp(step * 0.30f, 2f, 4f);
+            float gap = Math.Clamp(step * 0.28f, 2f, 3.8f);
             float barW = MathF.Max(3f, step - gap);
+            float barRad = MathF.Min(barW * 0.45f, 3.5f);
+            float maxClip = _masterClip;
 
             for (int i = 0; i < totalBars; i++)
             {
@@ -1301,55 +1383,86 @@ public static unsafe class AudioAnalyzer
 
                 float energy = SampleSmooth(_smoothBands, bandPos);
                 float peak = SampleSmooth(_peakBands, bandPos);
-                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.20f);
+                float clipMem = SampleSmooth(_bandClip, bandPos);
+                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.18f);
 
-                float v = Math.Clamp(MathF.Pow(energy, 0.74f) * gain, 0f, 1f);
-                float pv = Math.Clamp(MathF.Pow(peak, 0.76f) * gain, 0f, 1f);
+                var (v, clip) = ApplyAutoLimiter(MathF.Pow(energy, 0.74f) * effGain * edge, clipMem * edge);
+                var (pv, pClip) = ApplyAutoLimiter(MathF.Pow(peak, 0.76f) * effGain * edge, clipMem * edge);
+                if (clip > maxClip) maxClip = clip;
 
-                float h = MathF.Max(3f, v * maxUp * edge);
-                float ph = pv * maxUp * edge;
+                float h = MathF.Max(3f, v * maxUp);
+                float ph = pv * maxUp;
                 float bx = r.X + i * step + gap * 0.5f;
                 float topY = baseline - h;
 
-                uint baseCol = Gfx.Mix(c1, c2, dist);
-                uint topCol = Gfx.Mix(baseCol, hot, Math.Clamp(v * 0.78f, 0f, 0.88f));
+                uint baseCol = MixClip(Gfx.Mix(c1, c2, dist), clip * 0.75f);
+                uint topCol = clip > 0.08f
+                    ? MixClipHot(hot, clip)
+                    : Gfx.Mix(baseCol, hot, Math.Clamp(v * 0.78f, 0f, 0.88f));
 
-                if (v > 0.12f)
-                    Gfx.Fill(new R(bx - barW * 0.35f, topY - 2f, barW * 1.7f, h + 3f), Gfx.Fade(baseCol, v * 0.14f * opacity));
+                // Soft outer aura (flares fiery crimson when bar punches through auto-limiter!)
+                if (v > 0.12f || clip > 0.06f)
+                {
+                    uint glowCol = clip > 0.08f ? ClipRed : baseCol;
+                    float glowA = (v * 0.14f + clip * 0.24f) * opacity;
+                    Gfx.Fill(new R(bx - barW * 0.42f, topY - 3f, barW * 1.84f, h + 5f), Gfx.Fade(glowCol, MathF.Min(0.42f, glowA)), barRad + 1.5f);
+                }
 
-                Gfx.Fill(new R(bx, topY, barW, h), Gfx.Fade(baseCol, (0.34f + v * 0.64f) * opacity));
+                // Main gradient bar body
+                Gfx.Fill(new R(bx, topY, barW, h), Gfx.Fade(baseCol, (0.36f + v * 0.62f) * opacity), barRad);
                 if (h > 8f)
-                    Gfx.Fill(new R(bx, topY, barW, h * 0.38f), Gfx.Fade(topCol, (0.28f + v * 0.56f) * opacity));
+                    Gfx.Fill(new R(bx, topY, barW, h * 0.40f), Gfx.Fade(topCol, (0.30f + v * 0.58f) * opacity), barRad);
 
-                float reflH = MathF.Max(1.5f, v * maxRefl * edge);
-                Gfx.Fill(new R(bx, baseline + 2f, barW, reflH), Gfx.Fade(baseCol, (0.07f + v * 0.21f) * opacity));
+                // Dedicated blazing red overdrive cap above the limiter line when slamming the ceiling!
+                if (topY < limitY && clip > 0.05f)
+                {
+                    float overH = MathF.Max(3f, limitY - topY);
+                    Gfx.Fill(new R(bx - 0.5f, topY, barW + 1f, overH), Gfx.Fade(ClipRed, (0.65f + clip * 0.35f) * opacity), barRad);
+                    Gfx.Fill(new R(bx, topY, barW, MathF.Min(overH, 3.2f)), Gfx.Fade(ClipHot, (0.70f + clip * 0.30f) * opacity), barRad);
+                }
 
+                // Mirrored glass floor reflection
+                float reflH = MathF.Max(1.5f, v * maxRefl);
+                Gfx.Fill(new R(bx, baseline + 2f, barW, reflH), Gfx.Fade(clip > 0.12f ? ClipRed : baseCol, (0.07f + v * 0.22f) * opacity));
+
+                // Floating peak-hold LED cap (flashes glowing red-white on limiter clip!)
                 if (ph > 4f)
                 {
-                    float capY = baseline - ph - 3.5f;
-                    float capAlpha = Math.Clamp((0.42f + pv * 0.58f) * opacity, 0f, 1f);
-                    Gfx.Fill(new R(bx, capY, barW, 2.6f), Gfx.Fade(hot, capAlpha));
+                    float capY = baseline - ph - 3.8f;
+                    uint capCol = MixClipHot(hot, pClip);
+                    float capAlpha = Math.Clamp((0.46f + pv * 0.54f) * opacity, 0f, 1f);
+                    if (pClip > 0.10f)
+                        Gfx.Fill(new R(bx - 1.5f, capY - 1.5f, barW + 3f, 5.6f), Gfx.Fade(ClipRed, pClip * 0.42f * opacity), 2.5f);
+                    Gfx.Fill(new R(bx, capY, barW, pClip > 0.10f ? 3.0f : 2.5f), Gfx.Fade(capCol, capAlpha), 1.2f);
                 }
             }
 
+            // Live oscilloscope neon wave ribbon woven smoothly across the spectrum bars!
+            DrawWaveRibbon(r, baseline - maxUp * 0.34f, maxUp * 0.26f, c1, c2, hot, opacity * 0.92f, clipBoost: maxClip);
+
+            // Studio auto-limiter ceiling rail + glowing floor horizon
+            DrawLimiterRail(r, limitY, maxClip, opacity);
+            uint floorCol = MixClip(Gfx.Mix(c1, hot, 0.45f), maxClip * 0.85f);
             Gfx.Line(r.X + r.W * 0.02f, baseline + 0.5f, r.Right - r.W * 0.02f, baseline + 0.5f,
-                Gfx.Fade(Gfx.Mix(c1, hot, 0.45f), (0.18f + _bassEnergy * 0.30f) * opacity), 1.2f);
+                Gfx.Fade(floorCol, (0.20f + _bassEnergy * 0.32f + maxClip * 0.28f) * opacity), 1.3f);
         }
         else if (style == "bars")
         {
             float baseline = r.Y + r.H * 0.78f;
             float maxUp = r.H * 0.70f;
             float maxRefl = r.H * 0.18f;
+            float limitY = baseline - maxUp * LimiterCeiling;
 
-            int halfCols = Math.Clamp((int)(r.W / 26f), 12, 24);
+            int halfCols = Math.Clamp((int)(r.W / 24f), 14, 26);
             int totalCols = halfCols * 2;
             float step = r.W / totalCols;
-            float gapX = Math.Clamp(step * 0.24f, 2f, 4f);
+            float gapX = Math.Clamp(step * 0.24f, 2f, 3.8f);
             float colW = MathF.Max(3f, step - gapX);
 
-            int maxSegs = Math.Clamp((int)(maxUp / 7.5f), 5, 14);
+            int maxSegs = Math.Clamp((int)(maxUp / 7.2f), 6, 15);
             float segPitch = maxUp / maxSegs;
-            float segH = MathF.Max(2.4f, segPitch - 2.2f);
+            float segH = MathF.Max(2.4f, segPitch - 2.1f);
+            float maxClip = _masterClip;
 
             for (int i = 0; i < totalCols; i++)
             {
@@ -1359,127 +1472,152 @@ public static unsafe class AudioAnalyzer
 
                 float energy = SampleSmooth(_smoothBands, bandPos);
                 float peak = SampleSmooth(_peakBands, bandPos);
-                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.22f);
+                float clipMem = SampleSmooth(_bandClip, bandPos);
+                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.20f);
 
-                float v = Math.Clamp(MathF.Pow(energy, 0.76f) * gain, 0f, 1f);
-                float pv = Math.Clamp(MathF.Pow(peak, 0.78f) * gain, 0f, 1f);
-                int litSegs = Math.Clamp((int)MathF.Round(v * edge * maxSegs), 0, maxSegs);
-                int peakSeg = Math.Clamp((int)MathF.Round(pv * edge * maxSegs), 0, maxSegs);
+                var (v, clip) = ApplyAutoLimiter(MathF.Pow(energy, 0.76f) * effGain * edge, clipMem * edge);
+                var (pv, pClip) = ApplyAutoLimiter(MathF.Pow(peak, 0.78f) * effGain * edge, clipMem * edge);
+                if (clip > maxClip) maxClip = clip;
+
+                int litSegs = Math.Clamp((int)MathF.Round(v * maxSegs), 0, maxSegs);
+                int peakSeg = Math.Clamp((int)MathF.Round(pv * maxSegs), 0, maxSegs);
 
                 float cx = r.X + i * step + gapX * 0.5f;
                 uint colTint = Gfx.Mix(c1, c2, dist);
 
                 for (int s = 0; s < litSegs; s++)
                 {
-                    float frac = s / (float)Math.Max(1, maxSegs - 1);
-                    float sy = baseline - (s + 1) * segPitch + 2.2f;
-                    uint segCol = frac > 0.72f ? Gfx.Mix(colTint, hot, (frac - 0.72f) / 0.28f * 0.85f)
-                        : Gfx.Mix(c1, c2, Math.Clamp(dist * 0.65f + frac * 0.55f, 0f, 1f));
-                    Gfx.Fill(new R(cx, sy, colW, segH), Gfx.Fade(segCol, (0.45f + frac * 0.52f) * opacity));
+                    float frac = (s + 1) / (float)Math.Max(1, maxSegs);
+                    float sy = baseline - (s + 1) * segPitch + 2.1f;
+                    bool inRedZone = frac > LimiterCeiling || (clip > 0.14f && frac > 0.70f);
+                    uint segCol = inRedZone
+                        ? Gfx.Mix(0xFFFF4D2E, ClipRed, Math.Clamp((frac - 0.70f) / 0.30f + clip * 0.5f, 0f, 1f))
+                        : (frac > 0.68f ? Gfx.Mix(colTint, hot, (frac - 0.68f) / 0.32f * 0.80f)
+                            : Gfx.Mix(c1, c2, Math.Clamp(dist * 0.65f + frac * 0.55f, 0f, 1f)));
+                    if (inRedZone)
+                        Gfx.Fill(new R(cx - 1.5f, sy - 1f, colW + 3f, segH + 2f), Gfx.Fade(ClipRed, 0.26f * opacity), 2f);
+                    Gfx.Fill(new R(cx, sy, colW, segH), Gfx.Fade(segCol, (0.48f + frac * 0.50f) * opacity), 1.4f);
                 }
 
                 if (peakSeg > 0)
                 {
-                    float py = baseline - (peakSeg + 1) * segPitch + 2.2f;
-                    Gfx.Fill(new R(cx, py, colW, segH), Gfx.Fade(hot, (0.58f + pv * 0.42f) * opacity));
+                    float py = baseline - (peakSeg + 1) * segPitch + 2.1f;
+                    uint pCol = MixClipHot(hot, pClip);
+                    if (pClip > 0.10f) Gfx.Fill(new R(cx - 1.5f, py - 1f, colW + 3f, segH + 2f), Gfx.Fade(ClipRed, 0.35f * opacity), 2f);
+                    Gfx.Fill(new R(cx, py, colW, segH), Gfx.Fade(pCol, (0.62f + pv * 0.38f) * opacity), 1.4f);
                 }
 
-                float reflH = v * maxRefl * edge;
+                float reflH = v * maxRefl;
                 if (reflH > 1.5f)
-                    Gfx.Fill(new R(cx, baseline + 2.5f, colW, reflH), Gfx.Fade(colTint, (0.06f + v * 0.16f) * opacity));
+                    Gfx.Fill(new R(cx, baseline + 2.5f, colW, reflH), Gfx.Fade(clip > 0.12f ? ClipRed : colTint, (0.06f + v * 0.18f) * opacity));
             }
+            DrawLimiterRail(r, limitY, maxClip, opacity);
             Gfx.Line(r.X + r.W * 0.03f, baseline + 0.5f, r.Right - r.W * 0.03f, baseline + 0.5f,
-                Gfx.Fade(c2, (0.14f + _bassEnergy * 0.22f) * opacity), 1f);
+                Gfx.Fade(MixClip(c2, maxClip), (0.16f + _bassEnergy * 0.24f) * opacity), 1.2f);
         }
         else if (style == "ribbon")
         {
             float baseline = r.Y + r.H * 0.72f;
-            float maxH = r.H * 0.62f;
-            const int count = 76;
+            float maxH = r.H * 0.64f;
+            float limitY = baseline - maxH * LimiterCeiling;
+            const int count = 80;
             float px = r.X, py = baseline, pPeakY = baseline;
+            float maxClip = _masterClip;
 
             for (int i = 0; i <= count; i++)
             {
                 float u = i / (float)count;
                 float dist = MathF.Abs(u * 2f - 1f);
                 float bandPos = dist * (BandCount - 1);
-                float v = Math.Clamp(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.78f) * gain, 0f, 1f);
-                float pv = Math.Clamp(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.80f) * gain, 0f, 1f);
-                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.40f);
+                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.36f);
+                float clipMem = SampleSmooth(_bandClip, bandPos);
+                var (v, clip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.76f) * effGain * edge, clipMem * edge);
+                var (pv, pClip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.78f) * effGain * edge, clipMem * edge);
+                if (clip > maxClip) maxClip = clip;
 
-                float height = v * maxH * edge;
-                float peakH = pv * maxH * edge;
+                float height = v * maxH;
+                float peakH = pv * maxH;
                 float x = r.X + u * r.W;
                 float y = baseline - height;
                 float peakY = baseline - peakH;
-                uint color = Gfx.Mix(c1, c2, dist);
+                uint color = MixClip(Gfx.Mix(c1, c2, dist), clip);
+                uint coreCol = MixClipHot(hot, clip);
 
                 if (height > 2f)
                 {
-                    Gfx.Line(x, baseline, x, y, Gfx.Fade(color, 0.09f * v * opacity), MathF.Max(2f, r.W / count + 0.5f));
-                    Gfx.Line(x, baseline + 1.5f, x, baseline + height * 0.25f, Gfx.Fade(color, 0.06f * v * opacity), 2f);
+                    Gfx.Line(x, baseline, x, y, Gfx.Fade(color, (0.09f + clip * 0.10f) * v * opacity), MathF.Max(2f, r.W / count + 0.6f));
+                    Gfx.Line(x, baseline + 1.5f, x, baseline + height * 0.26f, Gfx.Fade(color, 0.06f * v * opacity), 2f);
                 }
 
                 if (i > 0)
                 {
-                    Gfx.Line(px, py, x, y, Gfx.Fade(color, 0.14f * v * opacity), 7f);
-                    Gfx.Line(px, py, x, y, Gfx.Fade(hot, (0.22f + v * 0.72f) * opacity), 1.6f);
+                    Gfx.Line(px, py, x, y, Gfx.Fade(color, (0.16f + clip * 0.22f) * v * opacity), clip > 0.10f ? 9f : 7f);
+                    Gfx.Line(px, py, x, y, Gfx.Fade(coreCol, (0.26f + v * 0.74f) * opacity), clip > 0.10f ? 2.4f : 1.8f);
                     if (pv > 0.14f)
-                        Gfx.Line(px, pPeakY - 2f, x, peakY - 2f, Gfx.Fade(hot, pv * 0.34f * opacity), 1.0f);
+                        Gfx.Line(px, pPeakY - 2f, x, peakY - 2f, Gfx.Fade(MixClipHot(hot, pClip), (pv * 0.38f + pClip * 0.35f) * opacity), pClip > 0.12f ? 1.5f : 1.0f);
                 }
                 px = x; py = y; pPeakY = peakY;
             }
 
-            DrawWaveRibbon(r, baseline - maxH * 0.20f, r.H * 0.22f, c1, c2, hot, opacity * 0.90f);
+            DrawLimiterRail(r, limitY, maxClip, opacity);
+            DrawWaveRibbon(r, baseline - maxH * 0.22f, r.H * 0.23f, c1, c2, hot, opacity * 0.94f, clipBoost: maxClip);
         }
         else if (style == "pulse")
         {
             float mid = r.Y + r.H * 0.50f;
             float maxHalf = r.H * 0.44f;
 
-            int halfBars = Math.Clamp((int)(r.W / 22f), 14, 28);
+            int halfBars = Math.Clamp((int)(r.W / 20f), 16, 30);
             int totalBars = halfBars * 2;
             float step = r.W / totalBars;
-            float gap = Math.Clamp(step * 0.30f, 1.8f, 3.4f);
-            float barW = MathF.Max(2.4f, step - gap);
+            float gap = Math.Clamp(step * 0.28f, 1.8f, 3.4f);
+            float barW = MathF.Max(2.6f, step - gap);
+            float maxClip = _masterClip;
 
             for (int i = 0; i < totalBars; i++)
             {
                 float u = (i + 0.5f) / totalBars;
                 float dist = MathF.Abs(u * 2f - 1f);
                 float bandPos = MathF.Pow(dist, 0.85f) * (BandCount - 1);
+                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.26f);
+                float clipMem = SampleSmooth(_bandClip, bandPos);
 
-                float v = Math.Clamp(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.76f) * gain, 0f, 1f);
-                float pv = Math.Clamp(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.78f) * gain, 0f, 1f);
-                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.30f);
+                var (v, clip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.76f) * effGain * edge, clipMem * edge);
+                var (pv, pClip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.78f) * effGain * edge, clipMem * edge);
+                if (clip > maxClip) maxClip = clip;
 
-                float halfH = MathF.Max(2f, v * maxHalf * edge);
-                float peakH = pv * maxHalf * edge;
+                float halfH = MathF.Max(2f, v * maxHalf);
+                float peakH = pv * maxHalf;
                 float bx = r.X + i * step + gap * 0.5f;
-                uint col = Gfx.Mix(c1, c2, dist);
+                uint col = MixClip(Gfx.Mix(c1, c2, dist), clip);
+                uint coreCol = MixClipHot(hot, clip);
 
-                if (v > 0.12f)
-                    Gfx.Fill(new R(bx - barW * 0.4f, mid - halfH - 2f, barW * 1.8f, halfH * 2f + 4f),
-                        Gfx.Fade(col, v * 0.12f * opacity));
+                if (v > 0.12f || clip > 0.08f)
+                    Gfx.Fill(new R(bx - barW * 0.45f, mid - halfH - 2.5f, barW * 1.9f, halfH * 2f + 5f),
+                        Gfx.Fade(clip > 0.08f ? ClipRed : col, (v * 0.13f + clip * 0.22f) * opacity), barW * 0.5f);
 
-                Gfx.Fill(new R(bx, mid - halfH, barW, halfH * 2f), Gfx.Fade(col, (0.30f + v * 0.65f) * opacity));
-                Gfx.Fill(new R(bx, mid - halfH * 0.45f, barW, halfH * 0.9f), Gfx.Fade(hot, (0.18f + v * 0.50f) * opacity));
+                Gfx.Fill(new R(bx, mid - halfH, barW, halfH * 2f), Gfx.Fade(col, (0.32f + v * 0.66f) * opacity), barW * 0.4f);
+                Gfx.Fill(new R(bx, mid - halfH * 0.45f, barW, halfH * 0.9f), Gfx.Fade(coreCol, (0.20f + v * 0.54f) * opacity), barW * 0.4f);
 
                 if (peakH > 5f)
                 {
-                    float pa = Math.Clamp((0.38f + pv * 0.62f) * opacity, 0f, 1f);
-                    Gfx.Fill(new R(bx, mid - peakH - 4f, barW, 2.2f), Gfx.Fade(hot, pa));
-                    Gfx.Fill(new R(bx, mid + peakH + 1.8f, barW, 2.2f), Gfx.Fade(hot, pa * 0.75f));
+                    float pa = Math.Clamp((0.40f + pv * 0.60f) * opacity, 0f, 1f);
+                    uint pCol = MixClipHot(hot, pClip);
+                    Gfx.Fill(new R(bx, mid - peakH - 4f, barW, pClip > 0.10f ? 2.8f : 2.2f), Gfx.Fade(pCol, pa), 1f);
+                    Gfx.Fill(new R(bx, mid + peakH + 1.8f, barW, pClip > 0.10f ? 2.8f : 2.2f), Gfx.Fade(pCol, pa * 0.78f), 1f);
                 }
             }
 
-            DrawWaveRibbon(r, mid, r.H * 0.24f, c2, hot, 0xFFFFFFFF, opacity * 0.92f);
+            DrawLimiterRail(r, mid - maxHalf * LimiterCeiling, maxClip, opacity * 0.85f);
+            DrawLimiterRail(r, mid + maxHalf * LimiterCeiling, maxClip, opacity * 0.65f);
+            DrawWaveRibbon(r, mid, r.H * 0.25f, c2, hot, 0xFFFFFFFF, opacity * 0.95f, clipBoost: maxClip);
         }
         else if (style == "cyber")
         {
             float baseline = r.Y + r.H * 0.78f;
             float maxUp = r.H * 0.72f;
             float maxRefl = r.H * 0.20f;
+            float limitY = baseline - maxUp * LimiterCeiling;
             uint neonPink = Gfx.Mix(c1, 0xFFFF2E93, 0.45f);
             uint neonCyan = Gfx.Mix(c2, 0xFF00F0FF, 0.55f);
 
@@ -1487,26 +1625,29 @@ public static unsafe class AudioAnalyzer
             float step = r.W / totalBars;
             float gap = Math.Clamp(step * 0.26f, 2f, 4f);
             float barW = MathF.Max(3f, step - gap);
+            float maxClip = _masterClip;
 
             for (int i = 0; i < totalBars; i++)
             {
                 float u = i / (float)Math.Max(1, totalBars - 1);
                 float bandPos = MathF.Pow(u, 0.92f) * (BandCount - 1);
-                float v = Math.Clamp(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.74f) * gain, 0f, 1f);
-                float pv = Math.Clamp(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.76f) * gain, 0f, 1f);
+                float clipMem = SampleSmooth(_bandClip, bandPos);
+                var (v, clip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.74f) * effGain, clipMem);
+                var (pv, pClip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.76f) * effGain, clipMem);
+                if (clip > maxClip) maxClip = clip;
 
                 float h = MathF.Max(3f, v * maxUp);
                 float ph = pv * maxUp;
                 float bx = r.X + i * step + gap * 0.5f;
                 float topY = baseline - h;
-                uint col = Gfx.Mix(neonPink, neonCyan, u);
-                uint tipCol = Gfx.Mix(col, 0xFFFFFFFF, 0.72f);
+                uint col = MixClip(Gfx.Mix(neonPink, neonCyan, u), clip);
+                uint tipCol = MixClipHot(Gfx.Mix(col, 0xFFFFFFFF, 0.72f), clip);
 
-                if (v > 0.14f)
-                    Gfx.Fill(new R(bx - barW * 0.35f, topY - 2f, barW * 1.7f, h + 3f), Gfx.Fade(col, v * 0.14f * opacity));
+                if (v > 0.14f || clip > 0.08f)
+                    Gfx.Fill(new R(bx - barW * 0.35f, topY - 2f, barW * 1.7f, h + 3f), Gfx.Fade(clip > 0.08f ? ClipRed : col, (v * 0.14f + clip * 0.22f) * opacity));
 
-                Gfx.Fill(new R(bx, topY, barW, h), Gfx.Fade(col, (0.36f + v * 0.62f) * opacity));
-                Gfx.Fill(new R(bx, topY, barW, MathF.Min(h, 4f)), Gfx.Fade(tipCol, (0.55f + v * 0.45f) * opacity));
+                Gfx.Fill(new R(bx, topY, barW, h), Gfx.Fade(col, (0.38f + v * 0.60f) * opacity));
+                Gfx.Fill(new R(bx, topY, barW, MathF.Min(h, 4.5f)), Gfx.Fade(tipCol, (0.58f + v * 0.42f) * opacity));
 
                 float reflH = MathF.Max(1.5f, v * maxRefl);
                 Gfx.Fill(new R(bx, baseline + 2.5f, barW, reflH), Gfx.Fade(col, (0.07f + v * 0.19f) * opacity));
@@ -1514,127 +1655,149 @@ public static unsafe class AudioAnalyzer
                 if (ph > 5f)
                 {
                     float py = baseline - ph - 4.5f;
-                    Gfx.Fill(new R(bx, py, barW, 2.4f), Gfx.Fade(0xFFFFFFFF, (0.45f + pv * 0.55f) * opacity));
+                    Gfx.Fill(new R(bx, py, barW, pClip > 0.10f ? 3.0f : 2.4f), Gfx.Fade(MixClipHot(0xFFFFFFFF, pClip), (0.48f + pv * 0.52f) * opacity));
                 }
             }
 
-            Gfx.Line(r.X, baseline + 0.5f, r.Right, baseline + 0.5f, Gfx.Fade(neonCyan, (0.18f + _bassEnergy * 0.32f) * opacity), 3.5f);
-            Gfx.Line(r.X, baseline + 0.5f, r.Right, baseline + 0.5f, Gfx.Fade(0xFFFFFFFF, (0.35f + _bassEnergy * 0.45f) * opacity), 1.1f);
+            DrawLimiterRail(r, limitY, maxClip, opacity);
+            Gfx.Line(r.X, baseline + 0.5f, r.Right, baseline + 0.5f, Gfx.Fade(MixClip(neonCyan, maxClip), (0.20f + _bassEnergy * 0.32f + maxClip * 0.25f) * opacity), 3.8f);
+            Gfx.Line(r.X, baseline + 0.5f, r.Right, baseline + 0.5f, Gfx.Fade(MixClipHot(0xFFFFFFFF, maxClip), (0.35f + _bassEnergy * 0.45f) * opacity), 1.1f);
         }
         else if (style == "orbit")
         {
             float mid = r.Y + r.H * 0.50f;
             float maxHalf = r.H * 0.44f;
-            const int pts = 68;
+            const int pts = 72;
             float px = r.X, pyUp = mid, pyDn = mid;
+            float maxClip = _masterClip;
 
             for (int i = 0; i <= pts; i++)
             {
                 float u = i / (float)pts;
                 float dist = MathF.Abs(u * 2f - 1f);
                 float bandPos = MathF.Pow(dist, 0.85f) * (BandCount - 1);
-                float v = Math.Clamp(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.74f) * gain, 0f, 1f);
-                float pv = Math.Clamp(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.76f) * gain, 0f, 1f);
-                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.35f);
+                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.32f);
+                float clipMem = SampleSmooth(_bandClip, bandPos);
+                var (v, clip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.74f) * effGain * edge, clipMem * edge);
+                var (pv, pClip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.76f) * effGain * edge, clipMem * edge);
+                if (clip > maxClip) maxClip = clip;
 
-                float h = v * maxHalf * edge;
-                float ph = pv * maxHalf * edge;
+                float h = v * maxHalf;
+                float ph = pv * maxHalf;
                 float x = r.X + u * r.W;
                 float yUp = mid - h;
                 float yDn = mid + h * 0.82f;
-                uint col = Gfx.Mix(c1, c2, dist);
+                uint col = MixClip(Gfx.Mix(c1, c2, dist), clip);
+                uint coreCol = MixClipHot(hot, clip);
 
                 if (h > 2f)
-                    Gfx.Line(x, yUp, x, yDn, Gfx.Fade(col, (0.06f + v * 0.14f) * opacity), MathF.Max(2f, r.W / pts + 0.6f));
+                    Gfx.Line(x, yUp, x, yDn, Gfx.Fade(col, (0.06f + v * 0.14f + clip * 0.10f) * opacity), MathF.Max(2f, r.W / pts + 0.6f));
 
                 if (i > 0)
                 {
-                    Gfx.Line(px, pyUp, x, yUp, Gfx.Fade(col, (0.14f + v * 0.24f) * opacity), 7f);
-                    Gfx.Line(px, pyUp, x, yUp, Gfx.Fade(hot, (0.28f + v * 0.72f) * opacity), 1.8f);
+                    Gfx.Line(px, pyUp, x, yUp, Gfx.Fade(col, (0.16f + v * 0.24f + clip * 0.22f) * opacity), clip > 0.10f ? 9f : 7f);
+                    Gfx.Line(px, pyUp, x, yUp, Gfx.Fade(coreCol, (0.30f + v * 0.70f) * opacity), clip > 0.10f ? 2.5f : 1.9f);
                     Gfx.Line(px, pyDn, x, yDn, Gfx.Fade(col, (0.10f + v * 0.18f) * opacity), 5.5f);
-                    Gfx.Line(px, pyDn, x, yDn, Gfx.Fade(col, (0.22f + v * 0.58f) * opacity), 1.4f);
+                    Gfx.Line(px, pyDn, x, yDn, Gfx.Fade(col, (0.24f + v * 0.58f) * opacity), 1.5f);
                 }
 
                 if ((i % 3) == 0 && ph > 6f)
-                    Gfx.Circle(x, mid - ph - 3.5f, 1.6f, Gfx.Fade(0xFFFFFFFF, (0.40f + pv * 0.60f) * opacity));
+                    Gfx.Circle(x, mid - ph - 3.5f, pClip > 0.12f ? 2.4f : 1.6f, Gfx.Fade(MixClipHot(0xFFFFFFFF, pClip), (0.42f + pv * 0.58f) * opacity));
 
                 px = x; pyUp = yUp; pyDn = yDn;
             }
-            Gfx.Line(r.X + r.W * 0.03f, mid, r.Right - r.W * 0.03f, mid, Gfx.Fade(hot, (0.15f + _bassEnergy * 0.28f) * opacity), 1f);
+            DrawLimiterRail(r, mid - maxHalf * LimiterCeiling, maxClip, opacity * 0.85f);
+            Gfx.Line(r.X + r.W * 0.03f, mid, r.Right - r.W * 0.03f, mid, Gfx.Fade(MixClipHot(hot, maxClip), (0.16f + _bassEnergy * 0.28f) * opacity), 1f);
         }
         else if (style == "matrix")
         {
             float baseline = r.Y + r.H * 0.80f;
             float maxUp = r.H * 0.72f;
-            int halfCols = Math.Clamp((int)(r.W / 26f), 12, 24);
+            float limitY = baseline - maxUp * LimiterCeiling;
+            int halfCols = Math.Clamp((int)(r.W / 24f), 14, 26);
             int totalCols = halfCols * 2;
             float step = r.W / totalCols;
-            int maxDots = Math.Clamp((int)(maxUp / 8.5f), 5, 13);
+            int maxDots = Math.Clamp((int)(maxUp / 8.2f), 6, 14);
             float pitchY = maxUp / maxDots;
             float dotR = Math.Clamp(MathF.Min(step * 0.30f, pitchY * 0.34f), 1.8f, 3.6f);
+            float maxClip = _masterClip;
 
             for (int i = 0; i < totalCols; i++)
             {
                 float u = (i + 0.5f) / totalCols;
                 float dist = MathF.Abs(u * 2f - 1f);
                 float bandPos = MathF.Pow(dist, 0.88f) * (BandCount - 1);
-                float v = Math.Clamp(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.75f) * gain, 0f, 1f);
-                float pv = Math.Clamp(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.77f) * gain, 0f, 1f);
-                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.22f);
+                float edge = MathF.Pow(MathF.Sin(u * MathF.PI), 0.20f);
+                float clipMem = SampleSmooth(_bandClip, bandPos);
+                var (v, clip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_smoothBands, bandPos), 0.75f) * effGain * edge, clipMem * edge);
+                var (pv, pClip) = ApplyAutoLimiter(MathF.Pow(SampleSmooth(_peakBands, bandPos), 0.77f) * effGain * edge, clipMem * edge);
+                if (clip > maxClip) maxClip = clip;
 
-                int lit = Math.Clamp((int)MathF.Round(v * edge * maxDots), 0, maxDots);
-                int peakDot = Math.Clamp((int)MathF.Round(pv * edge * maxDots), 0, maxDots);
+                int lit = Math.Clamp((int)MathF.Round(v * maxDots), 0, maxDots);
+                int peakDot = Math.Clamp((int)MathF.Round(pv * maxDots), 0, maxDots);
                 float cx = r.X + (i + 0.5f) * step;
                 uint col = Gfx.Mix(c1, c2, dist);
 
                 for (int d = 0; d < lit; d++)
                 {
-                    float frac = d / (float)Math.Max(1, maxDots - 1);
+                    float frac = (d + 1) / (float)Math.Max(1, maxDots);
                     float cy = baseline - (d + 0.5f) * pitchY;
-                    uint dc = frac > 0.70f ? Gfx.Mix(col, hot, (frac - 0.70f) / 0.30f * 0.85f) : col;
-                    Gfx.Circle(cx, cy, dotR, Gfx.Fade(dc, (0.42f + frac * 0.58f) * opacity));
+                    bool inRed = frac > LimiterCeiling || (clip > 0.14f && frac > 0.72f);
+                    uint dc = inRed ? ClipRed : (frac > 0.70f ? Gfx.Mix(col, hot, (frac - 0.70f) / 0.30f * 0.85f) : col);
+                    if (inRed) Gfx.Circle(cx, cy, dotR * 1.65f, Gfx.Fade(ClipRed, 0.28f * opacity));
+                    Gfx.Circle(cx, cy, dotR, Gfx.Fade(dc, (0.44f + frac * 0.56f) * opacity));
                 }
 
                 if (peakDot > 0)
                 {
                     float py = baseline - (peakDot + 0.5f) * pitchY;
-                    Gfx.Circle(cx, py, dotR * 1.35f, Gfx.Fade(col, 0.25f * opacity));
-                    Gfx.Circle(cx, py, dotR * 0.85f, Gfx.Fade(0xFFFFFFFF, (0.55f + pv * 0.45f) * opacity));
+                    Gfx.Circle(cx, py, dotR * (pClip > 0.12f ? 1.85f : 1.35f), Gfx.Fade(pClip > 0.12f ? ClipRed : col, (0.26f + pClip * 0.25f) * opacity));
+                    Gfx.Circle(cx, py, dotR * 0.88f, Gfx.Fade(MixClipHot(0xFFFFFFFF, pClip), (0.58f + pv * 0.42f) * opacity));
                 }
 
                 if (lit > 0)
-                    Gfx.Circle(cx, baseline + pitchY * 0.65f, dotR * 0.85f, Gfx.Fade(col, (0.08f + v * 0.18f) * opacity));
+                    Gfx.Circle(cx, baseline + pitchY * 0.65f, dotR * 0.85f, Gfx.Fade(clip > 0.12f ? ClipRed : col, (0.08f + v * 0.18f) * opacity));
             }
+            DrawLimiterRail(r, limitY, maxClip, opacity);
             Gfx.Line(r.X + r.W * 0.03f, baseline + 1f, r.Right - r.W * 0.03f, baseline + 1f,
-                Gfx.Fade(c2, (0.14f + _bassEnergy * 0.24f) * opacity), 1f);
+                Gfx.Fade(MixClip(c2, maxClip), (0.16f + _bassEnergy * 0.24f) * opacity), 1.1f);
         }
 
         Gfx.PopClip();
     }
 
-    private static void DrawWaveRibbon(R r, float midY, float amp, uint c1, uint c2, uint core, float opacity, int phaseShift = 0)
+    private static void DrawWaveRibbon(R r, float midY, float amp, uint c1, uint c2, uint core, float opacity, int phaseShift = 0, float clipBoost = 0f)
     {
-        const int pts = 48;
-        for (int layer = 0; layer < 2; layer++)
+        const int pts = 64;
+        const float waveLimit = 0.72f;
+        for (int layer = 0; layer < 3; layer++)
         {
             float px = r.X, py = midY;
-            float w = layer == 0 ? 6.5f : 1.5f;
-            float baseA = layer == 0 ? 0.14f : 0.80f;
+            float w = layer == 0 ? 8.5f : (layer == 1 ? 3.2f : 1.4f);
+            float baseA = layer == 0 ? 0.14f : (layer == 1 ? 0.42f : 0.88f);
             for (int i = 0; i < pts; i++)
             {
                 float u = i / (float)(pts - 1);
                 float env = MathF.Sin(u * MathF.PI);
                 int idx = ((int)(u * (WavePoints - 1)) + phaseShift) % WavePoints;
+                float rawS = _smoothWave[idx] * _agcGain * 1.18f;
+                float absS = MathF.Abs(rawS);
+                float segClip = absS > waveLimit ? Math.Clamp((absS - waveLimit) * 3.2f, 0f, 1f) : 0f;
+                float limS = absS > waveLimit
+                    ? MathF.Sign(rawS) * (waveLimit + (1f - waveLimit) * MathF.Tanh((absS - waveLimit) * 2.8f))
+                    : rawS;
+                float effClip = MathF.Max(segClip, clipBoost * 0.45f * Math.Clamp(absS * 1.5f, 0f, 1f));
                 float x = r.X + u * r.W;
-                float y = midY + _smoothWave[idx] * amp * env;
-                uint col = layer == 1 ? Gfx.Mix(Gfx.Mix(c1, c2, u), core, 0.55f) : Gfx.Mix(c1, c2, u);
-                if (i > 0) Gfx.Line(px, py, x, y, Gfx.Fade(col, baseA * opacity), w);
+                float y = midY + limS * amp * env;
+                uint baseCol = MixClip(Gfx.Mix(c1, c2, u), effClip);
+                uint col = layer == 2 ? MixClipHot(Gfx.Mix(baseCol, core, 0.65f), effClip) : baseCol;
+                if (i > 0) Gfx.Line(px, py, x, y, Gfx.Fade(col, MathF.Min(1f, (baseA + effClip * 0.22f) * opacity)), w + effClip * (layer == 0 ? 3.5f : 0.7f));
                 px = x; py = y;
             }
         }
     }
 
-    /// <summary>Compact 8-bar live audio wave indicator for the NowPlaying mini-bar (0% CPU when paused).</summary>
+    /// <summary>Compact 7-bar auto-limited live audio wave indicator for the NowPlaying mini-bar (flashes crimson on clip).</summary>
     public static void DrawMiniWaves(R r)
     {
         if (AppSettings.Current.VisualizerStyle == "off") return;
@@ -1644,10 +1807,12 @@ public static unsafe class AudioAnalyzer
         float bw = MathF.Max(2f, (r.W - gap * (bars - 1)) / bars);
         for (int i = 0; i < bars; i++)
         {
-            float v = _smoothBands[Math.Clamp(i * 4 + 1, 0, BandCount - 1)];
+            int idx = Math.Clamp(i * 4 + 1, 0, BandCount - 1);
+            var (v, clip) = ApplyAutoLimiter(_smoothBands[idx] * _agcGain, _bandClip[idx]);
             float h = MathF.Max(2.5f, v * r.H);
             float y = r.Y + (r.H - h) * 0.5f;
-            Gfx.Fill(new R(r.X + i * (bw + gap), y, bw, h), Gfx.Fade(Th.Brand, 0.45f + 0.55f * v), bw * 0.5f);
+            uint col = MixClip(Th.Brand, clip);
+            Gfx.Fill(new R(r.X + i * (bw + gap), y, bw, h), Gfx.Fade(col, 0.48f + 0.52f * v), bw * 0.5f);
         }
     }
 }

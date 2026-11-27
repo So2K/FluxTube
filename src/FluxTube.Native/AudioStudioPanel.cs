@@ -499,12 +499,15 @@ public static class AudioStudioPanel
         float w = Gfx.W, h = Gfx.H;
         float pw = MathF.Min(920, w - 36);
         float ph = MathF.Min(680, h - 36);
-        float ot = Math.Clamp((UI.Now - _openedAt) / 145f, 0f, 1f);
+        float ot = Math.Clamp((UI.Now - _openedAt) / 260f, 0f, 1f);
         if (ot < 1f) UI.Animate();
-        float oEase = 1f - (1f - ot) * (1f - ot);
-        float dy = (1f - oEase) * 14f;
-        float velY = ot < 1f ? -2f * (1f - ot) * 14f / 0.145f : 0f;
-        var panel = new R(Gfx.Snap((w - pw) / 2), Gfx.Snap((h - ph) / 2 + dy), pw, ph);
+        float oInv = 1f - ot;
+        float oEase = 1f - oInv * oInv * oInv * oInv; // quartic ease-out
+        float dy = (1f - oEase) * 22f;
+        float velY = ot < 1f ? -4f * oInv * oInv * oInv * 22f / 0.26f : 0f;
+        float scale = 0.945f + 0.055f * oEase;
+        float sw = pw * scale, sh = ph * scale;
+        var panel = new R(Gfx.Snap((w - sw) / 2), Gfx.Snap((h - sh) / 2 + dy), sw, sh);
         PanelRect = panel;
 
         // Dim backdrop — clicking outside closes the studio rack

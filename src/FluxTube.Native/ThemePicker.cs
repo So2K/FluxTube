@@ -266,9 +266,10 @@ public static class ThemeCodeEditor
         if (!Open) return;
         Reparse();
 
-        float t = Math.Clamp((UI.Now - _openedAt) / 140f, 0, 1);
-        if (t < 1) UI.Animate();
-        float ease = 1f - (1f - t) * (1f - t);
+        float t = Math.Clamp((UI.Now - _openedAt) / 250f, 0f, 1f);
+        if (t < 1f) UI.Animate();
+        float inv = 1f - t;
+        float ease = 1f - inv * inv * inv * inv;
 
         // Backdrop scrim
         Gfx.Fill(new R(0, 0, Gfx.W, Gfx.H), Gfx.Fade(0xFF000000, 0.58f * ease));

@@ -95,6 +95,9 @@ public sealed class Comment
     /// <summary>Token that loads this comment's replies; null when there are none.</summary>
     public string? RepliesToken { get; set; }
     public bool IsReply { get; set; }
+    /// <summary>InnerTube perform_comment_action token to delete this comment (present on user's own comments).</summary>
+    public string? DeleteAction { get; set; }
+    public bool IsOwn { get; set; }
 }
 
 public sealed class CommentPage
@@ -151,8 +154,134 @@ public sealed class WatchInfo
     /// <summary>Comment orders ("popular first", "newest"): each is a token that reloads the list.</summary>
     public List<(string Title, string Token, bool Selected)> CommentSorts { get; } = [];
     public List<(double Start, string Title)> Chapters { get; } = [];
+    /// <summary>100-point YouTube "Most Replayed" normalized intensity curve (0..1) for seekbar heatmap hills.</summary>
+    public List<float> Heatmap { get; } = [];
     /// <summary>"LIKE", "DISLIKE" or "INDIFFERENT" for the signed-in account; null when not known.</summary>
     public string? LikeStatus { get; set; }
+    /// <summary>Whether the signed-in user is subscribed to this video's channel.</summary>
+    public bool? Subscribed { get; set; }
     /// <summary>True when YouTube attaches a paidContentOverlay ("Includes paid promotion").</summary>
     public bool HasPaidPromotion { get; set; }
+    /// <summary>Initial InnerTube live_chat/get_live_chat continuation token when this video is a LIVE stream with chat.</summary>
+    public string? LiveChatToken { get; set; }
+}
+
+public sealed record LiveChatMessage(
+    string Id,
+    string Author,
+    string? Avatar,
+    string Text,
+    bool IsOwner,
+    bool IsMod,
+    bool IsMember,
+    bool IsVerified,
+    bool IsSystem,
+    string? BadgeText,
+    string? SuperChatAmount,
+    uint AccentColor,
+    List<string>? EmojiUrls = null);
+
+public sealed record LiveChatViewOption(string Title, string Token, bool Selected);
+
+public sealed record LiveChatPollResult(
+    List<LiveChatMessage> Messages,
+    List<string> DeletedIds,
+    LiveChatMessage? PinnedMessage,
+    string? NextToken,
+    int TimeoutMs,
+    string? SendParams,
+    string? InputPlaceholder,
+    string? RestrictedMessage,
+    string? RestrictedDetail,
+    int MaxChars,
+    List<LiveChatViewOption>? Views);
+
+public sealed record HeatmapPoint(double StartSec, double DurationSec, float Intensity);
+
+public sealed class VideoAnalyticsData
+{
+    public string VideoId { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Channel { get; set; } = "";
+    public string? ChannelId { get; set; }
+    public string? ChannelAvatar { get; set; }
+    public long Views { get; set; }
+    public long Likes { get; set; }
+    public long Dislikes { get; set; }
+    public long CommentsCount { get; set; }
+    public double Rating { get; set; }
+    public double DurationSec { get; set; }
+    public string PublishDate { get; set; } = "";
+    public DateTime? PublishedUtc { get; set; }
+    public string Category { get; set; } = "";
+    public string Description { get; set; } = "";
+    public bool IsLive { get; set; }
+    public bool IsFamilySafe { get; set; } = true;
+    public bool IsUnlisted { get; set; }
+    public bool HasPaidPromotion { get; set; }
+    public bool? AdsDetected { get; set; } // true if player response contains adPlacements/playerAds (monetized)
+    public int ChaptersCount { get; set; }
+    public List<string> Tags { get; } = [];
+
+    // Format / technical capabilities straight from YouTube adaptiveFormats & captionTracks
+    public int MaxHeight { get; set; }
+    public int MaxFps { get; set; }
+    public bool HasHdr { get; set; }
+    public bool HasAv1 { get; set; }
+    public bool HasVp9 { get; set; }
+    public bool HasH264 { get; set; }
+    public int MaxVideoBitrateKbps { get; set; }
+    public int MaxAudioBitrateKbps { get; set; }
+    public int AudioTrackCount { get; set; }
+    public List<string> CaptionLangs { get; } = [];
+
+    // 100-point YouTube "Most Replayed" viewer retention heatmap!
+    public List<HeatmapPoint> Heatmap { get; } = [];
+
+    // SponsorBlock crowdsourced segments
+    public double SponsorSec { get; set; }
+    public double SelfPromoSec { get; set; }
+    public double OtherSkipSec { get; set; }
+    public int SegmentCount { get; set; }
+
+    // Personal local history from SQLite Db
+    public int LocalPlays { get; set; }
+    public double LocalWatchedSec { get; set; }
+}
+
+public sealed record ChannelVideoPoint(string VideoId, string Title, long Views, string When, string Duration, double ApproxAgeDays);
+
+public sealed class ChannelAnalyticsData
+{
+    public string ChannelId { get; set; } = "";
+    public string Title { get; set; } = "";
+    public string Handle { get; set; } = "";
+    public string? Avatar { get; set; }
+    public bool Verified { get; set; }
+    public string SubscribersText { get; set; } = "";
+    public long SubscribersNum { get; set; }
+    public string VideoCountText { get; set; } = "";
+    public long VideoCountNum { get; set; }
+    public string TotalViewsText { get; set; } = "";
+    public long TotalViewsNum { get; set; }
+    public string JoinedDate { get; set; } = "";
+    public DateTime? JoinedUtc { get; set; }
+    public string Country { get; set; } = "";
+    public string Description { get; set; } = "";
+    public List<string> ChannelKeywords { get; } = [];
+    public List<ChannelVideoPoint> RecentVideos { get; } = [];
+    public long AvgViews { get; set; }
+    public long MedianViews { get; set; }
+    public long MinViews { get; set; }
+    public long PeakViews { get; set; }
+    public string PeakTitle { get; set; } = "";
+    public double AvgDurationSec { get; set; }
+    public double UploadsPerWeek { get; set; }
+    public long EstMonthlyViews { get; set; }
+    public double ConsistencyScore { get; set; } // 0..100 (low variance = high consistency)
+    public int LocalUniqueVideos { get; set; }
+    public int LocalSessions { get; set; }
+    public double LocalWatchedSec { get; set; }
+    public string? LocalFavVideoTitle { get; set; }
+    public double LocalFavVideoSec { get; set; }
 }

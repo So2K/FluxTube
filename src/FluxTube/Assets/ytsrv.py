@@ -61,6 +61,8 @@ def ydl_for(cookies, proxy, fmt, mark, fast):
         "format": fmt,
         "mark_watched": mark,
         "cachedir": CACHE,
+        "socket_timeout": 8,
+        "retries": 2,
         # Fast path skips HLS for low-latency VOD; full fallback keeps HLS enabled for LIVE streams & HLS-only videos!
         "extractor_args": {"youtube": {"skip": ["hls", "translated_subs"] if fast else ["translated_subs"], "player_skip": FAST_SKIP if fast else []}},
     }
@@ -120,6 +122,7 @@ def work():
                 "video": v.get("url"), "audio": a.get("url") if a else None,
                 "headers": v.get("http_headers") or info.get("http_headers") or {},
                 "title": info.get("title"), "duration": info.get("duration"),
+                "is_live": bool(info.get("is_live") or info.get("live_status") == "is_live"),
                 "height": v.get("height"),
                 "video_avail": v.get("available_at") or 0, "audio_avail": (a.get("available_at") or 0) if a else 0,
                 "ms": int((time.time() - t0) * 1000),

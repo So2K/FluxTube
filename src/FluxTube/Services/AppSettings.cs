@@ -87,6 +87,12 @@ public sealed class AppSettings
     public bool ShortsInfoOverlay { get; set; } = false;
     /// <summary>Theater mode on WatchPage (hides the right-side recommendations column), persisted across videos and restarts.</summary>
     public bool TheaterMode { get; set; } = false;
+    /// <summary>Video player OSC style ("flux" = FluxTube floating glass dock matching app style, "youtube" = classic YouTube edge bar), persisted across restarts.</summary>
+    public string PlayerStyle { get; set; } = "flux";
+    /// <summary>Apple iOS ProMotion-style smooth video motion (GPU temporal frame interpolation + VSync display-resample + Retina scaling).</summary>
+    public bool AppleSmoothMotion { get; set; } = false;
+    /// <summary>Enables the detailed Video &amp; Channel Analytics studio button with animated charts on WatchPage and ChannelPage.</summary>
+    public bool AnalyticsEnabled { get; set; } = true;
     /// <summary>Seasonal overlay effect that can be applied on top of ANY theme: "none", "newyear" (snowflakes), or "halloween" (pumpkins).</summary>
     public string SeasonalEffect { get; set; } = "none";
     /// <summary>Subtle PS1/PS2-style UI sound effects (Silent Hill / Metal Gear Solid inspired) on clicks, toggles, and sliders.</summary>
@@ -153,6 +159,10 @@ public sealed class AppSettings
     public bool AutoSuspendVideoWhenHidden { get; set; } = false;
     /// <summary>Live audio visualizer style ("bars_wave", "cyber", "bars", "orbit", "matrix", "pulse", "ribbon", "off").</summary>
     public string VisualizerStyle { get; set; } = "bars_wave";
+    /// <summary>Disable the 0.82 soft-knee auto-limiter ceiling on the frequency visualizer so peaks can shoot as high as boosted.</summary>
+    public bool VisualizerUncapped { get; set; } = false;
+    /// <summary>Frequency visualizer sensitivity / height multiplier (0.6..3.0, default 1.0).</summary>
+    public float VisualizerBoost { get; set; } = 1.0f;
     /// <summary>Backdrop &amp; frosted glass style ("off", "soft", "matte", "mesh", "kawaii", "neon").</summary>
     public string FrostedGlass { get; set; } = "matte";
     /// <summary>Hardware Direct2D GPU stencil glass &amp; stylization shader ("acrylic", "liquid", "toon", "poster", "sketch", "off").</summary>
@@ -181,6 +191,8 @@ public sealed class AppSettings
     public string UiFont { get; set; } = "segoe";
     /// <summary>When switching to a signature theme (Ultra Kawaii, Ultra Neon, RE Requiem, etc.), automatically apply its matching backdrop, pattern, corners, card style &amp; font.</summary>
     public bool ThemeAutoStyle { get; set; } = true;
+    /// <summary>Real-time theme adaptation to live video frame (or thumbnail in audio-only mode): "all" = all themes adapt harmoniously, "adaptive" = only Adaptive theme, "thumb" = thumbnail-only.</summary>
+    public string VideoThemeAdapt { get; set; } = "all";
     /// <summary>Application UI language ("ru" or "en"). Separate from YouTube content language (Hl).</summary>
     public string UiLanguage { get; set; } = "ru";
     /// <summary>Hardware-accelerated GPU DirectionalBlur motion blur on UI scrolling, transitions, and Shorts swipes.</summary>

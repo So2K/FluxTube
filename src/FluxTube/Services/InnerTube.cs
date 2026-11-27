@@ -209,6 +209,27 @@ public sealed class InnerTube
         catch (Exception e) { Paths.Log("warm: " + e.Message); }
     }
 
+    /// <summary>Authenticated fallback to fetch a video's storyboard spec when anonymous VisionOS/Quest clients hit LOGIN_REQUIRED.</summary>
+    public async Task<string?> StoryboardSpecAsync(string videoId, CancellationToken ct = default)
+    {
+        try
+        {
+            var d = await PostAsync("player", new JsonObject
+            {
+                ["videoId"] = videoId,
+                ["contentCheckOk"] = true,
+                ["racyCheckOk"] = true,
+            }, $"{Origin}/watch?v={videoId}", ct);
+            return d.S("storyboards", "playerStoryboardSpecRenderer", "spec")
+                ?? d.S("storyboards", "playerLiveStoryboardSpecRenderer", "spec");
+        }
+        catch (Exception e)
+        {
+            Paths.Log($"innertube storyboard {videoId}: {e.Message}");
+            return null;
+        }
+    }
+
     // ---------------- feeds ----------------
 
     public async Task<FeedPage> HomeAsync(CancellationToken ct = default)
@@ -306,6 +327,346 @@ public sealed class InnerTube
             $"{Origin}/channel/{channelId}/videos", ct));
 
     /// <summary>A channel page: header plus the home shelves (params null) or one tab's grid (params from Tabs).</summary>
+    /// <summary>
+    /// Fetches deep professional video analytics directly from YouTube player + next endpoints:
+    /// exact views, publish UTC date, category, monetization signals (adPlacements), full adaptiveFormats capabilities
+    /// (max res/FPS/HDR/AV1/VP9/H.264/audio tracks/captions), SEO tags, comments count, chapters, and 100-point Most Replayed heatmap!
+    /// </summary>
+    public async Task<VideoAnalyticsData> VideoAnalyticsAsync(string videoId, CancellationToken ct = default)
+    {
+        var res = new VideoAnalyticsData { VideoId = videoId };
+        try
+        {
+            var playerTask = PostAsync("player", new JsonObject
+            {
+                ["videoId"] = videoId,
+                ["contentCheckOk"] = true,
+                ["racyCheckOk"] = true,
+            }, $"{Origin}/watch?v={videoId}", ct);
+            var nextTask = PostAsync("next", new JsonObject
+            {
+                ["videoId"] = videoId,
+                ["contentCheckOk"] = true,
+                ["racyCheckOk"] = true,
+            }, $"{Origin}/watch?v={videoId}", ct);
+            await Task.WhenAll(playerTask, nextTask);
+            var d = await playerTask;
+            var nd = await nextTask;
+
+            var vd = d.P("videoDetails");
+            var mf = d.P("microformat", "playerMicroformatRenderer");
+            res.Title = vd.S("title") ?? mf.P("title").Text() ?? "";
+            res.Channel = vd.S("author") ?? mf.S("ownerChannelName") ?? "";
+            res.ChannelId = vd.S("channelId") ?? mf.S("externalChannelId");
+            res.Description = vd.S("shortDescription") ?? mf.P("description").Text() ?? "";
+            if (long.TryParse(vd.S("viewCount") ?? mf.S("viewCount"), out var vc)) res.Views = vc;
+            if (double.TryParse(vd.S("lengthSeconds") ?? mf.S("lengthSeconds"), out var len)) res.DurationSec = len;
+            res.PublishDate = mf.S("publishDate") ?? mf.S("uploadDate") ?? "";
+            if (DateTime.TryParse(res.PublishDate, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal, out var pdt))
+                res.PublishedUtc = pdt;
+            res.Category = mf.S("category") ?? "";
+            res.IsLive = vd?["isLiveContent"]?.GetValue<bool>() ?? false;
+            res.IsFamilySafe = mf?["isFamilySafe"]?.GetValue<bool>() ?? true;
+            res.IsUnlisted = mf?["isUnlisted"]?.GetValue<bool>() ?? false;
+            if (d["adPlacements"] is JsonArray adp && adp.Count > 0 || d["playerAds"] is JsonArray pads && pads.Count > 0)
+                res.AdsDetected = true;
+            else
+                res.AdsDetected = false;
+
+            if (vd?["keywords"] is JsonArray kw)
+            {
+                foreach (var k in kw)
+                    if (k?.GetValue<string>() is { Length: > 0 } tag && res.Tags.Count < 30)
+                        res.Tags.Add(tag);
+            }
+
+            // Full technical format audit from streamingData.adaptiveFormats
+            if (d.P("streamingData", "adaptiveFormats") is JsonArray fmts)
+            {
+                var audioIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var f in fmts)
+                {
+                    var mime = f.S("mimeType") ?? "";
+                    int br = 0;
+                    try { br = (int)((f?["bitrate"]?.GetValue<long>() ?? 0) / 1000); } catch { }
+                    if (mime.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int h = 0, fps = 0;
+                        try { h = f?["height"]?.GetValue<int>() ?? 0; } catch { }
+                        try { fps = f?["fps"]?.GetValue<int>() ?? 0; } catch { }
+                        if (h > res.MaxHeight) res.MaxHeight = h;
+                        if (fps > res.MaxFps) res.MaxFps = fps;
+                        if (br > res.MaxVideoBitrateKbps) res.MaxVideoBitrateKbps = br;
+                        if (mime.Contains("av01", StringComparison.OrdinalIgnoreCase)) res.HasAv1 = true;
+                        else if (mime.Contains("vp9", StringComparison.OrdinalIgnoreCase) || mime.Contains("vp09", StringComparison.OrdinalIgnoreCase)) res.HasVp9 = true;
+                        else if (mime.Contains("avc1", StringComparison.OrdinalIgnoreCase)) res.HasH264 = true;
+                        if ((f.S("qualityLabel") ?? "").Contains("HDR", StringComparison.OrdinalIgnoreCase)
+                            || (f.S("colorInfo", "transferCharacteristics") ?? "").Contains("SMPTEST2084", StringComparison.OrdinalIgnoreCase))
+                            res.HasHdr = true;
+                    }
+                    else if (mime.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (br > res.MaxAudioBitrateKbps) res.MaxAudioBitrateKbps = br;
+                        var trackId = f.S("audioTrack", "id") ?? "default";
+                        audioIds.Add(trackId.Split('.')[0]);
+                    }
+                }
+                res.AudioTrackCount = Math.Max(1, audioIds.Count);
+            }
+            if (d.P("captions", "playerCaptionsTracklistRenderer", "captionTracks") is JsonArray caps)
+            {
+                foreach (var c in caps)
+                {
+                    var code = c.S("languageCode") ?? c.P("name").Text();
+                    if (!string.IsNullOrEmpty(code) && !res.CaptionLangs.Contains(code) && res.CaptionLangs.Count < 16)
+                        res.CaptionLangs.Add(code.ToUpperInvariant());
+                }
+            }
+
+            // From `next`: Paid promotion, chapters count, comments count, and 100-point Most Replayed Heatmap!
+            res.HasPaidPromotion = HasPaidPromotion(nd.P("playerOverlays")) || HasPaidPromotion(nd.P("contents", "twoColumnWatchNextResults", "results"));
+            if (J.FindFirst(nd, "multiMarkersPlayerBarRenderer").P("markersMap") is JsonArray maps)
+            {
+                foreach (var m in maps)
+                    if (m.P("value", "chapters") is JsonArray ch && ch.Count > res.ChaptersCount)
+                        res.ChaptersCount = ch.Count;
+            }
+            if (nd.P("engagementPanels") is JsonArray panels)
+            {
+                foreach (var p in panels)
+                {
+                    if (p.S("engagementPanelSectionListRenderer", "panelIdentifier")?.Contains("comment") == true)
+                    {
+                        var cc = p.P("engagementPanelSectionListRenderer", "header", "engagementPanelTitleHeaderRenderer", "contextualInfo").Text();
+                        res.CommentsCount = ParseCompactCount(cc);
+                    }
+                }
+            }
+
+            // Extract YouTube's official 100-point "Most Replayed" viewer retention heatmap!
+            J.Walk(nd, (key, o) =>
+            {
+                if (res.Heatmap.Count > 0) return false;
+                if (key == "markersList" && o.S("markerType") == "MARKER_TYPE_HEATMAP" && o["markers"] is JsonArray markers)
+                {
+                    foreach (var mk in markers)
+                    {
+                        double st = 0, dr = 0;
+                        float inten = 0;
+                        try
+                        {
+                            st = double.Parse(mk.S("startMillis") ?? "0", System.Globalization.CultureInfo.InvariantCulture) / 1000.0;
+                            dr = double.Parse(mk.S("durationMillis") ?? "0", System.Globalization.CultureInfo.InvariantCulture) / 1000.0;
+                            inten = (float)(mk?["intensityScoreNormalized"]?.GetValue<double>() ?? 0);
+                        }
+                        catch { }
+                        res.Heatmap.Add(new HeatmapPoint(st, dr, Math.Clamp(inten, 0f, 1f)));
+                    }
+                    return false;
+                }
+                if (key == "heatMarkerRenderer")
+                {
+                    double st = 0, dr = 0;
+                    float inten = 0;
+                    try
+                    {
+                        st = (o["timeRangeStartMillis"]?.GetValue<double>() ?? 0) / 1000.0;
+                        dr = (o["markerDurationMillis"]?.GetValue<double>() ?? 0) / 1000.0;
+                        inten = (float)(o["heatMarkerIntensityScoreNormalized"]?.GetValue<double>() ?? 0);
+                    }
+                    catch { }
+                    res.Heatmap.Add(new HeatmapPoint(st, dr, Math.Clamp(inten, 0f, 1f)));
+                }
+                return true;
+            });
+        }
+        catch (Exception e) { Paths.Log($"video analytics {videoId}: {e.Message}"); }
+        return res;
+    }
+
+    /// <summary>Parses relative YouTube dates ("2 дня назад", "3 weeks ago", "1 мес. назад") into approximate age in days for cadence estimates.</summary>
+    public static double ParseRelativeAgeDays(string? when)
+    {
+        if (string.IsNullOrWhiteSpace(when)) return -1;
+        var s = when.ToLowerInvariant().Trim();
+        var m = System.Text.RegularExpressions.Regex.Match(s, @"(\d+)");
+        double n = m.Success && double.TryParse(m.Groups[1].Value, out var v) ? v : 1;
+        if (s.Contains("сек") || s.Contains("sec") || s.Contains("мин") || s.Contains("min")) return 0.02;
+        if (s.Contains("час") || s.Contains("hour") || s.Contains("ч.")) return n / 24.0;
+        if (s.Contains("дн") || s.Contains("ден") || s.Contains("day") || s.Contains("д.")) return n;
+        if (s.Contains("нед") || s.Contains("week")) return n * 7.0;
+        if (s.Contains("мес") || s.Contains("month")) return n * 30.0;
+        if (s.Contains("год") || s.Contains("лет") || s.Contains("year")) return n * 365.0;
+        return -1;
+    }
+
+    private static double ParseDurationText(string? dur)
+    {
+        if (string.IsNullOrWhiteSpace(dur) || !dur.Contains(':')) return 0;
+        var p = dur.Split(':');
+        double total = 0;
+        foreach (var part in p)
+        {
+            if (!int.TryParse(part.Trim(), out var v)) return 0;
+            total = total * 60 + v;
+        }
+        return total;
+    }
+
+    /// <summary>Parses compact RU/EN YouTube counts ("125 тыс.", "1,4 млн", "84.2K", "3,210,455 просмотров") into a raw number.</summary>
+    public static long ParseCompactCount(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return 0;
+        var s = text.ToLowerInvariant().Replace('\u00A0', ' ').Trim();
+        double mult = 1;
+        if (s.Contains("млрд") || s.Contains("billion") || System.Text.RegularExpressions.Regex.IsMatch(s, @"\d\s*b\b")) mult = 1_000_000_000;
+        else if (s.Contains("млн") || s.Contains("million") || System.Text.RegularExpressions.Regex.IsMatch(s, @"\d\s*m\b")) mult = 1_000_000;
+        else if (s.Contains("тыс") || s.Contains("thousand") || System.Text.RegularExpressions.Regex.IsMatch(s, @"\d\s*k\b")) mult = 1_000;
+        if (mult == 1)
+        {
+            var digits = new string(s.Where(char.IsAsciiDigit).ToArray());
+            return long.TryParse(digits, out var exact) ? exact : 0;
+        }
+        var m = System.Text.RegularExpressions.Regex.Match(s, @"(\d+(?:[.,]\d+)?)");
+        if (!m.Success) return 0;
+        var numStr = m.Groups[1].Value.Replace(',', '.');
+        return double.TryParse(numStr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v)
+            ? (long)Math.Round(v * mult) : 0;
+    }
+
+    /// <summary>Fetches deep channel analytics: aboutChannel stats (total views, join date, country, hidden channel keywords) + latest 24 videos performance, stability, and upload cadence.</summary>
+    public async Task<ChannelAnalyticsData> ChannelAnalyticsAsync(string channelId, CancellationToken ct = default)
+    {
+        var res = new ChannelAnalyticsData { ChannelId = channelId };
+        try
+        {
+            var aboutTask = PostAsync("browse", new JsonObject { ["browseId"] = channelId, ["params"] = "EgVhYm91dPIGBAoCEgA%3D" }, $"{Origin}/channel/{channelId}/about", ct);
+            var vidsTask = ChannelVideosAsync(channelId, ct);
+            await Task.WhenAll(aboutTask, vidsTask);
+            var d = await aboutTask;
+            var vids = await vidsTask;
+
+            var h = d.P("header", "pageHeaderRenderer", "content", "pageHeaderViewModel");
+            if (h != null)
+            {
+                res.Title = h.S("title", "dynamicTextViewModel", "text", "content") ?? d.S("header", "pageHeaderRenderer", "pageTitle") ?? "";
+                res.Verified = h.P("title", "dynamicTextViewModel", "text", "attachmentRuns") != null;
+                res.Avatar = LastSource(h.P("image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image", "sources"));
+            }
+            if (d.S("metadata", "channelMetadataRenderer", "keywords") is { Length: > 0 } chKw)
+            {
+                foreach (System.Text.RegularExpressions.Match km in System.Text.RegularExpressions.Regex.Matches(chKw, "\"([^\"]+)\"|(\\S+)"))
+                {
+                    var kwVal = (km.Groups[1].Success ? km.Groups[1].Value : km.Groups[2].Value).Trim();
+                    if (kwVal.Length > 1 && res.ChannelKeywords.Count < 16) res.ChannelKeywords.Add(kwVal);
+                }
+            }
+            J.Walk(d, (key, o) =>
+            {
+                if (key == "aboutChannelViewModel")
+                {
+                    if (o.S("viewCountText") is { Length: > 0 } vt) { res.TotalViewsText = vt; res.TotalViewsNum = ParseCompactCount(vt); }
+                    if (o.S("subscriberCountText") is { Length: > 0 } st) { res.SubscribersText = st; res.SubscribersNum = ParseCompactCount(st); }
+                    if (o.S("videoCountText") is { Length: > 0 } vct) { res.VideoCountText = vct; res.VideoCountNum = ParseCompactCount(vct); }
+                    if (o.P("joinedDateText").Text() is { Length: > 0 } jt) res.JoinedDate = jt;
+                    if (o.S("country") is { Length: > 0 } cnt) res.Country = cnt;
+                    if (o.S("description") is { Length: > 0 } desc) res.Description = desc;
+                    if (o.S("canonicalChannelUrl") is { Length: > 0 } cu && cu.Contains("/@")) res.Handle = "@" + cu.Split("/@")[^1];
+                    return false;
+                }
+                if (key == "channelAboutFullMetadataRenderer")
+                {
+                    if (o.P("viewCountText").Text() is { Length: > 0 } vt) { res.TotalViewsText = vt; res.TotalViewsNum = ParseCompactCount(vt); }
+                    if (o.P("joinedDateText").Text() is { Length: > 0 } jt) res.JoinedDate = jt;
+                    if (o.P("country").Text() is { Length: > 0 } cnt) res.Country = cnt;
+                    if (o.P("description").Text() is { Length: > 0 } desc) res.Description = desc;
+                    return false;
+                }
+                return true;
+            });
+
+            if (res.TotalViewsNum == 0 && string.IsNullOrEmpty(res.JoinedDate))
+            {
+                string? aboutTok = null;
+                J.Walk(d.P("header"), (_, o) =>
+                {
+                    if (aboutTok != null) return false;
+                    if (o.S("showEngagementPanelEndpoint", "engagementPanel", "engagementPanelSectionListRenderer", "content", "sectionListRenderer", "contents", 0, "itemSectionRenderer", "contents", 0, "continuationItemRenderer", "continuationEndpoint", "continuationCommand", "token") is { Length: > 0 } tk)
+                    { aboutTok = tk; return false; }
+                    if (o.S("continuationCommand", "token") is { Length: > 0 } tk2 && o.ToJsonString().Contains("about", StringComparison.OrdinalIgnoreCase))
+                    { aboutTok = tk2; return false; }
+                    return true;
+                });
+                if (aboutTok != null)
+                {
+                    try
+                    {
+                        var ad = await PostAsync("browse", new JsonObject { ["continuation"] = aboutTok }, $"{Origin}/channel/{channelId}", ct);
+                        J.Walk(ad, (key, o) =>
+                        {
+                            if (key == "aboutChannelViewModel")
+                            {
+                                if (o.S("viewCountText") is { Length: > 0 } vt) { res.TotalViewsText = vt; res.TotalViewsNum = ParseCompactCount(vt); }
+                                if (o.S("subscriberCountText") is { Length: > 0 } st) { res.SubscribersText = st; res.SubscribersNum = ParseCompactCount(st); }
+                                if (o.S("videoCountText") is { Length: > 0 } vct) { res.VideoCountText = vct; res.VideoCountNum = ParseCompactCount(vct); }
+                                if (o.P("joinedDateText").Text() is { Length: > 0 } jt) res.JoinedDate = jt;
+                                if (o.S("country") is { Length: > 0 } cnt) res.Country = cnt;
+                                return false;
+                            }
+                            return true;
+                        });
+                    }
+                    catch { }
+                }
+            }
+
+            // Build recent 24 videos statistical breakdown
+            var viewList = new List<long>();
+            var durList = new List<double>();
+            var ageList = new List<double>();
+            res.MinViews = long.MaxValue;
+            foreach (var v in vids.Items.Take(24))
+            {
+                var parts = v.Meta.Split('·', StringSplitOptions.TrimEntries);
+                long vCount = parts.Length > 0 ? ParseCompactCount(parts[0]) : 0;
+                string when = parts.Length > 1 ? parts[1] : "";
+                double ageDays = ParseRelativeAgeDays(when);
+                res.RecentVideos.Add(new ChannelVideoPoint(v.VideoId, v.Title, vCount, when, v.Duration, ageDays));
+                if (vCount > 0)
+                {
+                    viewList.Add(vCount);
+                    if (vCount > res.PeakViews) { res.PeakViews = vCount; res.PeakTitle = v.Title; }
+                    if (vCount < res.MinViews) res.MinViews = vCount;
+                }
+                double ds = ParseDurationText(v.Duration);
+                if (ds > 0) durList.Add(ds);
+                if (ageDays >= 0) ageList.Add(ageDays);
+            }
+            if (res.MinViews == long.MaxValue) res.MinViews = 0;
+            if (viewList.Count > 0)
+            {
+                double mean = viewList.Average();
+                res.AvgViews = (long)Math.Round(mean);
+                var sorted = viewList.OrderBy(x => x).ToList();
+                res.MedianViews = sorted[sorted.Count / 2];
+                // Consistency score (100 = super steady views, lower = viral spikes / erratic)
+                double variance = viewList.Average(x => Math.Pow(x - mean, 2));
+                double cv = mean > 0 ? Math.Sqrt(variance) / mean : 1.0;
+                res.ConsistencyScore = Math.Clamp(100.0 - cv * 55.0, 12.0, 99.0);
+            }
+            if (durList.Count > 0) res.AvgDurationSec = durList.Average();
+            if (ageList.Count >= 2)
+            {
+                double spanDays = Math.Max(1.0, ageList.Max() - ageList.Min());
+                res.UploadsPerWeek = Math.Round((ageList.Count - 1) / spanDays * 7.0, 1);
+                if (res.AvgViews > 0 && res.UploadsPerWeek > 0)
+                    res.EstMonthlyViews = (long)Math.Round(res.AvgViews * (res.UploadsPerWeek * 4.33));
+            }
+        }
+        catch (Exception e) { Paths.Log($"channel analytics {channelId}: {e.Message}"); }
+        return res;
+    }
+
     public async Task<ChannelInfo> ChannelAsync(string channelId, string? tabParams = null, CancellationToken ct = default)
     {
         var body = new JsonObject { ["browseId"] = channelId };
@@ -446,10 +807,27 @@ public sealed class InnerTube
                 if (vm?.S("commentKey") is not { } key || !entities.TryGetValue(key, out var ent)) continue;
                 string? repliesToken = null;
                 J.Walk(thread.P("replies"), (_, x) => { repliesToken ??= x.S("continuationCommand", "token"); return repliesToken == null; });
+                string? deleteAction = null;
+                J.Walk(thread ?? it, (_, x) =>
+                {
+                    if (deleteAction != null) return false;
+                    if (x.S("icon", "iconType") == "DELETE")
+                    {
+                        J.Walk(x, (_, y) =>
+                        {
+                            if (deleteAction != null) return false;
+                            if (y.S("performCommentActionEndpoint", "action") is { Length: > 0 } act) { deleteAction = act; return false; }
+                            return true;
+                        });
+                    }
+                    return deleteAction == null;
+                });
                 page.Items.Add(new Comment
                 {
                     RepliesToken = repliesToken,
                     IsReply = thread == null,
+                    DeleteAction = deleteAction,
+                    IsOwn = deleteAction != null,
 
                     Author = ent.S("author", "displayName") ?? "",
                     Avatar = ent.S("author", "avatarThumbnailUrl"),
@@ -465,29 +843,62 @@ public sealed class InnerTube
         return page;
     }
 
-    /// <summary>Posts a top-level comment on a video or Short using the signed-in YouTube account.</summary>
-    public async Task<(bool Ok, string? Error)> CreateCommentAsync(string createCommentParams, string text, string videoId, CancellationToken ct = default)
+    /// <summary>Posts a top-level comment on a video or Short using the signed-in YouTube account. Returns optional deleteAction token.</summary>
+    public async Task<(bool Ok, string? Error, string? DeleteAction)> CreateCommentAsync(string createCommentParams, string text, string videoId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(createCommentParams)) return (false, "Нет токена для комментария");
-        if (string.IsNullOrWhiteSpace(text)) return (false, "Пустой комментарий");
+        if (string.IsNullOrWhiteSpace(createCommentParams)) return (false, "Нет токена для комментария", null);
+        if (string.IsNullOrWhiteSpace(text)) return (false, "Пустой комментарий", null);
         var body = new JsonObject
         {
             ["createCommentParams"] = createCommentParams,
             ["commentText"] = text.Trim(),
         };
         var d = await PostAsync("comment/create_comment", body, $"{Origin}/watch?v={videoId}", ct);
-        if (d["error"] != null) return (false, d.S("error", "message") ?? "YouTube отклонил комментарий");
+        if (d["error"] != null) return (false, d.S("error", "message") ?? "YouTube отклонил комментарий", null);
+        string? delAction = null;
+        J.Walk(d, (_, x) =>
+        {
+            if (delAction != null) return false;
+            if (x.S("icon", "iconType") == "DELETE")
+            {
+                J.Walk(x, (_, y) =>
+                {
+                    if (delAction != null) return false;
+                    if (y.S("performCommentActionEndpoint", "action") is { Length: > 0 } act) { delAction = act; return false; }
+                    return true;
+                });
+            }
+            return delAction == null;
+        });
         if (d.P("actionResults") is JsonArray results)
         {
             foreach (var r in results)
             {
                 var st = r.S("status");
-                if (st == "STATUS_SUCCEEDED") return (true, null);
+                if (st == "STATUS_SUCCEEDED") return (true, null, delAction);
                 if (st != null && st != "STATUS_SUCCEEDED")
-                    return (false, r.S("feedbackText") ?? "YouTube не принял комментарий");
+                    return (false, r.S("feedbackText") ?? "YouTube не принял комментарий", null);
             }
         }
-        return (true, null);
+        return (true, null, delAction);
+    }
+
+    /// <summary>Deletes one of the signed-in user's own comments via InnerTube comment/perform_comment_action.</summary>
+    public async Task<bool> DeleteCommentAsync(string deleteAction, string videoId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(deleteAction)) return false;
+        var body = new JsonObject { ["actions"] = new JsonArray(deleteAction) };
+        var d = await PostAsync("comment/perform_comment_action", body, $"{Origin}/watch?v={videoId}", ct);
+        if (d["error"] != null) return false;
+        if (d.P("actionResults") is JsonArray results)
+        {
+            foreach (var r in results)
+            {
+                var st = r.S("status");
+                if (st != null && st != "STATUS_SUCCEEDED") return false;
+            }
+        }
+        return true;
     }
 
     /// <summary>The signed-in account: name, handle, photo, own channel. Null when not signed in.</summary>
@@ -548,7 +959,11 @@ public sealed class InnerTube
 
     public async Task<bool> SubscribeAsync(string channelId, bool subscribe, CancellationToken ct = default)
     {
-        var body = new JsonObject { ["channelIds"] = new JsonArray(channelId) };
+        var body = new JsonObject
+        {
+            ["channelIds"] = new JsonArray(channelId),
+            ["params"] = "EgIIAhgA",
+        };
         var d = await PostAsync(subscribe ? "subscription/subscribe" : "subscription/unsubscribe", body, $"{Origin}/channel/{channelId}", ct);
         return d["error"] == null;
     }
@@ -720,6 +1135,246 @@ public sealed class InnerTube
         return t;
     }
 
+    /// <summary>Polls YouTube's live_chat/get_live_chat endpoint for all message types, real Unicode/custom emojis, view selector, pinned banners, deletions, and full restriction details.</summary>
+    public async Task<LiveChatPollResult> LiveChatAsync(string continuation, CancellationToken ct = default)
+    {
+        var msgs = new List<LiveChatMessage>();
+        var deleted = new List<string>();
+        LiveChatMessage? pinned = null;
+        var data = await PostAsync("live_chat/get_live_chat", new JsonObject { ["continuation"] = continuation }, $"{Origin}/live_chat", ct);
+        var lc = data.P("continuationContents", "liveChatContinuation");
+        if (lc == null) return new LiveChatPollResult(msgs, deleted, null, null, 4000, null, null, null, null, 200, null);
+
+        static string ExtractRunsText(JsonNode? node, List<string>? emojiUrls = null)
+        {
+            if (node == null) return "";
+            if (node["runs"] is JsonArray runs)
+            {
+                var sb = new StringBuilder();
+                foreach (var run in runs)
+                {
+                    if (run.S("text") is { } txt) sb.Append(txt);
+                    else if (run.P("emoji") is { } em)
+                    {
+                        bool isCustom = em["isCustomEmoji"]?.GetValue<bool>() ?? false;
+                        var eid = em.S("emojiId") ?? "";
+                        if (!isCustom && eid.Length > 0 && !eid.Contains('/') && eid.Length <= 12)
+                        {
+                            // Real Unicode emoji (😂, ❤️, 😎, 🔥, etc.) — never ugly :shortcode: text!
+                            sb.Append(eid);
+                        }
+                        else if (LastThumb(em.P("image", "thumbnails")) is { } eurl)
+                        {
+                            // Custom YouTube / channel emote -> collect actual PNG URL for crisp inline rendering!
+                            if (emojiUrls != null && emojiUrls.Count < 8) emojiUrls.Add(eurl);
+                        }
+                    }
+                }
+                return sb.ToString().Trim();
+            }
+            return (node.Text() ?? "").Trim();
+        }
+
+        static LiveChatMessage? ParseChatRenderer(JsonNode? item)
+        {
+            if (item == null) return null;
+            if (item.P("liveChatModeChangeMessageRenderer") is { } mc)
+            {
+                var t = ExtractRunsText(mc["text"]);
+                var sub = ExtractRunsText(mc["subtext"]);
+                var full = string.IsNullOrEmpty(sub) ? t : (string.IsNullOrEmpty(t) ? sub : $"{t} · {sub}");
+                if (string.IsNullOrEmpty(full)) return null;
+                return new LiveChatMessage(mc.S("id") ?? ("sys:" + full.GetHashCode()), "", null, full, false, false, false, false, true, null, null, 0);
+            }
+            if (item.P("liveChatViewerEngagementMessageRenderer") is { } ve)
+            {
+                var t = ExtractRunsText(ve["message"]);
+                if (string.IsNullOrEmpty(t)) return null;
+                return new LiveChatMessage(ve.S("id") ?? ("eng:" + t.GetHashCode()), "", null, t, false, false, false, false, true, null, null, 0);
+            }
+            if (item.P("liveChatMembershipItemRenderer") is { } mem)
+            {
+                var author = mem.P("authorName").Text() ?? "";
+                if (string.IsNullOrEmpty(author)) return null;
+                var hdr = ExtractRunsText(mem["headerPrimaryText"]);
+                var sub = ExtractRunsText(mem["headerSubtext"]);
+                var body = ExtractRunsText(mem["message"]);
+                var txt = string.Join(" · ", new[] { hdr, sub, body }.Where(s => !string.IsNullOrEmpty(s)));
+                if (string.IsNullOrEmpty(txt)) txt = "Новый спонсор канала";
+                return new LiveChatMessage(mem.S("id") ?? "", author, LastThumb(mem.P("authorPhoto", "thumbnails")), txt, false, false, true, false, false, "SPONSOR", "★ Спонсор", 0xFF10B981u);
+            }
+            if (item.P("liveChatSponsorshipsGiftPurchaseAnnouncementRenderer", "header", "liveChatSponsorshipsHeaderRenderer") is { } gift)
+            {
+                var author = gift.P("authorName").Text() ?? "";
+                var txt = ExtractRunsText(gift["primaryText"]);
+                if (string.IsNullOrEmpty(author) || string.IsNullOrEmpty(txt)) return null;
+                return new LiveChatMessage(item.S("liveChatSponsorshipsGiftPurchaseAnnouncementRenderer", "id") ?? "", author, LastThumb(gift.P("authorPhoto", "thumbnails")), txt, false, false, true, false, false, "GIFT", "🎁 Подарок", 0xFF10B981u);
+            }
+            if (item.P("liveChatPaidStickerRenderer") is { } st)
+            {
+                var author = st.P("authorName").Text() ?? "";
+                var amount = st.P("purchaseAmountText").Text() ?? "";
+                if (string.IsNullOrEmpty(author)) return null;
+                var lbl = st.S("sticker", "accessibility", "accessibilityData", "label") ?? "Super Sticker";
+                uint acc = 0xFFE6A82Eu;
+                try { var bg = st["backgroundColor"]?.GetValue<long>() ?? 0; if (bg != 0) acc = (uint)bg | 0xFF000000u; } catch { }
+                var stickerUrl = LastThumb(st.P("sticker", "thumbnails"));
+                return new LiveChatMessage(st.S("id") ?? "", author, LastThumb(st.P("authorPhoto", "thumbnails")), lbl, false, false, false, false, false, null, amount, acc,
+                    stickerUrl != null ? [stickerUrl] : null);
+            }
+            var r = item.P("liveChatTextMessageRenderer") ?? item.P("liveChatPaidMessageRenderer");
+            if (r == null) return null;
+            var id = r.S("id") ?? "";
+            var name = r.P("authorName").Text() ?? "";
+            if (string.IsNullOrEmpty(name)) return null;
+            var avatar = LastThumb(r.P("authorPhoto", "thumbnails"));
+            var emojiUrls = new List<string>();
+            var text = ExtractRunsText(r["message"], emojiUrls);
+            var paid = r.P("purchaseAmountText").Text();
+            if (string.IsNullOrEmpty(text) && emojiUrls.Count == 0 && string.IsNullOrEmpty(paid)) return null;
+
+            bool isOwner = false, isMod = false, isMember = false, isVerified = false;
+            string? badgeText = null;
+            if (r["authorBadges"] is JsonArray badges)
+            {
+                foreach (var b in badges)
+                {
+                    var br = b.P("liveChatAuthorBadgeRenderer");
+                    if (br == null) continue;
+                    var iconType = br.S("icon", "iconType") ?? "";
+                    if (iconType == "OWNER") isOwner = true;
+                    else if (iconType == "MODERATOR") isMod = true;
+                    else if (iconType == "VERIFIED" || iconType == "CHECK_CIRCLE_THICK") isVerified = true;
+                    else if (br["customThumbnail"] != null) isMember = true;
+                    var tt = br.S("tooltip") ?? "";
+                    if (badgeText == null && tt.StartsWith("#")) badgeText = tt.Split(' ')[0];
+                }
+            }
+            uint accent = 0;
+            if (!string.IsNullOrEmpty(paid))
+            {
+                try { var bg = r["bodyBackgroundColor"]?.GetValue<long>() ?? 0; if (bg != 0) accent = (uint)bg | 0xFF000000u; } catch { }
+                if (accent == 0) accent = 0xFFE6A82Eu;
+            }
+            return new LiveChatMessage(id, name, avatar, text, isOwner, isMod, isMember, isVerified, false, badgeText, paid, accent,
+                emojiUrls.Count > 0 ? emojiUrls : null);
+        }
+
+        string? sendParams = null;
+        string? placeholder = null;
+        string? restricted = null;
+        string? restrictedDetail = null;
+        int maxChars = 200;
+
+        static void ReadActionPanel(JsonNode? ap, ref string? sendParams, ref string? placeholder, ref string? restricted, ref string? restrictedDetail, ref int maxChars)
+        {
+            if (ap == null) return;
+            if (ap.P("liveChatRestrictedParticipationRenderer") is { } rest)
+            {
+                var m1 = ExtractRunsText(rest["message"]);
+                var m2 = ExtractRunsText(rest["subtext"]);
+                var clickToast = rest.P("onClickCommand", "liveChatAddToToastAction", "item", "notificationActionRenderer", "responseText").Text();
+                restricted = !string.IsNullOrEmpty(m1) ? m1 : (!string.IsNullOrEmpty(m2) ? m2 : "Отправка сообщений в этот чат ограничена");
+                if (!string.IsNullOrEmpty(m2) && m2 != restricted) restrictedDetail = m2;
+                else if (!string.IsNullOrEmpty(clickToast) && clickToast != restricted) restrictedDetail = clickToast;
+            }
+            if (ap.P("liveChatMessageInputRenderer") is { } inp)
+            {
+                var field = inp.P("inputField", "liveChatTextInputFieldRenderer");
+                var ph = ExtractRunsText(field?["placeholder"]);
+                if (!string.IsNullOrEmpty(ph)) placeholder = ph;
+                try { var mc = field?["maxCharacterLimit"]?.GetValue<int>() ?? 0; if (mc > 0) maxChars = mc; } catch { }
+            }
+            string? foundSp = null;
+            J.Walk(ap, (_, x) =>
+            {
+                if (foundSp != null) return false;
+                if (x.S("sendLiveChatMessageEndpoint", "params") is { Length: > 0 } sp) { foundSp = sp; return false; }
+                return true;
+            });
+            if (foundSp != null) { sendParams = foundSp; restricted = null; restrictedDetail = null; }
+        }
+
+        if (lc["actions"] is JsonArray actions)
+        {
+            foreach (var act in actions)
+            {
+                if (act.P("addChatItemAction", "item") is { } item)
+                {
+                    if (ParseChatRenderer(item) is { } msg) msgs.Add(msg);
+                }
+                else if (act.S("markChatItemAsDeletedAction", "targetItemId") is { Length: > 0 } delId)
+                {
+                    deleted.Add(delId);
+                }
+                else if (act.P("addBannerToLiveChatCommand", "bannerRenderer", "liveChatBannerRenderer", "contents") is { } ban)
+                {
+                    pinned = ParseChatRenderer(ban);
+                }
+                else if (act.P("replaceLiveChatRendererAction", "replacement") is { } rep)
+                {
+                    ReadActionPanel(rep, ref sendParams, ref placeholder, ref restricted, ref restrictedDetail, ref maxChars);
+                }
+            }
+        }
+
+        string? next = null;
+        int timeoutMs = 3000;
+        if (lc["continuations"] is JsonArray conts)
+        {
+            foreach (var c in conts)
+            {
+                var node = c.P("invalidationContinuationData") ?? c.P("timedContinuationData") ?? c.P("reloadContinuationData");
+                if (node == null) continue;
+                next = node.S("continuation");
+                try { var tm = node["timeoutMs"]?.GetValue<int>() ?? 0; if (tm > 0) timeoutMs = tm; } catch { }
+                if (!string.IsNullOrEmpty(next)) break;
+            }
+        }
+
+        List<LiveChatViewOption>? views = null;
+        if (lc.P("header", "liveChatHeaderRenderer", "viewSelector", "sortFilterSubMenuRenderer", "subMenuItems") is JsonArray vm)
+        {
+            views = [];
+            foreach (var it in vm)
+            {
+                var title = it.S("title");
+                var tok = it.S("continuation", "reloadContinuationData", "continuation");
+                bool sel = it["selected"]?.GetValue<bool>() ?? false;
+                if (!string.IsNullOrEmpty(title) && !string.IsNullOrEmpty(tok))
+                    views.Add(new LiveChatViewOption(title, tok, sel));
+            }
+            if (views.Count == 0) views = null;
+        }
+
+        ReadActionPanel(lc["actionPanel"], ref sendParams, ref placeholder, ref restricted, ref restrictedDetail, ref maxChars);
+        return new LiveChatPollResult(msgs, deleted, pinned, next, Math.Clamp(timeoutMs, 1500, 6000), sendParams, placeholder, restricted, restrictedDetail, maxChars, views);
+    }
+
+    /// <summary>Sends a live chat message on an active YouTube LIVE broadcast using the signed-in account.</summary>
+    public async Task<(bool Ok, string? Error)> SendLiveChatMessageAsync(string sendParams, string text, CancellationToken ct = default)
+    {
+        try
+        {
+            var clientMsgId = "flux-" + Guid.NewGuid().ToString("N")[..16];
+            var body = new JsonObject
+            {
+                ["params"] = sendParams,
+                ["clientMessageId"] = clientMsgId,
+                ["richMessage"] = new JsonObject
+                {
+                    ["textSegments"] = new JsonArray(new JsonObject { ["text"] = text }),
+                },
+            };
+            var d = await PostAsync("live_chat/send_message", body, $"{Origin}/live_chat", ct);
+            if (d["actions"] is JsonArray arr && arr.Count > 0) return (true, null);
+            var err = J.FindFirst(d, "liveChatErrorMessageRenderer").P("errorText").Text()
+                ?? d.P("errors", 0)?.ToString();
+            return (err == null, err);
+        }
+        catch (Exception e) { Paths.Log("live chat send: " + e.Message); return (false, e.Message); }
+    }
+
     public async Task<WatchInfo> WatchAsync(string videoId, CancellationToken ct = default, string? playlistId = null)
     {
         var body = new JsonObject { ["videoId"] = videoId, ["racyCheckOk"] = true, ["contentCheckOk"] = true };
@@ -744,6 +1399,21 @@ public sealed class InnerTube
         info.Subscribers = owner.P("subscriberCountText").Text() ?? "";
         info.ChannelAvatar = LastThumb(owner.P("thumbnail", "thumbnails"));
         info.Description = secondary.P("attributedDescription").Text() ?? secondary.P("description").Text() ?? "";
+        J.Walk(secondary, (_, o) =>
+        {
+            if (info.Subscribed != null) return false;
+            if (o["subscribed"] is JsonValue v && v.TryGetValue<bool>(out var b)) { info.Subscribed = b; return false; }
+            return true;
+        });
+        if (info.Subscribed == null && LoggedIn)
+        {
+            J.Walk(data.P("frameworkUpdates"), (_, o) =>
+            {
+                if (info.Subscribed != null) return false;
+                if (o.P("subscriptionStateEntity") is JsonObject s && s["subscribed"] is JsonValue v && v.TryGetValue<bool>(out var b)) { info.Subscribed = b; return false; }
+                return true;
+            });
+        }
         J.Walk(primary, (_, o) =>
         {
             if (info.Likes.Length > 0) return false;
@@ -752,6 +1422,34 @@ public sealed class InnerTube
         });
         var secondaryResults = data.P("contents", "twoColumnWatchNextResults", "secondaryResults");
         info.Related = ParseFeed(secondaryResults);
+        // Live chat continuation token (for active LIVE broadcasts — searches both conversationBar & engagementPanels!)
+        var lcRenderer = data.P("contents", "twoColumnWatchNextResults", "conversationBar", "liveChatRenderer")
+            ?? J.FindFirst(data, "liveChatRenderer");
+        if (lcRenderer != null)
+        {
+            if (lcRenderer["continuations"] is JsonArray lcConts)
+            {
+                foreach (var c in lcConts)
+                {
+                    info.LiveChatToken = c.S("reloadContinuationData", "continuation")
+                        ?? c.S("invalidationContinuationData", "continuation")
+                        ?? c.S("timedContinuationData", "continuation");
+                    if (!string.IsNullOrEmpty(info.LiveChatToken)) break;
+                }
+            }
+            if (string.IsNullOrEmpty(info.LiveChatToken))
+            {
+                J.Walk(lcRenderer, (_, x) =>
+                {
+                    if (!string.IsNullOrEmpty(info.LiveChatToken)) return false;
+                    var tok = x.S("reloadContinuationData", "continuation")
+                        ?? x.S("invalidationContinuationData", "continuation")
+                        ?? x.S("timedContinuationData", "continuation");
+                    if (!string.IsNullOrEmpty(tok)) { info.LiveChatToken = tok; return false; }
+                    return true;
+                });
+            }
+        }
         J.Walk(data.P("contents", "twoColumnWatchNextResults", "results"), (_, o) =>
         {
             if (info.CommentsToken != null) return false;
@@ -776,6 +1474,28 @@ public sealed class InnerTube
                     if (r?["timeRangeStartMillis"] is JsonValue ms && ms.TryGetValue<double>(out var at) && title != null) info.Chapters.Add((at / 1000, title));
                 }
         }
+        // YouTube "Most Replayed" viewer retention heatmap (100 normalized peaks for the seekbar mountains!)
+        J.Walk(data, (key, o) =>
+        {
+            if (info.Heatmap.Count > 0) return false;
+            if (key == "markersList" && o.S("markerType") == "MARKER_TYPE_HEATMAP" && o["markers"] is JsonArray hmMarkers)
+            {
+                foreach (var mk in hmMarkers)
+                {
+                    float inten = 0;
+                    try { inten = (float)(mk?["intensityScoreNormalized"]?.GetValue<double>() ?? 0); } catch { }
+                    info.Heatmap.Add(Math.Clamp(inten, 0f, 1f));
+                }
+                return false;
+            }
+            if (key == "heatMarkerRenderer")
+            {
+                float inten = 0;
+                try { inten = (float)(o["heatMarkerIntensityScoreNormalized"]?.GetValue<double>() ?? 0); } catch { }
+                info.Heatmap.Add(Math.Clamp(inten, 0f, 1f));
+            }
+            return true;
+        });
         J.Walk(primary, (_, o) =>
         {
             if (info.LikeStatus != null) return false;
@@ -917,6 +1637,20 @@ public sealed class InnerTube
         var views = o.P("shortViewCountText").Text() ?? o.P("viewCountText").Text() ?? "";
         var when = o.P("publishedTimeText").Text() ?? "";
         if (views.Length == 0 && when.Length == 0) views = o.P("videoInfo").Text() ?? ""; // playlist rows
+        var avatarUrl = LastThumb(o.P("channelThumbnailSupportedRenderers", "channelThumbnailWithLinkRenderer", "thumbnail", "thumbnails"))
+            ?? LastThumb(o.P("channelThumbnail", "thumbnails"))
+            ?? LastThumb(o.P("avatar", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image", "sources"))
+            ?? o.S("avatar", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image", "sources", 0, "url");
+        if (avatarUrl == null && (o.P("avatar") ?? o.P("channelThumbnailSupportedRenderers")) is { } avNode)
+        {
+            J.Walk(avNode, (_, x) =>
+            {
+                if (avatarUrl != null) return false;
+                if (x["sources"] is JsonArray src && LastThumb(src) is { } su) { avatarUrl = su; return false; }
+                if (x["thumbnails"] is JsonArray th && LastThumb(th) is { } tu) { avatarUrl = tu; return false; }
+                return true;
+            });
+        }
         return new VideoItem
         {
             VideoId = id,
@@ -925,8 +1659,7 @@ public sealed class InnerTube
             ChannelId = byline.S("runs", 0, "navigationEndpoint", "browseEndpoint", "browseId"),
             Duration = duration ?? "",
             Meta = JoinMeta(views, when),
-            AvatarUrl = LastThumb(o.P("channelThumbnailSupportedRenderers", "channelThumbnailWithLinkRenderer", "thumbnail", "thumbnails"))
-                        ?? LastThumb(o.P("channelThumbnail", "thumbnails")),
+            AvatarUrl = avatarUrl,
             IsLive = live,
             IsShort = isShort,
         };

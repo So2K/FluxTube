@@ -12,6 +12,8 @@ public sealed record StreamInfo(string VideoId, string Video, string? Audio, Dic
     public int Aitag { get; init; }
     /// <summary>Quick-start stand-in: good for the first seconds only.</summary>
     public bool Preview { get; init; }
+    /// <summary>True for active YouTube LIVE broadcasts (HLS manifest, live edge playback, LIVE HUD badge).</summary>
+    public bool IsLive { get; init; }
     // googlevideo links live ~6 h; refresh well before that
     public bool Fresh => DateTime.UtcNow - ResolvedAt < TimeSpan.FromHours(4);
 }
@@ -138,8 +140,8 @@ public sealed class Resolver
     private readonly LinkedList<string> _queue = new(); // front = most urgent
     private readonly object _qLock = new();
     private readonly SemaphoreSlim _slots = new(2, 2);
-    private readonly PyServer _click = new("click", 2, 3 * 60);
-    private readonly PyServer _bg = new("bg", 2, 2 * 60);
+    private readonly PyServer _click = new("click", 2, 6 * 60);
+    private readonly PyServer _bg = new("bg", 2, 3 * 60);
     private bool _clickWarmed;
 
     /// <summary>
@@ -402,8 +404,12 @@ public sealed class Resolver
         bool isHls = video.Contains("hls_playlist", StringComparison.OrdinalIgnoreCase)
             || video.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
             || video.Contains("/manifest/", StringComparison.OrdinalIgnoreCase);
+        bool isLive = (n["is_live"] is JsonValue lv && lv.TryGetValue<bool>(out var lvb) && lvb) || (isHls && dur <= 0);
         if (isHls)
-            return new StreamInfo(id, video, audio, headers, n.S("title"), dur, DateTime.UtcNow) { Vitag = 0, Aitag = 0 };
+        {
+            var playUrl = isLive ? Player.StreamProxy.Instance.RegisterLiveDvr(video, headers) : video;
+            return new StreamInfo(id, playUrl, audio, headers, n.S("title"), dur, DateTime.UtcNow) { Vitag = 0, Aitag = 0, IsLive = isLive };
+        }
 
         // mpv talks to our local proxy, which handles available_at and bounded ranges (see StreamProxy)
         var proxy = Player.StreamProxy.Instance;
@@ -418,8 +424,8 @@ public sealed class Resolver
         // the cache index knows the video before any of its bytes land on disk (zero plays: cleaned up first)
         if (Db.CacheVideo(id) is not { } known || known.Vitag != vitag || known.Aitag != aitag)
             MediaCache.NoteSeen(id, AppSettings.Current.PlayerQuality, vitag, aitag);
-        var localVideo = proxy.Register(video, Long(n, "video_avail"), headers, 1024 * 1024, id);
-        var localAudio = audio != null ? proxy.Register(audio, Long(n, "audio_avail"), headers, 256 * 1024, id) : null;
+        var localVideo = proxy.Register(video, Long(n, "video_avail"), headers, 256 * 1024, id);
+        var localAudio = audio != null ? proxy.Register(audio, Long(n, "audio_avail"), headers, 96 * 1024, id) : null;
         _ = proxy.PrefillAsync(localVideo);
         if (localAudio != null) _ = proxy.PrefillAsync(localAudio);
         return new StreamInfo(id, localVideo, localAudio, headers, n.S("title"), dur, DateTime.UtcNow) { Vitag = vitag, Aitag = aitag };

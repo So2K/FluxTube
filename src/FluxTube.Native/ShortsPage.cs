@@ -246,7 +246,7 @@ public sealed class ShortsPage : IPage
         {
             bool ok;
             string? err;
-            try { (ok, err) = await InnerTube.Instance.CreateCommentAsync(cp, text, vid); }
+            try { (ok, err, _) = await InnerTube.Instance.CreateCommentAsync(cp, text, vid); }
             catch (Exception ex) { ok = false; err = ex.Message; }
             App.Post(() =>
             {
@@ -673,16 +673,19 @@ public sealed class ShortsPage : IPage
         float side = fullSide * panelT;
         float panelGap = 16 * panelT;
 
-        var vh = MathF.Floor(MathF.Min(r.H - 60, (r.W - railW - side - panelGap - 56) * 16 / 9));
-        vh = MathF.Max(260, vh);
-        var vw = MathF.Floor(vh * 9 / 16);
+        float shortAspect = (MpvPlayer.Instance.CurrentVideoId == v.VideoId && MpvPlayer.Instance.VideoWidth > 0 && MpvPlayer.Instance.VideoHeight > 0)
+            ? Math.Clamp(MpvPlayer.Instance.VideoAspect, 0.45f, 0.72f)
+            : (9f / 16f);
+        var vh = MathF.Floor(MathF.Min(r.H - 40, (r.W - railW - side - panelGap - 56) / shortAspect));
+        vh = MathF.Max(280, vh);
+        var vw = MathF.Floor(vh * shortAspect);
         _videoW = vw; _videoH = vh;
 
-        float totalW = vw + 12 + railW + panelGap + side;
+        float totalW = vw + 14 + railW + panelGap + side;
         var vx = Gfx.Snap(r.X + MathF.Max(18, (r.W - totalW) / 2));
-        var vy = Gfx.Snap(r.Y + 14);
+        var vy = Gfx.Snap(r.Y + MathF.Max(12, (r.H - vh) * 0.5f));
         var video = new R(vx, vy, vw, vh);
-        float railX = video.Right + 12;
+        float railX = video.Right + 14;
         var panelR = new R(railX + railW + panelGap, video.Y, MathF.Min(fullSide, r.Right - (railX + railW + panelGap) - 20), video.H);
 
         // Cinema GPU Ambient Mode glow behind the Short
@@ -690,42 +693,41 @@ public sealed class ShortsPage : IPage
         Ambient.Draw(video, v.VideoId, isShort: true);
         Gfx.PopClip();
 
-        // Smooth cubic-out vertical card-stack swipe animation — completely BORDERLESS (no ugly outline!)
-        float slideT = _slideAt > 0 ? Math.Clamp((UI.Now - _slideAt) / 250f, 0, 1) : 1f;
+        // Smooth quartic-out vertical card-stack swipe animation — 100% borderless, zero corner artifacts!
+        float slideT = _slideAt > 0 ? Math.Clamp((UI.Now - _slideAt) / 300f, 0, 1) : 1f;
         bool sliding = slideT < 1f;
         if (sliding) UI.Animate();
-        float ease = 1f - MathF.Pow(1f - slideT, 3f);
-        float stride = vh + 16;
+        float invS = 1f - slideT;
+        float ease = 1f - invS * invS * invS * invS;
+        float stride = vh + 22;
         float curY = sliding ? Gfx.Snap(video.Y + (1f - ease) * stride * _slideFrom) : video.Y;
 
         void DrawShortPoster(string vid, R rect, float opacity)
         {
             if (rect.Bottom <= r.Y || rect.Y >= r.Bottom) return;
-            Gfx.Fill(rect, 0xFF0A0A0E, 14);
             var img = Images.Get($"https://i.ytimg.com/vi/{vid}/oar2.jpg", rect.W, rect.H)
                    ?? Images.Get($"https://i.ytimg.com/vi/{vid}/hq720.jpg", rect.W, rect.H);
             if (img != null)
-            {
-                Gfx.Image(img.Bmp!, rect, opacity * Images.Alpha(img));
-                Gfx.RoundOff(rect, 14, Th.Bg);
-            }
+                Gfx.ImageRoundedCover(img.Bmp!, rect, 16, opacity * Images.Alpha(img));
+            else
+                Gfx.Fill(rect, Gfx.Fade(0xFF0A0A0E, opacity), 16);
         }
 
-        var stackClip = new R(video.X - 2, r.Y, video.W + 4, r.H);
-        float swipeVelY = sliding ? -3f * (1f - slideT) * (1f - slideT) * stride * _slideFrom / 0.25f : 0f;
+        var stackClip = new R(video.X - 4, r.Y, video.W + 8, r.H);
+        float swipeVelY = sliding ? -4f * invS * invS * invS * stride * _slideFrom / 0.30f : 0f;
         bool swipeMb = Gfx.PushMotionBlur(stackClip, 0f, swipeVelY);
         Gfx.PushClip(stackClip);
         if (sliding && _prevVideoId != null)
         {
             var outR = new R(video.X, curY - stride * _slideFrom, video.W, video.H);
-            DrawShortPoster(_prevVideoId, outR, 0.92f - 0.15f * ease);
+            DrawShortPoster(_prevVideoId, outR, 0.92f - 0.18f * ease);
         }
         if (NextItem is { } peekNext)
         {
             var peekR = new R(video.X, curY + stride, video.W, video.H);
             if (peekR.Y < r.Bottom)
             {
-                DrawShortPoster(peekNext.VideoId, peekR, 0.52f);
+                DrawShortPoster(peekNext.VideoId, peekR, 0.45f);
                 if (!sliding && UI.Click(UI.Id("shorts:peeknext"), peekR.Intersect(r))) Step(1);
             }
         }
@@ -733,22 +735,21 @@ public sealed class ShortsPage : IPage
         {
             var prevPeek = new R(video.X, curY - stride, video.W, video.H);
             if (prevPeek.Bottom > r.Y && _items[_i - 1].VideoId != _prevVideoId)
-                DrawShortPoster(_items[_i - 1].VideoId, prevPeek, 0.52f);
+                DrawShortPoster(_items[_i - 1].VideoId, prevPeek, 0.45f);
         }
 
         if (sliding)
         {
-            DrawShortPoster(v.VideoId, new R(video.X, curY, video.W, video.H), 0.96f);
+            DrawShortPoster(v.VideoId, new R(video.X, curY, video.W, video.H), 0.98f);
         }
         else
         {
-            // Settled: crisp borderless rounded live video surface
-            Gfx.Fill(video, 0xFF0A0A0E, 14);
+            // Settled: pure borderless rounded live video surface (zero black frame!)
             bool audioOnlyQuality = AppSettings.Current.PlayerQuality == "audio";
-            if (!audioOnlyQuality) Shell.WantVideo(video, v.VideoId, radius: 14);
+            if (!audioOnlyQuality) Shell.WantVideo(video, v.VideoId, radius: 16);
             if (audioOnlyQuality || !Shell.VideoShown(v.VideoId))
             {
-                DrawShortPoster(v.VideoId, video, audioOnlyQuality ? 0.96f : 0.85f);
+                DrawShortPoster(v.VideoId, video, audioOnlyQuality ? 0.98f : 0.90f);
                 if (!audioOnlyQuality) UI.Spinner(video.X + vw / 2, video.Y + vh / 2, 14, 0xFFFFFFFF);
             }
         }

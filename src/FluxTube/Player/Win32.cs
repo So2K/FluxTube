@@ -4,7 +4,7 @@ namespace FluxTube.Player;
 
 internal static partial class Win32
 {
-    public const uint WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000, WS_CLIPCHILDREN = 0x02000000, WS_CLIPSIBLINGS = 0x04000000;
+    public const uint WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000, WS_CLIPCHILDREN = 0x02000000, WS_CLIPSIBLINGS = 0x04000000, WS_POPUP = 0x80000000;
     public const uint SWP_NOZORDER = 0x0004, SWP_NOACTIVATE = 0x0010, SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002;
     public const int SW_HIDE = 0, SW_SHOWNA = 8;
 
@@ -37,6 +37,7 @@ internal static partial class Win32
     [DllImport("user32.dll")] public static extern IntPtr DefWindowProcW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
+    [DllImport("user32.dll")] public static extern bool DestroyWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr hInst, int id);
     [DllImport("gdi32.dll")] public static extern IntPtr GetStockObject(int obj);

@@ -40,6 +40,9 @@ public static class Shell
     private static R _videoRect, _videoClip, _hostRect;
     private static R? _miniVideoRect;
     private static float _videoRadius;
+    private static long _fsAnimAt;
+    private static R _fsFromRect;
+    private static float _fsFromRadius;
     private static bool _videoWanted, _hostVisible;
     private static bool _npDragSeek, _npDragVol;
     private static double _npDragSeekTarget;
@@ -71,6 +74,8 @@ public static class Shell
     {
         var s = AppSettings.Current;
         s.AudioOnlyMode = !s.AudioOnlyMode;
+        if (_tab >= 0 && _tab < _tabs.Count && _tabs[_tab].Kind == "video")
+            _tabs[_tab].AudioOnly = s.AudioOnlyMode;
         s.Save();
         if (s.AudioOnlyMode)
         {
@@ -85,6 +90,7 @@ public static class Shell
             Toast(L.T("Видео возвращено", "Video restored"), Th.Sub, 1600);
         }
         PushPlayerState();
+        Themes.SyncAdaptiveFromOpenVideo();
         App.Invalidate();
     }
 
@@ -103,6 +109,7 @@ public static class Shell
         _search?.SetPlaceholder(L.T("Поиск или ссылка YouTube…", "Search or YouTube link…"));
         Updater.RefreshStatusText();
         PushPlayerState();
+        Themes.SyncAdaptiveFromOpenVideo();
         App.Invalidate();
     }
 
@@ -152,6 +159,7 @@ public static class Shell
         public string Sub = "";
         public bool KeepInBg = true;
         public bool StartPaused;
+        public bool AudioOnly;
         public int CustomVolume = -1;
         public bool CustomMuted;
         public double Position;
@@ -171,11 +179,24 @@ public static class Shell
 
     public static IReadOnlyList<Tab> Tabs => _tabs;
     public static bool CurrentTabOwnsMainPlayer => _tab >= 0 && _tab < _tabs.Count && _mainTabKey == _tabs[_tab].Key;
+    public static bool IsAudioOnlyActive => AppSettings.Current.AudioOnlyMode && !Pip.Active && _cur is not ShortsPage && !_fullscreen;
     private static string? _lastAdaptiveVideoId;
 
+    public static string? CurrentWatchVideoId()
+        => _cur is WatchPage wp && !string.IsNullOrEmpty(wp.Video.VideoId) ? wp.Video.VideoId
+         : (_cur is ShortsPage sp && !string.IsNullOrEmpty(sp.CurrentId) ? sp.CurrentId : null);
+
+    public static bool HasAnyOpenOrPlayingVideo()
+    {
+        if (P.HasMedia || T.Current != null || _cur is WatchPage or ShortsPage) return true;
+        for (int i = 0; i < _tabs.Count; i++)
+            if (_tabs[i].Kind == "video" && !string.IsNullOrEmpty(_tabs[i].Arg)) return true;
+        return false;
+    }
+
     /// <summary>
-    /// Returns the currently open video's id (WatchPage / ShortsPage / active video tab / playing track / first video tab)
-    /// and remembers the last seen video so Settings / non-video pages always preserve its adaptive palette.
+    /// Returns the currently open video's id (WatchPage / ShortsPage / active video tab / playing track / playing bg tab / first video tab)
+    /// and remembers the last seen video for the Adaptive (Video) theme so Settings / non-video pages preserve its palette.
     /// </summary>
     public static string? AdaptiveVideoId()
     {
@@ -192,10 +213,21 @@ public static class Shell
         {
             for (int i = 0; i < _tabs.Count; i++)
             {
-                if (_tabs[i].Kind == "video" && !string.IsNullOrEmpty(_tabs[i].Arg))
+                if (_tabs[i].Kind == "video" && !string.IsNullOrEmpty(_tabs[i].Arg) && BgPlayers.IsPlaying(_tabs[i].PlayKey))
                 {
                     vid = _tabs[i].Arg;
                     break;
+                }
+            }
+            if (vid == null)
+            {
+                for (int i = 0; i < _tabs.Count; i++)
+                {
+                    if (_tabs[i].Kind == "video" && !string.IsNullOrEmpty(_tabs[i].Arg))
+                    {
+                        vid = _tabs[i].Arg;
+                        break;
+                    }
                 }
             }
         }
@@ -204,7 +236,7 @@ public static class Shell
             _lastAdaptiveVideoId = vid;
             return vid;
         }
-        return _lastAdaptiveVideoId;
+        return Themes.IsAdaptiveVideo ? _lastAdaptiveVideoId : null;
     }
     public static R TabPreviewRect => _tabPreviewRect;
     public static void SyncCookieStamp() { _cookieStamp = CookieStamp(); _wasLoggedIn = CookieStore.IsLoggedIn; }
@@ -327,7 +359,7 @@ public static class Shell
         if (i < 0 || i >= _tabs.Count) return;
         Sfx.Tab();
         var s = _tabs[i];
-        _tabs.Insert(i + 1, new Tab { Kind = s.Kind, Arg = s.Arg, Title = s.Title, Sub = s.Sub, KeepInBg = s.KeepInBg,
+        _tabs.Insert(i + 1, new Tab { Kind = s.Kind, Arg = s.Arg, Title = s.Title, Sub = s.Sub, KeepInBg = s.KeepInBg, AudioOnly = s.AudioOnly,
             Position = s.Kind == "video" && s.Key == _mainTabKey ? CurrentLivePos() : s.Position,
             StartPaused = s.Kind == "video" && s.Key == _mainTabKey ? P.Paused : s.StartPaused });
         GoTab(i + 1);
@@ -462,11 +494,36 @@ public static class Shell
             target.StartPaused = BgPlayers.IsPaused(target.PlayKey);
             SaveTabPos(target.Arg, pos);
         }
+        int prevTabIdx = _tab;
+        if (prevTabIdx >= 0 && prevTabIdx < _tabs.Count && _tabs[prevTabIdx].Kind == "video")
+            _tabs[prevTabIdx].AudioOnly = AppSettings.Current.AudioOnlyMode;
         _tab = i;
+        _navTabDir = prevTabIdx >= 0 && prevTabIdx != i ? (i > prevTabIdx ? 1 : -1) : 0;
+        if (target.Kind == "video")
+        {
+            if (AppSettings.Current.AudioOnlyMode != target.AudioOnly)
+            {
+                AppSettings.Current.AudioOnlyMode = target.AudioOnly;
+                if (target.AudioOnly)
+                {
+                    if (!Pip.Active) P.SetVideoEnabled(false);
+                }
+                else
+                {
+                    P.SetVideoEnabled(true);
+                }
+            }
+        }
         _back.Clear();
         _forward.Clear();
         SharePanel.Close();
-        Navigate(PageFor(target), push: false);
+        Navigate(PageFor(target), push: false, keepTabDir: true);
+        if (target.Kind == "video")
+        {
+            if (target.AudioOnly && !Pip.Active) PlaybackTracker.Instance.EnsureBestAudioForMusicMode();
+            PushPlayerState();
+            Themes.SyncAdaptiveFromOpenVideo();
+        }
     }
 
     public static void CloseTab(int i)
@@ -634,6 +691,57 @@ public static class Shell
         for (int i = 0; i < _tabs.Count && xStart + (i + 1) * tw <= maxRight + 1f; i++) visibleCount++;
         if (visibleCount == 0 && _tabs.Count > 0) visibleCount = 1;
 
+        // Liquid spring-gliding active tab pill & glowing accent underline
+        if (_tab >= 0 && _tab < visibleCount)
+        {
+            float tgtPillX = (_draggingTab && _dragTabKey == _tabs[_tab].Key)
+                ? Math.Clamp(UI.MX - _dragGrabOffset, xStart, xStart + Math.Max(0, visibleCount - 1) * tw)
+                : xStart + _tab * tw;
+            float tgtPillW = tw - 6;
+            if (_activePillX < 0 || _activePillW <= 0)
+            {
+                _activePillX = tgtPillX;
+                _activePillW = tgtPillW;
+                _activePillVelX = 0;
+            }
+            else if (_draggingTab && _dragTabKey == _tabs[_tab].Key)
+            {
+                _activePillX = tgtPillX;
+                _activePillW = tgtPillW;
+                _activePillVelX = 0;
+            }
+            else
+            {
+                float dt = (float)Math.Clamp(UI.Dt, 0.001, 0.04);
+                float accel = (tgtPillX - _activePillX) * 320f - _activePillVelX * 30f;
+                _activePillVelX += accel * dt;
+                _activePillX += _activePillVelX * dt;
+                _activePillW += (tgtPillW - _activePillW) * (1f - MathF.Exp(-dt * 24f));
+                if (MathF.Abs(tgtPillX - _activePillX) > 0.25f || MathF.Abs(_activePillVelX) > 2f || MathF.Abs(tgtPillW - _activePillW) > 0.25f)
+                    UI.Animate();
+                else
+                {
+                    _activePillX = tgtPillX;
+                    _activePillW = tgtPillW;
+                    _activePillVelX = 0;
+                }
+            }
+            if (!_draggingTab)
+            {
+                float stretch = Math.Clamp(MathF.Abs(_activePillVelX) * 0.012f, 0f, 10f);
+                var pillR = new R(Gfx.Snap(_activePillX - stretch * 0.5f), strip.Y + 4, _activePillW + stretch, TabH - 8);
+                float pr = Gfx.Corner(8);
+                Gfx.Fill(pillR, Th.A(0.125f), pr);
+                Gfx.Stroke(pillR, Gfx.Fade(Th.Brand, 0.26f), pr, 1f);
+                var barW = MathF.Max(16f, pillR.W * 0.48f + stretch * 0.8f);
+                var barR = new R(pillR.X + (pillR.W - barW) * 0.5f, pillR.Bottom - 2.2f, barW, 2.2f);
+                uint b2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
+                Gfx.Fill(barR, Gfx.Mix(Th.Brand, b2, 0.35f), 1.1f);
+                if (AppSettings.Current.UiNeonGlow)
+                    Gfx.NeonGlow(barR, 1.1f, Th.Brand, 0.55f);
+            }
+        }
+
         int hoveredNow = -1;
         R hoveredRect = default;
         Action? deferred = null;
@@ -705,8 +813,7 @@ public static class Shell
             }
             else
             {
-                if (sel > 0.01f) Gfx.Fill(r, Th.A(0.11f * sel), 8);
-                if (!active) UI.Glow(id, r, 8, over);
+                if (!active) UI.Glow(id, r, Gfx.Corner(8), over);
             }
 
             var isVideo = t.Kind == "video";
@@ -970,6 +1077,8 @@ public static class Shell
     private static readonly List<R> _topHits = new(8);
     private static readonly List<R> _holes = new(8);
     private static long _navAt, _toastAt;
+    private static int _navTabDir; // -1 = switched to left tab, +1 = switched to right tab, 0 = vertical page nav
+    private static float _activePillX = -1f, _activePillW = -1f, _activePillVelX;
     private static float _markY = -1, _markShown, _prevSideW = SideW;
     private static int _markIdx = -1;
     public static R MusicStageRect;
@@ -1000,7 +1109,7 @@ public static class Shell
         return false;
     }
 
-    public static bool AnyModalOpen => Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open;
+    public static bool AnyModalOpen => Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open || AnalyticsPanel.Open;
 
     /// <summary>Closes top-most floating modal/menu when clicking outside it (e.g. on VideoHwnd backdrop). Returns true if consumed.</summary>
     public static bool CloseModalOnOutsideClick()
@@ -1009,6 +1118,7 @@ public static class Shell
         if (AccountMenu.Open) { AccountMenu.Close(); return true; }
         if (SharePanel.Open) { SharePanel.Close(); return true; }
         if (AudioStudioPanel.Open) { AudioStudioPanel.Close(); return true; }
+        if (AnalyticsPanel.Open) { AnalyticsPanel.Close(); return true; }
         if (LoginModal.Open) { LoginModal.Close(); return true; }
         if (ThemeCodeEditor.Open) return true; // never dismiss unsaved code editor on stray click
         return false;
@@ -1096,7 +1206,8 @@ public static class Shell
         Downloader.Instance.Init();
         _userMuted = App.Mute;
         P.FullscreenChanged += SetFullscreen;
-        P.PlaybackStarted += () => { VideoReady = true; PushPlayerState(); };
+        P.PlaybackStarted += () => { VideoReady = true; PushPlayerState(); Themes.PumpLiveVideoSample(); };
+        P.FrameSampled += () => { Themes.SyncAdaptiveFromOpenVideo(); App.WakeUi(); };
         P.DurationChanged += _ => PushPlayerState();
         P.SpeedChanged += _ => { PushPlayerState(); App.Invalidate(); };
         P.Message += OnPlayerMessage;
@@ -1130,8 +1241,8 @@ public static class Shell
                            $"Could not open video ({msg}). Try another quality in Settings or refresh the page."), Th.Brand, 9000);
         };
         P.EndOfFile += OnEnded;
-        P.TimeChanged += t => { if (_cur is WatchPage near) near.NearEnd(t, P.Duration); };
-        T.CurrentChanged += PushPlayerState;
+        P.TimeChanged += t => { if (_cur is WatchPage near) near.NearEnd(t, P.Duration); Themes.PumpLiveVideoSample(); };
+        T.CurrentChanged += () => { PushPlayerState(); Themes.SyncAdaptiveFromOpenVideo(); };
 
         try
         {
@@ -1151,7 +1262,9 @@ public static class Shell
         P.FileLoaded += () =>
         {
             Storyboard.Forget();
+            if (T.Current?.VideoId is { Length: 11 } loadedVid) Storyboard.Prewarm(loadedVid);
             if (P.Paused) { VideoReady = true; PushPlayerState(); App.Invalidate(); }
+            Themes.SyncAdaptiveFromOpenVideo();
             var id = _pendingBgHandoff;
             if (id == null || P.CurrentVideoId != _pendingBgVideoId) return;
             _pendingBgHandoff = null;
@@ -1235,9 +1348,10 @@ public static class Shell
 
     public static IPage? Current => _cur;
 
-    public static void Navigate(IPage page, bool push = true)
+    public static void Navigate(IPage page, bool push = true, bool keepTabDir = false)
     {
         if (_cur == page) return;
+        if (!keepTabDir) _navTabDir = 0;
         PreviewPlayer.HideNow();
         if (_cur != null)
         {
@@ -1329,8 +1443,25 @@ public static class Shell
             _listOf[v.VideoId] = playlistId;
         }
         else _listOf.Remove(v.VideoId);
+        bool wasVideoTab = _tab >= 0 && _tab < _tabs.Count && _tabs[_tab].Kind == "video";
         SetTab("video", v.VideoId, v.Title, v.Channel);
-        if (_tab >= 0 && _tab < _tabs.Count) _tabs[_tab].StartPaused = false;
+        if (_tab >= 0 && _tab < _tabs.Count)
+        {
+            _tabs[_tab].StartPaused = false;
+            if (!wasVideoTab)
+            {
+                _tabs[_tab].AudioOnly = false;
+                if (AppSettings.Current.AudioOnlyMode)
+                {
+                    AppSettings.Current.AudioOnlyMode = false;
+                    P.SetVideoEnabled(true);
+                }
+            }
+            else
+            {
+                AppSettings.Current.AudioOnlyMode = _tabs[_tab].AudioOnly;
+            }
+        }
         var existing = _back.OfType<WatchPage>().LastOrDefault(w => w.Video.VideoId == v.VideoId && w.PlaylistId == playlistId);
         Navigate(existing ?? new WatchPage(v, source, playlistId));
     }
@@ -1493,7 +1624,10 @@ public static class Shell
         var q = AppSettings.Current.PlayerQuality == "best" ? L.T("Макс", "Max") : Cards.QualityName(AppSettings.Current.PlayerQuality);
         var segs = new System.Text.Json.Nodes.JsonArray();
         foreach (var s in T.Segments)
-            segs.Add(new System.Text.Json.Nodes.JsonArray(System.Text.Json.Nodes.JsonValue.Create(s.Start), System.Text.Json.Nodes.JsonValue.Create(s.End)));
+            segs.Add(new System.Text.Json.Nodes.JsonArray(
+                System.Text.Json.Nodes.JsonValue.Create(s.Start),
+                System.Text.Json.Nodes.JsonValue.Create(s.End),
+                System.Text.Json.Nodes.JsonValue.Create(s.Category)));
         var shortOv = sp != null && AppSettings.Current.ShortsPanelHidden && AppSettings.Current.ShortsInfoOverlay;
         var curSpeed = P.Speed;
         var speedTxt = Math.Abs(curSpeed - 1.0) < 0.01 ? "1×" : $"{curSpeed.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}×";
@@ -1507,17 +1641,39 @@ public static class Shell
             ["likes"] = sp != null ? sp.CurrentLikes : "",
             ["short_overlay"] = shortOv,
             ["is_short"] = sp != null,
+            ["is_live"] = P.IsLiveStream || (T.Current?.IsLive ?? false),
             ["lang"] = AppSettings.Current.UiLanguage,
             ["segments"] = segs,
             ["rclick"] = AppSettings.Current.RightClickPause ? "pause" : "menu",
-            ["accent"] = Themes.Hex(Themes.AccentOverride ?? Themes.Current.Brand),
+            ["accent"] = Themes.Hex(Th.Brand),
+            ["accent2"] = Themes.Hex(Th.Brand2 != 0 ? Th.Brand2 : Th.Brand),
+            ["panel"] = Themes.Hex(Th.Panel),
+            ["card"] = Themes.Hex(Th.Card),
+            ["text"] = Themes.Hex(Th.Text),
+            ["light"] = Th.Light,
+            ["ui_scale"] = AppSettings.Current.UiScale,
+            ["corners"] = AppSettings.Current.UiCornerStyle,
+            ["card_style"] = AppSettings.Current.UiCardStyle,
+            ["font"] = Gfx.ActiveFontName(),
+            ["neon_glow"] = AppSettings.Current.UiNeonGlow,
+            ["player_style"] = string.IsNullOrEmpty(AppSettings.Current.PlayerStyle) ? "flux" : AppSettings.Current.PlayerStyle,
+            ["theater"] = AppSettings.Current.TheaterMode,
             ["pip"] = Pip.Active,
             ["subs"] = w?.SubsOn ?? false,
             ["chapters"] = w?.ChaptersJson() ?? new System.Text.Json.Nodes.JsonArray(),
+            ["heatmap"] = w?.HeatmapJson() ?? new System.Text.Json.Nodes.JsonArray(),
             ["sc_on"] = AppSettings.Current.SoundCloudWave && !AppSettings.Current.AudioOnlyMode && !Pip.Active && sp == null,
             ["sc_comments"] = w?.PlayerCommentsJson() ?? new System.Text.Json.Nodes.JsonArray(),
         };
         P.Command("script-message-to", "fluxosc", "flux-state", o.ToJsonString());
+    }
+
+    /// <summary>Ultra-cheap live accent push to mpv OSC scrubber + glass dock during real-time video theme morphing.</summary>
+    public static void PushPlayerAccent()
+    {
+        if (!P.IsReady || !P.HasMedia) return;
+        uint b2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
+        P.Command("script-message-to", "fluxosc", "flux-accent", Themes.Hex(Th.Brand), Themes.Hex(b2), Themes.Hex(Th.Panel));
     }
 
     private static void OnPlayerMessage(string what, string arg)
@@ -1547,6 +1703,17 @@ public static class Shell
                 AppSettings.Current.Save();
                 PushPlayerState();
                 App.Invalidate();
+                break;
+            case "toggle-style":
+                SetPlayerStyle(AppSettings.Current.PlayerStyle == "youtube" ? "flux" : "youtube");
+                break;
+            case "unskip":
+                if (double.TryParse(arg, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var unskipAt))
+                    T.UnskipSegment(unskipAt);
+                break;
+            case "manual-seek":
+                if (double.TryParse(arg, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var manualAt))
+                    T.OnManualSeek(manualAt);
                 break;
             case "menu":
                 if (w != null) w.MoreMenu();
@@ -1748,6 +1915,28 @@ public static class Shell
 
     public static void WantVideo(R r, string videoId, R? clipRect = null, float radius = 0)
     {
+        if (_fsAnimAt > 0 && _fsFromRect.W > 10 && _fsFromRect.H > 10)
+        {
+            float dur = _fullscreen ? 320f : 290f;
+            float t = Math.Clamp((UI.Now - _fsAnimAt) / dur, 0f, 1f);
+            if (t < 1f)
+            {
+                float inv = 1f - t;
+                float e = 1f - inv * inv * inv * inv * inv; // quintic ease-out for silky seamless zoom
+                r = new R(
+                    Gfx.Snap(_fsFromRect.X + (r.X - _fsFromRect.X) * e),
+                    Gfx.Snap(_fsFromRect.Y + (r.Y - _fsFromRect.Y) * e),
+                    Gfx.Snap(_fsFromRect.W + (r.W - _fsFromRect.W) * e),
+                    Gfx.Snap(_fsFromRect.H + (r.H - _fsFromRect.H) * e));
+                radius = _fsFromRadius + (radius - _fsFromRadius) * e;
+                clipRect = _fullscreen ? r : (clipRect ?? r);
+                UI.Animate();
+            }
+            else
+            {
+                _fsAnimAt = 0;
+            }
+        }
         _videoRect = r; _videoClip = clipRect ?? r; _videoRadius = radius; _videoWanted = true; _videoFor = videoId;
     }
 
@@ -1767,6 +1956,7 @@ public static class Shell
         s.UiScale = next;
         s.Save();
         Gfx.ApplyScale();
+        PushPlayerState();
         Toast($"{L.T("Масштаб", "Zoom")}: {(int)MathF.Round(next * 100)}%", Th.Sub, 1600);
     }
 
@@ -1777,7 +1967,7 @@ public static class Shell
     public static bool OverVideo(float x, float y)
     {
         if (Pip.Active || !_hostVisible || !_hostRect.Contains(x, y)) return false;
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open) return false;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open || AnalyticsPanel.Open) return false;
         if (_tabPreviewRect.W > 0 && _tabPreviewRect.Contains(x, y)) return false;
         if (_toastRect.W > 0 && _toastRect.Contains(x, y)) return false;
         return true;
@@ -1796,6 +1986,18 @@ public static class Shell
         AppSettings.Current.VideoBeatShake = !AppSettings.Current.VideoBeatShake;
         AppSettings.Current.SaveAsync();
         UpdateVideoBeat();
+        App.Invalidate();
+    }
+
+    public static void SetPlayerStyle(string style)
+    {
+        var clean = style == "youtube" ? "youtube" : "flux";
+        AppSettings.Current.PlayerStyle = clean;
+        AppSettings.Current.Save();
+        PushPlayerState();
+        Toast(clean == "youtube"
+            ? L.T("Стиль плеера: YouTube (сохранено)", "Player style: YouTube (saved)")
+            : L.T("Стиль плеера: FluxTube (сохранено)", "Player style: FluxTube (saved)"), Th.Good, 2000);
         App.Invalidate();
     }
 
@@ -1932,24 +2134,49 @@ public static class Shell
         float sideVelX = (sideW - _prevSideW) / MathF.Max(0.002f, (float)UI.Dt);
         _prevSideW = sideW;
 
-        var navT = Math.Clamp((UI.Now - _navAt) / 170f, 0, 1);
-        var slide = (1 - navT) * (1 - navT) * 12f;
+        float navDurMs = _navTabDir != 0 ? 250f : 190f;
+        var navT = Math.Clamp((UI.Now - _navAt) / navDurMs, 0f, 1f);
+        float inv = 1f - navT;
+        float inv2 = inv * inv;
+        float rem = inv2 * inv2; // quartic ease-out tail (1 -> 0)
+        float ease = 1f - rem;
 
         var tabsH = TabH;
         var contentR = new R(sideW, TopH + tabsH, w - sideW, h - TopH - tabsH - barH);
-        float navVelY = navT < 1 ? -2f * (1f - navT) * 12f / 0.17f * 10f : 0f;
-        bool navMb = Gfx.PushMotionBlur(contentR, 0f, navVelY);
-        _cur?.Draw(new R(sideW, TopH + tabsH + slide, w - sideW, h - TopH - tabsH - barH - slide));
+        float dx = _navTabDir != 0 ? _navTabDir * rem * 60f : 0f;
+        float dy = _navTabDir == 0 ? rem * 16f : 0f;
+        float navVelX = navT < 1f && _navTabDir != 0 ? -_navTabDir * 4f * inv * inv2 * 60f / (navDurMs / 1000f) * 0.45f : 0f;
+        float navVelY = navT < 1f && _navTabDir == 0 ? -4f * inv * inv2 * 16f / (navDurMs / 1000f) * 1.2f : 0f;
+        bool navMb = Gfx.PushMotionBlur(contentR, navVelX, navVelY);
+        Gfx.PushClip(contentR);
+        var savedNavTf = Gfx.DC.Transform;
+        if (navT < 1f)
+        {
+            float sc = (_navTabDir != 0 ? 0.980f : 0.988f) + (_navTabDir != 0 ? 0.020f : 0.012f) * ease;
+            var center = new System.Numerics.Vector2(contentR.X + contentR.W * 0.5f, contentR.Y + contentR.H * 0.5f);
+            Gfx.DC.Transform = System.Numerics.Matrix3x2.CreateScale(sc, sc, center)
+                             * System.Numerics.Matrix3x2.CreateTranslation(dx, dy)
+                             * savedNavTf;
+        }
+        _cur?.Draw(contentR);
+        if (navT < 1f) Gfx.DC.Transform = savedNavTf;
+        if (navT < 1f)
+        {
+            Gfx.Fill(contentR, Gfx.Fade(Th.Bg, rem * 0.42f));
+            if (_navTabDir != 0)
+            {
+                // Sleek leading-edge accent light sweep during horizontal tab transitions
+                float sweepX = _navTabDir > 0 ? contentR.X + (1f - ease) * contentR.W * 0.25f : contentR.Right - (1f - ease) * contentR.W * 0.25f - 3f;
+                uint b2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
+                Gfx.Fill(new R(sweepX, contentR.Y, 3f, contentR.H), Gfx.Fade(Gfx.Mix(Th.Brand, b2, ease), rem * 0.48f));
+            }
+            UI.Animate();
+        }
+        Gfx.PopClip();
         Gfx.PopMotionBlur(navMb);
         // Pass 2: capture live blurred/stylized page content (scrolling thumbnails, artwork, aurora) strictly under chrome!
         Gfx.CaptureGlassLayer();
         DrawTabs(new R(sideW, TopH, w - sideW, TabH));
-
-        if (navT < 1)
-        {
-            Gfx.Fill(contentR, Gfx.Fade(Th.Bg, (1 - navT) * (1 - navT)));
-            UI.Animate();
-        }
 
         // top bar: clean 8px symmetric grid with theme Panel tint (strawberry pink on Kawaii, obsidian on Neon, etc.)
         _topHits.Clear();
@@ -2123,6 +2350,35 @@ public static class Shell
             else Gfx.Fill(new R(sideW, h - barH, w - sideW, barH), Th.Panel);
         }
 
+        // Audio-Only cinema UI dimming veil over app chrome (keeps topbar, tabs, sidebar & bright UI comfortably dark!)
+        float chromeDim = UI.Anim(UI.Id("shell:audiodim"), IsAudioOnlyActive ? 1f : 0f, 10);
+        float quietUiDim = (IsAudioOnlyActive && stagePlaying) ? AudioAnalyzer.QuietDim * 0.24f : 0f;
+        if (chromeDim > 0.01f || quietUiDim > 0.01f)
+        {
+            float baseVeil = chromeDim * (Th.Light ? 0.34f : 0.22f) + quietUiDim;
+            uint veil = Gfx.Fade(0xFF020206, Math.Clamp(baseVeil, 0f, 0.62f));
+            // Top bar + Tab strip
+            Gfx.Fill(new R(0, 0, w, TopH + tabsH), veil);
+            // Sidebar
+            if (sideW > 0.5f) Gfx.Fill(new R(0, TopH + tabsH, sideW, h - TopH - tabsH), veil);
+            // Content area outside the Music Stage (e.g. bright comments/description/recommendations below the stage)
+            if (MusicStageRect.W > 10f && MusicStageRect.H > 10f)
+            {
+                float msT = MathF.Max(TopH + tabsH, MusicStageRect.Y);
+                float msB = MathF.Min(h, MusicStageRect.Bottom);
+                float msL = MathF.Max(sideW, MusicStageRect.X);
+                float msR = MathF.Min(w, MusicStageRect.Right);
+                if (msT > TopH + tabsH) Gfx.Fill(new R(sideW, TopH + tabsH, w - sideW, msT - (TopH + tabsH)), veil);
+                if (msB < h) Gfx.Fill(new R(sideW, msB, w - sideW, h - msB), veil);
+                if (msL > sideW && msB > msT) Gfx.Fill(new R(sideW, msT, msL - sideW, msB - msT), veil);
+                if (msR < w && msB > msT) Gfx.Fill(new R(msR, msT, w - msR, msB - msT), veil);
+            }
+            else
+            {
+                Gfx.Fill(new R(sideW, TopH + tabsH, w - sideW, h - TopH - tabsH), veil);
+            }
+        }
+
         DrawToast(w, h - barH);
         DrawDropOverlay(w, h);
         var eff = AppSettings.Current.SeasonalEffect;
@@ -2133,11 +2389,12 @@ public static class Shell
         UI.DrawAutoScrollIndicator();
         UI.Modal = null;
         // Pass 3: only when a frosted-glass modal/overlay is actually open (never on tab hover or opaque popup menu!)
-        if (ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open || AccountMenu.Open || DropTarget.IsDragging)
+        if (ThemeCodeEditor.Open || AudioStudioPanel.Open || AnalyticsPanel.Open || LoginModal.Open || AccountMenu.Open || DropTarget.IsDragging)
             Gfx.CaptureGlassLayer();
         DrawTabPreview();
         ThemeCodeEditor.Draw();
         AudioStudioPanel.Draw();
+        AnalyticsPanel.Draw();
         LoginModal.Draw();
         AccountMenu.Draw();
         Menus.Draw();
@@ -2226,32 +2483,34 @@ public static class Shell
         return arr;
     }
 
-    /// <summary>Full-width draped festive fairy-light garland tucked cleanly above the search bar &amp; stopping before window controls.</summary>
+    /// <summary>Full-width draped festive fairy-light garland spanning edge-to-edge across the entire top bar.</summary>
     private static void DrawFullWidthGarland(float w, float t, uint[] palette, float twinkleSpeed)
     {
         const float span = 112f;
         const float step = 28f;
-        // Stop cleanly before the right-hand window caption buttons (min / max / close) so bulbs never clash with them!
-        float maxW = MathF.Max(120f, w - 154f);
+        float maxW = MathF.Max(120f, w);
         float prevX = 0f, prevY = 1.0f;
         for (float x = 8f; x <= maxW; x += 8f)
         {
             float u = (x % span) / span;
             float sag = MathF.Sin(u * MathF.PI) * 3.1f;
             float ny = 1.0f + sag;
-            float fade = x > maxW - 44f ? Math.Clamp((maxW - x) / 44f, 0f, 1f) : 1f;
-            Gfx.Line(prevX, prevY, x, ny, Gfx.Fade(Th.Ink, 0.22f * fade), 1.05f);
+            Gfx.Line(prevX, prevY, x, ny, Gfx.Fade(Th.Ink, 0.22f), 1.05f);
             prevX = x; prevY = ny;
+        }
+        if (prevX < maxW)
+        {
+            float uEnd = (maxW % span) / span;
+            Gfx.Line(prevX, prevY, maxW, 1.0f + MathF.Sin(uEnd * MathF.PI) * 3.1f, Gfx.Fade(Th.Ink, 0.22f), 1.05f);
         }
 
         int idx = 0;
-        for (float gx = 14f; gx < maxW - 10f; gx += step, idx++)
+        for (float gx = 14f; gx < maxW - 6f; gx += step, idx++)
         {
             float u = (gx % span) / span;
             float sag = MathF.Sin(u * MathF.PI) * 3.1f;
             float cy = 2.8f + sag;
-            float fade = gx > maxW - 44f ? Math.Clamp((maxW - gx) / 44f, 0f, 1f) : 1f;
-            float wave = (0.5f + 0.5f * MathF.Sin(t * twinkleSpeed + idx * 1.15f)) * fade;
+            float wave = 0.5f + 0.5f * MathF.Sin(t * twinkleSpeed + idx * 1.15f);
             float tw = 0.44f + 0.56f * wave;
             var col = palette[idx % palette.Length];
 
@@ -2657,6 +2916,8 @@ public static class Shell
                     _holes.Add(ThemeCodeEditor.Rect);
                 if (AudioStudioPanel.Open && AudioStudioPanel.PanelRect.W > 0 && AudioStudioPanel.PanelRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
                     _holes.Add(AudioStudioPanel.PanelRect);
+                if (AnalyticsPanel.Open && AnalyticsPanel.PanelRect.W > 0 && AnalyticsPanel.PanelRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
+                    _holes.Add(AnalyticsPanel.PanelRect);
                 if (LoginModal.Open && LoginModal.Rect.W > 0 && LoginModal.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
                     _holes.Add(LoginModal.Rect);
                 if (AccountMenu.Open && AccountMenu.Rect.W > 0 && AccountMenu.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
@@ -2726,7 +2987,7 @@ public static class Shell
 
     public static bool SpaceDown(bool repeat)
     {
-        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open) return false;
+        if (Menus.Open || AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open || AnalyticsPanel.Open) return false;
         if (T.Current == null || !P.HasMedia) return false;
         if (!repeat)
         {
@@ -2807,6 +3068,7 @@ public static class Shell
         {
             if (UI.AutoScrollActive) UI.StopAutoScroll();
             else if (LoginModal.Open) LoginModal.Close();
+            else if (AnalyticsPanel.Open) AnalyticsPanel.Close();
             else if (AudioStudioPanel.Open) AudioStudioPanel.Close();
             else if (ThemeCodeEditor.Open) ThemeCodeEditor.Close();
             else if (AccountMenu.Open) AccountMenu.Close();
@@ -2817,7 +3079,7 @@ public static class Shell
         }
         if (ctrl && !alt && vk == 'E' && !Edit.AnyFocused) { AudioStudioPanel.Toggle(); return true; }
         // Block navigation/player hotkeys while an overlay panel is open
-        if (AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open) return false;
+        if (AccountMenu.Open || SharePanel.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open || AnalyticsPanel.Open) return false;
 
         // Global Ctrl+V anywhere outside Edit boxes -> immediately paste link or text into search!
         if (ctrl && !alt && vk == 'V' && !Edit.AnyFocused)
@@ -2921,22 +3183,37 @@ public static class Shell
         var cur = T.Current;
         if (fs && cur != null && _cur is not ShortsPage && !(_cur is WatchPage wp && wp.Video.VideoId == cur.VideoId))
             OpenVideo(cur, T.CurrentSource ?? "home");
-        _fullscreen = fs;
         var h = App.Hwnd;
+        var mi = new W.MONITORINFO { cbSize = (uint)sizeof(W.MONITORINFO) };
+        W.GetMonitorInfoW(W.MonitorFromWindow(h, 2), &mi);
+        float sc = MathF.Max(0.5f, Gfx.Scale);
         if (fs)
         {
+            // Convert current video rect to exact monitor-relative DIPs so fullscreen zooms seamlessly from the EXACT pixel on screen!
+            W.RECT wr;
+            W.GetWindowRect(h, &wr);
+            float offX = (wr.L - mi.rcMonitor.L) / sc;
+            float offY = (wr.T - mi.rcMonitor.T) / sc;
+            _fsFromRect = new R(offX + _videoRect.X, offY + _videoRect.Y, _videoRect.W, _videoRect.H);
+            _fsFromRadius = _videoRadius;
+            _fsAnimAt = Environment.TickCount64;
+            _fullscreen = true;
             fixed (W.WINDOWPLACEMENT* p = &_savedPlacement) { p->length = (uint)sizeof(W.WINDOWPLACEMENT); W.GetWindowPlacement(h, p); }
             _savedStyle = W.GetWindowLongPtrW(h, W.GWL_STYLE);
-            var mi = new W.MONITORINFO { cbSize = (uint)sizeof(W.MONITORINFO) };
-            W.GetMonitorInfoW(W.MonitorFromWindow(h, 2), &mi);
             W.SetWindowLongPtrW(h, W.GWL_STYLE, unchecked((nint)(W.WS_POPUP | W.WS_VISIBLE | W.WS_CLIPCHILDREN)));
             W.SetWindowPos(h, 0, mi.rcMonitor.L, mi.rcMonitor.T, mi.rcMonitor.R - mi.rcMonitor.L, mi.rcMonitor.B - mi.rcMonitor.T, W.SWP_NOZORDER | W.SWP_FRAMECHANGED);
         }
         else
         {
+            _fullscreen = false;
             W.SetWindowLongPtrW(h, W.GWL_STYLE, _savedStyle);
             fixed (W.WINDOWPLACEMENT* p = &_savedPlacement) W.SetWindowPlacement(h, p);
             W.SetWindowPos(h, 0, 0, 0, 0, 0, W.SWP_NOMOVE | W.SWP_NOSIZE | W.SWP_NOZORDER | W.SWP_FRAMECHANGED);
+            W.RECT wr;
+            W.GetWindowRect(h, &wr);
+            _fsFromRect = new R(0, 0, MathF.Max(16, (wr.R - wr.L) / sc), MathF.Max(16, (wr.B - wr.T) / sc));
+            _fsFromRadius = 0f;
+            _fsAnimAt = Environment.TickCount64;
         }
         App.Invalidate();
     }
@@ -3035,7 +3312,7 @@ public static class Shell
     public static void Tick()
     {
         var now = Environment.TickCount64;
-        if (Themes.IsAdaptiveVideo) Themes.SyncAdaptiveFromOpenVideo();
+        if (Themes.IsLiveAdaptiveEnabled) Themes.SyncAdaptiveFromOpenVideo();
         if (_volSaveDueAt > 0 && now >= _volSaveDueAt)
         {
             _volSaveDueAt = 0;

@@ -303,6 +303,8 @@ public sealed class PlaybackTracker
                     if (gen != _gen) return;
                     _segments = segs;
                     CurrentChanged?.Invoke();
+                    // If playback is already inside a sponsor segment when SponsorBlock responds, skip it immediately
+                    if (_timeValid && !_p.Paused && !_p.IsLiveStream) OnTime(_p.TimePos);
                 });
             });
         }
@@ -317,7 +319,8 @@ public sealed class PlaybackTracker
 
     private void LoadFull(StreamInfo s, string? title, double start, bool keepPause)
     {
-        _p.LoadStream(s, title, start, keepPause);
+        _p.LoadStream(s, title, s.IsLive ? 0 : start, keepPause);
+        if (s.IsLive) CurrentChanged?.Invoke();
         if (_countedPlay != s.VideoId)
         {
             _countedPlay = s.VideoId;
@@ -535,30 +538,79 @@ public sealed class PlaybackTracker
         Db.UpdateWatch(_sessionId, title, channel, _timeValid ? _p.TimePos : _startPos, _timeValid ? _p.Duration : 0, 0);
     }
 
+    private long _lastSkipTick;
+
     private void OnTime(double t)
     {
         if (!_fileLoaded) return; // still the previous video's clock
         _timeValid = true;
-        if (_segments.Count > 0)
+        if (_segments.Count > 0 && !_p.IsLiveStream && Environment.TickCount64 - _lastSkipTick > 350)
         {
             for (int i = 0; i < _segments.Count; i++)
             {
                 var s = _segments[i];
                 if (s.ActionType != "skip") continue;
-                if (t >= s.Start && t < s.End - 0.5 && !_skipped.Contains(i))
+                if (t >= s.Start && t < s.End - 0.35 && !_skipped.Contains(i))
                 {
                     _skipped.Add(i);
+                    _lastSkipTick = Environment.TickCount64;
                     Save(force: true);  // what was watched up to the segment counts, the jump over it does not
                     var dur = _p.Duration;
-                    var dest = CurrentSource == "shorts" && dur > 2 && s.End >= dur - 1.2 ? 0.0 : s.End;
+                    double dest = s.End;
+                    // Chain any immediately adjacent/overlapping skip segments into ONE single seek (prevents double-seek decoder stalls!)
+                    bool chained;
+                    do
+                    {
+                        chained = false;
+                        for (int j = 0; j < _segments.Count; j++)
+                        {
+                            if (_skipped.Contains(j)) continue;
+                            var next = _segments[j];
+                            if (next.ActionType == "skip" && dest >= next.Start - 0.5 && dest < next.End - 0.35)
+                            {
+                                _skipped.Add(j);
+                                dest = next.End;
+                                chained = true;
+                            }
+                        }
+                    } while (chained);
+
+                    if (CurrentSource == "shorts" && dur > 2 && dest >= dur - 1.2) dest = 0.0;
+                    else if (dur > 2 && dest >= dur - 0.4) dest = Math.Max(0, dur - 0.3);
                     _lastPos = dest;
-                    _p.SeekAbsolute(dest);
-                    _p.ShowText(L.T("Пропущено: ", "Skipped: ") + Extras.CategoryName(s.Category), 2200);
+                    // Keyframe-aligned seek avoids D3D11VA frozen-picture-while-audio-plays on VP9/AV1 sponsor jumps
+                    _p.SeekKeyframe(dest);
+                    _p.Command("script-message-to", "fluxosc", "flux-skipped",
+                        s.Start.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
+                        s.Category ?? "sponsor");
                     break;
                 }
             }
         }
         if (Math.Abs(t - _lastSavedAt) >= 5) Save(force: false);
+    }
+
+    /// <summary>Seeks back to a just-skipped SponsorBlock segment so the user can watch it without auto-skipping again.</summary>
+    public void UnskipSegment(double startSeconds)
+    {
+        for (int i = 0; i < _segments.Count; i++)
+        {
+            if (Math.Abs(_segments[i].Start - startSeconds) < 2.0)
+                _skipped.Add(i); // keep marked as skipped so OnTime never re-skips it
+        }
+        _lastPos = Math.Max(0, startSeconds);
+        _p.SeekKeyframe(_lastPos);
+    }
+
+    /// <summary>When the user manually clicks/scrubs directly into a SponsorBlock ad segment, let them watch it without auto-skipping.</summary>
+    public void OnManualSeek(double seconds)
+    {
+        for (int i = 0; i < _segments.Count; i++)
+        {
+            var s = _segments[i];
+            if (seconds >= s.Start - 0.5 && seconds <= s.End)
+                _skipped.Add(i);
+        }
     }
 
     private void Save(bool force)

@@ -223,12 +223,20 @@ jobs:
           path: dist/release/*
           retention-days: 30
 
+      - name: Extract tag release notes
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.ver.outputs.tag }}'
+          $notes = (git tag -l --format='%(contents)' $tag | Out-String).Trim()
+          Set-Content -Path dist/release/NOTES.md -Value $notes -Encoding UTF8
+
       - name: Publish GitHub Release
         if: github.event_name == 'push' || inputs.publish_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: FluxTube ${{ steps.ver.outputs.version }}
+          body_path: dist/release/NOTES.md
           generate_release_notes: true
           make_latest: true
           files: |

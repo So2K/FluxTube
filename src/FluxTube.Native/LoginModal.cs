@@ -55,9 +55,10 @@ public static class LoginModal
     {
         if (!Open) { Rect = default; return; }
 
-        float t = Math.Clamp((UI.Now - _openedAt) / 150f, 0, 1);
-        if (t < 1) UI.Animate();
-        float ease = 1f - (1f - t) * (1f - t);
+        float t = Math.Clamp((UI.Now - _openedAt) / 260f, 0f, 1f);
+        if (t < 1f) UI.Animate();
+        float inv = 1f - t;
+        float ease = 1f - inv * inv * inv * inv;
 
         float w = Gfx.W, h = Gfx.H;
         Gfx.Fill(new R(0, 0, w, h), Gfx.Fade(0xFF000000, (Th.Light ? 0.28f : 0.56f) * ease));

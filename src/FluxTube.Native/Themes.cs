@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
+using FluxTube.Player;
 using FluxTube.Services;
 
 namespace FluxTube;
@@ -149,79 +150,443 @@ public static class Themes
     public static Theme Current { get; private set; } = BuiltIn[0];
     public static bool IsNewYear => Current.Name == "Новогодняя";
     public static bool IsAdaptiveVideo => Current.Name == AdaptiveVideoName;
+    public static bool IsLiveAdaptiveEnabled => IsAdaptiveVideo || AppSettings.Current.VideoThemeAdapt == "all";
+    public static bool IsLiveMorphing => _liveMorphing;
     public static bool IsCustom(string name) => _customFiles.ContainsKey(name);
 
-    private static string? _adaptiveVid;
+    private static string? _adaptiveSourceKey;
     private static uint _adaptiveDom1, _adaptiveDom2;
     private static bool _adaptiveNeutral;
+    private static int _adaptiveLumaBucket = -1;
+    private static string? _adaptiveBaseName;
     private static Theme? _adaptiveLiveTheme;
+    private static long _lastFrameReqAt;
+    private static bool _liveActive, _hasLiveTarget, _liveMorphing;
+    private static Pal _liveTarget;
+    private static PalF _liveCurF;
+    private static bool _liveCurFValid;
+    private static long _lastChromeAt;
+    private static uint _lastChromeBg, _lastChromeBrand;
+    // Live 5x3 (15-zone) pinpoint spatial lightfield eased smoothly for app-wide spatial backdrop projection
+    private static readonly float[] _spCurR = new float[15];
+    private static readonly float[] _spCurG = new float[15];
+    private static readonly float[] _spCurB = new float[15];
+    private static readonly float[] _spTgtR = new float[15];
+    private static readonly float[] _spTgtG = new float[15];
+    private static readonly float[] _spTgtB = new float[15];
+    private static float _spStrength, _spTargetStrength;
+    private static uint _spHash;
 
-    /// <summary>Builds a harmonious dark palette adapted from a video's dominant colors (or sleek neutral charcoal-gray for white/B&amp;W videos).</summary>
-    private static Theme BuildAdaptiveTheme(uint dom1, uint dom2, bool isNeutral)
+    public static uint SpatialFieldHash => _spHash;
+    public static float SpatialFieldStrength => _spStrength;
+
+    /// <summary>Bilinearly samples the smoothly-eased 5x3 live video spatial color field at normalized window coordinates (u, v).</summary>
+    public static bool TrySampleSpatialField(float u, float v, out float r, out float g, out float b, out float strength)
     {
-        if (isNeutral)
-        {
-            // Pure white / neutral / monochrome video -> clean dark neutral charcoal-gray + silver-white accent (zero red/blue tint!)
-            uint nBrand = dom1 != 0 ? dom1 : 0xFFD2D6DDu;
-            uint nBrand2 = dom2 != 0 ? dom2 : 0xFF9096A2u;
-            uint nBg = Gfx.Mix(0xFF101113, nBrand, 0.04f);
-            uint nPanel = Gfx.Mix(0xFF18191D, nBrand, 0.05f);
-            uint nCard = Gfx.Mix(0xFF22242A, nBrand, 0.06f);
-            uint nText = 0xFFF3F4F6;
-            uint nSub = 0xFFA4A8B2;
-            uint nDim = 0xFF6B707B;
-            uint nOnBrand = Luma(nBrand) > 0.56f ? 0xFF101114 : 0xFFFFFFFF;
-            return new Theme(AdaptiveVideoName, "Свои", false, nBg, nPanel, nCard, nText, nSub, nDim, nBrand, nOnBrand, nBrand2,
-                DefaultBackdrop: "matte", DefaultNeonGlow: false);
-        }
+        strength = _spStrength;
+        if (strength < 0.015f) { r = g = b = 0f; return false; }
+        float fx = Math.Clamp(u, 0f, 1f) * (SpatialGrid15.Cols - 1);
+        float fy = Math.Clamp(v, 0f, 1f) * (SpatialGrid15.Rows - 1);
+        int x0 = (int)MathF.Floor(fx), y0 = (int)MathF.Floor(fy);
+        int x1 = Math.Min(SpatialGrid15.Cols - 1, x0 + 1), y1 = Math.Min(SpatialGrid15.Rows - 1, y0 + 1);
+        float tx = fx - x0, ty = fy - y0;
+        int i00 = y0 * 5 + x0, i10 = y0 * 5 + x1, i01 = y1 * 5 + x0, i11 = y1 * 5 + x1;
+        float r0 = _spCurR[i00] + (_spCurR[i10] - _spCurR[i00]) * tx;
+        float g0 = _spCurG[i00] + (_spCurG[i10] - _spCurG[i00]) * tx;
+        float b0 = _spCurB[i00] + (_spCurB[i10] - _spCurB[i00]) * tx;
+        float r1 = _spCurR[i01] + (_spCurR[i11] - _spCurR[i01]) * tx;
+        float g1 = _spCurG[i01] + (_spCurG[i11] - _spCurG[i01]) * tx;
+        float b1 = _spCurB[i01] + (_spCurB[i11] - _spCurB[i01]) * tx;
+        r = r0 + (r1 - r0) * ty;
+        g = g0 + (g1 - g0) * ty;
+        b = b0 + (b1 - b0) * ty;
+        return true;
+    }
 
-        static uint BoostBrand(uint c)
+    private static void SetSpatialTargetGrid(in SpatialGrid15 grid, float strength)
+    {
+        _spTargetStrength = strength;
+        for (int i = 0; i < 15; i++)
         {
-            float r = ((c >> 16) & 255) / 255f, g = ((c >> 8) & 255) / 255f, b = (c & 255) / 255f;
+            uint c = grid[i];
+            float r = ((c >> 16) & 255) * (1f / 255f);
+            float g = ((c >> 8) & 255) * (1f / 255f);
+            float b = (c & 255) * (1f / 255f);
+            // Boost chroma slightly so localized colors stay vivid across the window backdrop
             float avg = (r + g + b) / 3f;
-            r = Math.Clamp(avg + (r - avg) * 1.40f, 0f, 1f);
-            g = Math.Clamp(avg + (g - avg) * 1.40f, 0f, 1f);
-            b = Math.Clamp(avg + (b - avg) * 1.40f, 0f, 1f);
-            float max = MathF.Max(r, MathF.Max(g, b));
-            if (max < 0.58f && max > 0.02f) { float k = 0.68f / max; r = MathF.Min(1f, r * k); g = MathF.Min(1f, g * k); b = MathF.Min(1f, b * k); }
-            return 0xFF000000u | ((uint)(r * 255f + 0.5f) << 16) | ((uint)(g * 255f + 0.5f) << 8) | (uint)(b * 255f + 0.5f);
+            _spTgtR[i] = Math.Clamp(avg + (r - avg) * 1.45f, 0f, 1f);
+            _spTgtG[i] = Math.Clamp(avg + (g - avg) * 1.45f, 0f, 1f);
+            _spTgtB[i] = Math.Clamp(avg + (b - avg) * 1.45f, 0f, 1f);
+        }
+    }
+
+    private static void StepSpatialField(float dt)
+    {
+        float maxD = MathF.Abs(_spTargetStrength - _spStrength);
+        float sRate = _spTargetStrength > _spStrength ? 3.5f : 2.6f;
+        _spStrength += (_spTargetStrength - _spStrength) * (1f - MathF.Exp(-dt * sRate));
+        if (_spStrength < 0.004f && _spTargetStrength == 0f) _spStrength = 0f;
+
+        if (_spStrength > 0.004f || _spTargetStrength > 0.004f)
+        {
+            uint h = (uint)(_spStrength * 31f);
+            for (int i = 0; i < 15; i++)
+            {
+                float d = MathF.Abs(_spTgtR[i] - _spCurR[i]) + MathF.Abs(_spTgtG[i] - _spCurG[i]) + MathF.Abs(_spTgtB[i] - _spCurB[i]);
+                if (d > maxD) maxD = d;
+                float rate = 3.2f + MathF.Min(1f, d * 2.2f) * 6.8f;
+                float k = 1f - MathF.Exp(-dt * rate);
+                _spCurR[i] += (_spTgtR[i] - _spCurR[i]) * k;
+                _spCurG[i] += (_spTgtG[i] - _spCurG[i]) * k;
+                _spCurB[i] += (_spTgtB[i] - _spCurB[i]) * k;
+                // Quantized 5-bit spatial hash detects localized light motion across the frame
+                uint q = ((uint)(_spCurR[i] * 31f) << 10) | ((uint)(_spCurG[i] * 31f) << 5) | (uint)(_spCurB[i] * 31f);
+                h = unchecked(h * 16777619u ^ q);
+            }
+            _spHash = h;
+            if (maxD > 0.012f)
+            {
+                _liveMorphing = true;
+                UI.Animate();
+            }
+        }
+        else
+        {
+            _spHash = 0;
+        }
+    }
+
+    public static bool WantsLiveVideoFrames()
+        => IsLiveAdaptiveEnabled
+        && AppSettings.Current.VideoThemeAdapt != "thumb"
+        && !Shell.IsAudioOnlyActive
+        && AppSettings.Current.PlayerQuality != "audio"
+        && MpvPlayer.Instance.HasActiveVideo;
+
+    /// <summary>Pumps async live-frame color sampling from libmpv when video is actively playing (or once on pause/seek).</summary>
+    public static void PumpLiveVideoSample()
+    {
+        if (App.Test || !WantsLiveVideoFrames()) return;
+        if (App.Hwnd != 0 && W.IsIconic(App.Hwnd)) return;
+        if (Gfx.Occluded) return;
+
+        var p = MpvPlayer.Instance;
+        string? openVid = Shell.CurrentWatchVideoId();
+        if (!string.IsNullOrEmpty(openVid) && !string.IsNullOrEmpty(p.CurrentVideoId) && openVid != p.CurrentVideoId)
+            return;
+
+        long now = Environment.TickCount64;
+        if (p.Paused)
+        {
+            if (p.HasPendingFrameProbe && now - _lastFrameReqAt >= 120)
+            {
+                _lastFrameReqAt = now;
+                p.RequestFrameColorSample();
+            }
+            return;
+        }
+        if (p.Buffering) return;
+        long interval = Shell.IsFullscreen ? 500 : 160;
+        if (now - _lastFrameReqAt >= interval)
+        {
+            _lastFrameReqAt = now;
+            p.RequestFrameColorSample();
+        }
+    }
+
+    private static uint BoostBrand(uint c)
+    {
+        float r = ((c >> 16) & 255) / 255f, g = ((c >> 8) & 255) / 255f, b = (c & 255) / 255f;
+        float avg = (r + g + b) / 3f;
+        r = Math.Clamp(avg + (r - avg) * 1.42f, 0f, 1f);
+        g = Math.Clamp(avg + (g - avg) * 1.42f, 0f, 1f);
+        b = Math.Clamp(avg + (b - avg) * 1.42f, 0f, 1f);
+        float max = MathF.Max(r, MathF.Max(g, b));
+        if (max < 0.60f && max > 0.02f) { float k = 0.70f / max; r = MathF.Min(1f, r * k); g = MathF.Min(1f, g * k); b = MathF.Min(1f, b * k); }
+        return 0xFF000000u | ((uint)(r * 255f + 0.5f) << 16) | ((uint)(g * 255f + 0.5f) << 8) | (uint)(b * 255f + 0.5f);
+    }
+
+    private static uint DeepenForLight(uint c)
+    {
+        float r = ((c >> 16) & 255) / 255f, g = ((c >> 8) & 255) / 255f, b = (c & 255) / 255f;
+        float avg = (r + g + b) / 3f;
+        r = Math.Clamp(avg + (r - avg) * 1.38f, 0f, 1f);
+        g = Math.Clamp(avg + (g - avg) * 1.38f, 0f, 1f);
+        b = Math.Clamp(avg + (b - avg) * 1.38f, 0f, 1f);
+        float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        if (lum > 0.50f)
+        {
+            float k = 0.50f / lum;
+            r *= k; g *= k; b *= k;
+        }
+        return 0xFF000000u | ((uint)(r * 255f + 0.5f) << 16) | ((uint)(g * 255f + 0.5f) << 8) | (uint)(b * 255f + 0.5f);
+    }
+
+    /// <summary>
+    /// Builds a harmonious palette adapted from live video frame (or cover art) colors while preserving
+    /// each theme's Light/Dark/AMOLED character, contrast, and legibility.
+    /// </summary>
+    private static Theme BuildAdaptedTheme(Theme baseTheme, uint dom1, uint dom2, bool isNeutral, float sceneLuma)
+    {
+        float lumNorm = Math.Clamp(sceneLuma, 0.05f, 0.90f);
+        bool isFullAdaptive = baseTheme.Name == AdaptiveVideoName;
+
+        uint nBrand = dom1 != 0 ? dom1 : 0xFFD2D6DDu;
+        uint nBrand2 = dom2 != 0 ? dom2 : 0xFF9096A2u;
+        uint brand = isNeutral ? nBrand : BoostBrand(dom1);
+        uint brand2 = isNeutral ? nBrand2 : (dom2 != 0 && dom2 != dom1 ? BoostBrand(dom2) : ShiftHue(brand, 42f));
+
+        // 1. Flagship "Adaptive (Video)" theme — full atmospheric real-time palette (deepens to obsidian on dark covers!)
+        if (isFullAdaptive)
+        {
+            float darkCover = Math.Clamp((0.28f - sceneLuma) / 0.24f, 0f, 1f);
+            if (isNeutral)
+            {
+                float lift = lumNorm * 0.045f * (1f - darkCover * 0.8f);
+                uint nBg = Gfx.Mix(Gfx.Mix(0xFF0F1013, 0xFF040406, darkCover), nBrand, 0.025f + lift * 0.6f);
+                uint nPanel = Gfx.Mix(Gfx.Mix(0xFF17181D, 0xFF08090C, darkCover), nBrand, 0.04f + lift * 0.7f);
+                uint nCard = Gfx.Mix(Gfx.Mix(0xFF21232A, 0xFF101116, darkCover), nBrand, 0.05f + lift * 0.8f);
+                uint nText = 0xFFF3F4F6;
+                uint nSub = 0xFFA4A8B2;
+                uint nDim = 0xFF6B707B;
+                uint nOnBrand = Luma(nBrand) > 0.56f ? 0xFF101114 : 0xFFFFFFFF;
+                return baseTheme with { Bg = nBg, Panel = nPanel, Card = nCard, Text = nText, Sub = nSub, Dim = nDim, Brand = nBrand, OnBrand = nOnBrand, Brand2 = nBrand2 };
+            }
+
+            float washMul = 1f - darkCover * 0.68f;
+            float kBg = (0.11f + lumNorm * 0.06f) * washMul;
+            float kPanel = (0.16f + lumNorm * 0.07f) * washMul;
+            float kCard = (0.20f + lumNorm * 0.08f) * washMul;
+            uint cardMix = Gfx.Mix(brand, brand2, 0.26f);
+            uint bg = Gfx.Mix(Gfx.Mix(0xFF08080C, 0xFF030305, darkCover), brand, kBg);
+            uint panel = Gfx.Mix(Gfx.Mix(0xFF101118, 0xFF07070B, darkCover), brand, kPanel);
+            uint card = Gfx.Mix(Gfx.Mix(0xFF181924, 0xFF0E0F15, darkCover), cardMix, kCard);
+            uint text = Gfx.Mix(0xFFF5F5FA, brand, 0.05f);
+            uint sub = Gfx.Mix(0xFFA3A5B6, brand, 0.20f * (1f - darkCover * 0.35f));
+            uint dim = Gfx.Mix(0xFF65687A, brand, 0.18f * (1f - darkCover * 0.35f));
+            uint onBrand = Luma(brand) > 0.59f ? 0xFF0D0E12 : 0xFFFFFFFF;
+            return baseTheme with { Bg = bg, Panel = panel, Card = card, Text = text, Sub = sub, Dim = dim, Brand = brand, OnBrand = onBrand, Brand2 = brand2 };
         }
 
-        uint brand = BoostBrand(dom1);
-        uint brand2 = dom2 != 0 && dom2 != dom1 ? BoostBrand(dom2) : ShiftHue(brand, 42f);
-        uint bg = Gfx.Mix(0xFF09090D, brand, 0.11f);
-        uint panel = Gfx.Mix(0xFF111117, brand, 0.16f);
-        uint card = Gfx.Mix(0xFF191922, brand, 0.21f);
-        uint text = Gfx.Mix(0xFFF4F4F8, brand, 0.05f);
-        uint sub = Gfx.Mix(0xFFA2A4B4, brand, 0.18f);
-        uint dim = Gfx.Mix(0xFF646778, brand, 0.16f);
-        uint onBrand = Luma(brand) > 0.62f ? 0xFF0E0E12 : 0xFFFFFFFF;
-        return new Theme(AdaptiveVideoName, "Свои", false, bg, panel, card, text, sub, dim, brand, onBrand, brand2,
-            DefaultBackdrop: "mesh", DefaultNeonGlow: true);
+        // 2. Light themes — keep airy paper clarity, harmonize vivid deepened accent + soft pastel surface wash
+        if (baseTheme.Light)
+        {
+            uint lBrand = isNeutral ? 0xFF4B505C : DeepenForLight(brand);
+            uint lBrand2 = isNeutral ? 0xFF7B818E : DeepenForLight(brand2);
+            uint pastel1 = Gfx.Mix(0xFFFFFFFF, lBrand, 0.22f);
+            uint pastel2 = Gfx.Mix(0xFFFFFFFF, lBrand2, 0.18f);
+            uint bg = Gfx.Mix(baseTheme.Bg, pastel1, isNeutral ? 0.06f : 0.22f);
+            uint panel = Gfx.Mix(baseTheme.Panel, pastel1, isNeutral ? 0.09f : 0.30f);
+            uint card = Gfx.Mix(baseTheme.Card, pastel2, isNeutral ? 0.05f : 0.14f);
+            uint sub = Gfx.Mix(baseTheme.Sub, lBrand, isNeutral ? 0.05f : 0.16f);
+            uint dim = Gfx.Mix(baseTheme.Dim, lBrand, isNeutral ? 0.05f : 0.14f);
+            uint onBrand = Luma(lBrand) > 0.60f ? 0xFF101116 : 0xFFFFFFFF;
+            return baseTheme with { Bg = bg, Panel = panel, Card = card, Sub = sub, Dim = dim, Brand = lBrand, OnBrand = onBrand, Brand2 = lBrand2 };
+        }
+
+        // 3. AMOLED / Pitch-black themes — keep pure obsidian black Bg, illuminate Panel/Card & live neon accents
+        if (Luma(baseTheme.Bg) < 0.018f)
+        {
+            uint bg = Gfx.Mix(baseTheme.Bg, brand, isNeutral ? 0.015f : 0.032f);
+            uint panel = Gfx.Mix(baseTheme.Panel, brand, isNeutral ? 0.05f : 0.13f);
+            uint card = Gfx.Mix(baseTheme.Card, Gfx.Mix(brand, brand2, 0.25f), isNeutral ? 0.07f : 0.19f);
+            uint sub = Gfx.Mix(baseTheme.Sub, brand, isNeutral ? 0.06f : 0.18f);
+            uint dim = Gfx.Mix(baseTheme.Dim, brand, isNeutral ? 0.05f : 0.15f);
+            uint onBrand = Luma(brand) > 0.59f ? 0xFF0A0A0D : 0xFFFFFFFF;
+            return baseTheme with { Bg = bg, Panel = panel, Card = card, Sub = sub, Dim = dim, Brand = brand, OnBrand = onBrand, Brand2 = brand2 };
+        }
+
+        // 4. Standard Dark themes — rich live video mood tinting while preserving theme contrast & structure
+        float dDarkCover = Math.Clamp((0.28f - sceneLuma) / 0.24f, 0f, 1f);
+        float dWash = 1f - dDarkCover * 0.62f;
+        uint baseB2 = baseTheme.Brand2 != 0 ? baseTheme.Brand2 : ShiftHue(baseTheme.Brand, 42f);
+        uint effBrand = isNeutral ? nBrand : Gfx.Mix(brand, baseTheme.Brand, 0.10f);
+        uint effBrand2 = isNeutral ? nBrand2 : Gfx.Mix(brand2, baseB2, 0.10f);
+        uint targetBg = isNeutral ? Gfx.Mix(Gfx.Mix(0xFF101114, 0xFF040406, dDarkCover), nBrand, 0.03f * dWash) : Gfx.Mix(Gfx.Mix(0xFF0A0A0F, 0xFF030305, dDarkCover), effBrand, (0.12f + lumNorm * 0.06f) * dWash);
+        uint targetPanel = isNeutral ? Gfx.Mix(Gfx.Mix(0xFF17181E, 0xFF08090C, dDarkCover), nBrand, 0.05f * dWash) : Gfx.Mix(Gfx.Mix(0xFF12131B, 0xFF07070B, dDarkCover), effBrand, (0.17f + lumNorm * 0.06f) * dWash);
+        uint targetCard = isNeutral ? Gfx.Mix(Gfx.Mix(0xFF20222A, 0xFF101116, dDarkCover), nBrand, 0.06f * dWash) : Gfx.Mix(Gfx.Mix(0xFF1B1C27, 0xFF0E0F15, dDarkCover), Gfx.Mix(effBrand, effBrand2, 0.25f), (0.21f + lumNorm * 0.07f) * dWash);
+        uint dBg = Gfx.Mix(baseTheme.Bg, targetBg, 0.62f + dDarkCover * 0.26f);
+        uint dPanel = Gfx.Mix(baseTheme.Panel, targetPanel, 0.65f + dDarkCover * 0.24f);
+        uint dCard = Gfx.Mix(baseTheme.Card, targetCard, 0.65f + dDarkCover * 0.24f);
+        uint dSub = Gfx.Mix(baseTheme.Sub, Gfx.Mix(0xFFA4A6B6, effBrand, isNeutral ? 0.05f : 0.22f), 0.48f);
+        uint dDim = Gfx.Mix(baseTheme.Dim, Gfx.Mix(0xFF66697A, effBrand, isNeutral ? 0.05f : 0.18f), 0.45f);
+        uint dOnBrand = Luma(effBrand) > 0.59f ? 0xFF0D0E12 : 0xFFFFFFFF;
+        return baseTheme with { Bg = dBg, Panel = dPanel, Card = dCard, Sub = dSub, Dim = dDim, Brand = effBrand, OnBrand = dOnBrand, Brand2 = effBrand2 };
+    }
+
+    private static bool TryExtractFromStoryboardZones(
+        (float R, float G, float B) tl, (float R, float G, float B) tr,
+        (float R, float G, float B) bl, (float R, float G, float B) br,
+        (float R, float G, float B) c,
+        out uint dom1, out uint dom2, out bool isNeutral, out float avgLuma)
+    {
+        Span<(float R, float G, float B)> zs = [c, tl, tr, bl, br];
+        float sumLum = 0;
+        int best1 = -1, best2 = -1;
+        float bestS1 = -1, bestS2 = -1;
+        for (int i = 0; i < zs.Length; i++)
+        {
+            var z = zs[i];
+            float mx = MathF.Max(z.R, MathF.Max(z.G, z.B));
+            float mn = MathF.Min(z.R, MathF.Min(z.G, z.B));
+            float sat = mx > 0.01f ? (mx - mn) / mx : 0f;
+            sumLum += 0.2126f * z.R + 0.7152f * z.G + 0.0722f * z.B;
+            float score = sat * sat * (0.3f + 0.7f * mx) * (i == 0 ? 1.25f : 1f);
+            if (sat >= 0.14f && mx >= 0.12f && score > bestS1) { bestS1 = score; best1 = i; }
+        }
+        avgLuma = sumLum / zs.Length;
+        if (best1 < 0)
+        {
+            isNeutral = true;
+            float tone = avgLuma >= 0.52f ? 0.84f : 0.72f;
+            byte v1 = (byte)(tone * 255f + 0.5f), v2 = (byte)((tone - 0.20f) * 255f + 0.5f);
+            dom1 = 0xFF000000u | ((uint)v1 << 16) | ((uint)v1 << 8) | v1;
+            dom2 = 0xFF000000u | ((uint)v2 << 16) | ((uint)v2 << 8) | v2;
+            return true;
+        }
+        for (int i = 0; i < zs.Length; i++)
+        {
+            if (i == best1) continue;
+            var z = zs[i];
+            var z1 = zs[best1];
+            float diff = MathF.Abs(z.R - z1.R) + MathF.Abs(z.G - z1.G) + MathF.Abs(z.B - z1.B);
+            float mx = MathF.Max(z.R, MathF.Max(z.G, z.B));
+            float mn = MathF.Min(z.R, MathF.Min(z.G, z.B));
+            float sat = mx > 0.01f ? (mx - mn) / mx : 0f;
+            float score = sat * (0.3f + 0.7f * mx) * (0.5f + diff);
+            if (sat >= 0.12f && diff >= 0.18f && score > bestS2) { bestS2 = score; best2 = i; }
+        }
+        static uint Pack((float R, float G, float B) z)
+            => 0xFF000000u | ((uint)(Math.Clamp(z.R, 0f, 1f) * 255f + 0.5f) << 16)
+                           | ((uint)(Math.Clamp(z.G, 0f, 1f) * 255f + 0.5f) << 8)
+                           |  (uint)(Math.Clamp(z.B, 0f, 1f) * 255f + 0.5f);
+        isNeutral = false;
+        dom1 = Pack(zs[best1]);
+        dom2 = best2 >= 0 ? Pack(zs[best2]) : ShiftHue(dom1, 42f);
+        return true;
+    }
+
+    private static void SetLiveTarget(in Pal target)
+    {
+        if (_moving)
+        {
+            _to = target;
+            _liveTarget = target;
+            _hasLiveTarget = true;
+            return;
+        }
+        if (!_liveCurFValid)
+        {
+            _liveCurF = ToPalF(Snapshot());
+            _liveCurFValid = true;
+        }
+        _liveTarget = target;
+        _hasLiveTarget = true;
+        _liveMorphing = true;
+        UI.Animate();
     }
 
     public static void SyncAdaptiveFromOpenVideo()
     {
-        if (!IsAdaptiveVideo) return;
+        if (!IsLiveAdaptiveEnabled)
+        {
+            if (_liveActive)
+            {
+                _liveActive = false;
+                _adaptiveSourceKey = null;
+                _adaptiveLiveTheme = null;
+                SetLiveTarget(Derive(Current, AccentOverride));
+            }
+            return;
+        }
+
+        PumpLiveVideoSample();
+
+        var p = MpvPlayer.Instance;
+        string? openWatchVid = Shell.CurrentWatchVideoId();
         string? vid = Shell.AdaptiveVideoId();
-        if (string.IsNullOrEmpty(vid)) return;
-        if (!MusicArt.TryGetColors(vid, out uint dom1, out uint dom2, out bool isNeutral)) return;
-        if (_adaptiveVid == vid && _adaptiveDom1 == dom1 && _adaptiveDom2 == dom2 && _adaptiveNeutral == isNeutral && _adaptiveLiveTheme != null)
+        bool allowLiveFrames = AppSettings.Current.VideoThemeAdapt != "thumb";
+        bool audioOnly = Shell.IsAudioOnlyActive || AppSettings.Current.PlayerQuality == "audio" || !p.HasActiveVideo;
+        bool playerMatchesContext = p.HasActiveVideo
+            && (string.IsNullOrEmpty(openWatchVid) || string.IsNullOrEmpty(p.CurrentVideoId) || openWatchVid == p.CurrentVideoId);
+
+        uint dom1 = 0, dom2 = 0;
+        bool isNeutral = false;
+        float avgLuma = 0.34f;
+        string? sourceKey = null;
+
+        // 1. Video mode -> real-time current decoded video frame!
+        if (allowLiveFrames && !audioOnly && playerMatchesContext)
+        {
+            var sample = p.LatestFrameSample;
+            if (sample.Gen > 0 && sample.MediaKey == p.ActiveMediaKey && sample.Dom1 != 0)
+            {
+                dom1 = sample.Dom1;
+                dom2 = sample.Dom2;
+                isNeutral = sample.IsNeutral;
+                avgLuma = sample.AvgLuma;
+                sourceKey = "frame:" + (sample.MediaKey ?? "local");
+                var sg = sample.Grid;
+                SetSpatialTargetGrid(in sg, isNeutral ? 0.22f : 1.0f);
+            }
+            else if (!string.IsNullOrEmpty(vid)
+                && Storyboard.TrySampleGrid15(vid, p.CurrentVideoId == vid ? p.TimePos : 0, out var sbGrid)
+                && TryExtractFromStoryboardZones(sbGrid.Cell(0, 0), sbGrid.Cell(4, 0), sbGrid.Cell(0, 2), sbGrid.Cell(4, 2), sbGrid.Cell(2, 1), out dom1, out dom2, out isNeutral, out avgLuma))
+            {
+                sourceKey = "sb:" + vid;
+                SetSpatialTargetGrid(in sbGrid, isNeutral ? 0.22f : 0.85f);
+            }
+            else if (!string.IsNullOrEmpty(vid) && MusicArt.TryGetColors(vid, out dom1, out dom2, out isNeutral, out avgLuma))
+            {
+                sourceKey = "thumb:" + vid;
+                _spTargetStrength = 0f;
+            }
+        }
+        // 2. Audio-only mode (or no active video stream) -> crisp thumbnail / cover art with real luminance!
+        else if (!string.IsNullOrEmpty(vid))
+        {
+            _spTargetStrength = 0f;
+            if (MusicArt.TryGetColors(vid, out dom1, out dom2, out isNeutral, out avgLuma))
+                sourceKey = "thumb:" + vid;
+        }
+        else
+        {
+            _spTargetStrength = 0f;
+        }
+
+        if (sourceKey == null || dom1 == 0)
+        {
+            // When no video is open or playing, non-adaptive themes glide cleanly back to their original colors
+            if (!IsAdaptiveVideo && _liveActive && !Shell.HasAnyOpenOrPlayingVideo())
+            {
+                _liveActive = false;
+                _adaptiveSourceKey = null;
+                _adaptiveLiveTheme = null;
+                SetLiveTarget(Derive(Current, AccentOverride));
+            }
+            return;
+        }
+
+        int lumaBucket = (int)MathF.Round(avgLuma * 14f);
+        if (_liveActive
+            && _adaptiveBaseName == Current.Name
+            && _adaptiveSourceKey == sourceKey
+            && _adaptiveDom1 == dom1
+            && _adaptiveDom2 == dom2
+            && _adaptiveNeutral == isNeutral
+            && _adaptiveLumaBucket == lumaBucket
+            && _adaptiveLiveTheme != null)
             return;
 
-        _adaptiveVid = vid;
+        _liveActive = true;
+        _adaptiveBaseName = Current.Name;
+        _adaptiveSourceKey = sourceKey;
         _adaptiveDom1 = dom1;
         _adaptiveDom2 = dom2;
         _adaptiveNeutral = isNeutral;
-        _adaptiveLiveTheme = BuildAdaptiveTheme(dom1, dom2, isNeutral);
-        _from = Snapshot();
-        _to = Derive(_adaptiveLiveTheme, null);
-        _startedAt = UI.Now;
-        _moving = true;
-        Gfx.InvalidateBackdrop();
-        Changed?.Invoke();
-        UI.Animate();
-        App.Invalidate();
+        _adaptiveLumaBucket = lumaBucket;
+        _adaptiveLiveTheme = BuildAdaptedTheme(Current, dom1, dom2, isNeutral, avgLuma);
+        SetLiveTarget(Derive(_adaptiveLiveTheme, null));
     }
 
     private static (string Group, Theme[] Items)[] BuildGroups(Theme[] list)
@@ -474,6 +839,76 @@ public static class Themes
         public bool Light;
     }
 
+    private struct ColF
+    {
+        public float A, R, G, B;
+        public static ColF From(uint c) => new() { A = (c >> 24) & 255, R = (c >> 16) & 255, G = (c >> 8) & 255, B = c & 255 };
+        public uint Pack() => ((uint)Math.Clamp((int)(A + 0.5f), 0, 255) << 24)
+                            | ((uint)Math.Clamp((int)(R + 0.5f), 0, 255) << 16)
+                            | ((uint)Math.Clamp((int)(G + 0.5f), 0, 255) << 8)
+                            |  (uint)Math.Clamp((int)(B + 0.5f), 0, 255);
+        public float StepToward(uint target, float k)
+        {
+            float ta = (target >> 24) & 255, tr = (target >> 16) & 255, tg = (target >> 8) & 255, tb = target & 255;
+            A += (ta - A) * k; R += (tr - R) * k; G += (tg - G) * k; B += (tb - B) * k;
+            return MathF.Max(MathF.Max(MathF.Abs(ta - A), MathF.Abs(tr - R)), MathF.Max(MathF.Abs(tg - G), MathF.Abs(tb - B)));
+        }
+    }
+
+    private struct PalF
+    {
+        public ColF Bg, Panel, Card, Text, Sub, Dim, Brand, Brand2, OnBrand, Ink, Hover, Press, Line, Thumb, Field, Menu, Icon, Track, Good, Warn;
+    }
+
+    private static PalF ToPalF(in Pal p) => new()
+    {
+        Bg = ColF.From(p.Bg), Panel = ColF.From(p.Panel), Card = ColF.From(p.Card), Text = ColF.From(p.Text),
+        Sub = ColF.From(p.Sub), Dim = ColF.From(p.Dim), Brand = ColF.From(p.Brand), Brand2 = ColF.From(p.Brand2), OnBrand = ColF.From(p.OnBrand),
+        Ink = ColF.From(p.Ink), Hover = ColF.From(p.Hover), Press = ColF.From(p.Press), Line = ColF.From(p.Line),
+        Thumb = ColF.From(p.Thumb), Field = ColF.From(p.Field), Menu = ColF.From(p.Menu), Icon = ColF.From(p.Icon),
+        Track = ColF.From(p.Track), Good = ColF.From(p.Good), Warn = ColF.From(p.Warn),
+    };
+
+    private static Pal PackPalF(in PalF f, bool light) => new()
+    {
+        Bg = f.Bg.Pack(), Panel = f.Panel.Pack(), Card = f.Card.Pack(), Text = f.Text.Pack(),
+        Sub = f.Sub.Pack(), Dim = f.Dim.Pack(), Brand = f.Brand.Pack(), Brand2 = f.Brand2.Pack(), OnBrand = f.OnBrand.Pack(),
+        Ink = f.Ink.Pack(), Hover = f.Hover.Pack(), Press = f.Press.Pack(), Line = f.Line.Pack(),
+        Thumb = f.Thumb.Pack(), Field = f.Field.Pack(), Menu = f.Menu.Pack(), Icon = f.Icon.Pack(),
+        Track = f.Track.Pack(), Good = f.Good.Pack(), Warn = f.Warn.Pack(), Light = light,
+    };
+
+    private static float StepPalF(ref PalF f, in Pal dst, float k)
+    {
+        float m = 0f;
+        m = MathF.Max(m, f.Bg.StepToward(dst.Bg, k));
+        m = MathF.Max(m, f.Panel.StepToward(dst.Panel, k));
+        m = MathF.Max(m, f.Card.StepToward(dst.Card, k));
+        m = MathF.Max(m, f.Text.StepToward(dst.Text, k));
+        m = MathF.Max(m, f.Sub.StepToward(dst.Sub, k));
+        m = MathF.Max(m, f.Dim.StepToward(dst.Dim, k));
+        m = MathF.Max(m, f.Brand.StepToward(dst.Brand, k));
+        m = MathF.Max(m, f.Brand2.StepToward(dst.Brand2, k));
+        m = MathF.Max(m, f.OnBrand.StepToward(dst.OnBrand, k));
+        m = MathF.Max(m, f.Ink.StepToward(dst.Ink, k));
+        m = MathF.Max(m, f.Hover.StepToward(dst.Hover, k));
+        m = MathF.Max(m, f.Press.StepToward(dst.Press, k));
+        m = MathF.Max(m, f.Line.StepToward(dst.Line, k));
+        m = MathF.Max(m, f.Thumb.StepToward(dst.Thumb, k));
+        m = MathF.Max(m, f.Field.StepToward(dst.Field, k));
+        m = MathF.Max(m, f.Menu.StepToward(dst.Menu, k));
+        m = MathF.Max(m, f.Icon.StepToward(dst.Icon, k));
+        m = MathF.Max(m, f.Track.StepToward(dst.Track, k));
+        m = MathF.Max(m, f.Good.StepToward(dst.Good, k));
+        m = MathF.Max(m, f.Warn.StepToward(dst.Warn, k));
+        return m;
+    }
+
+    private static int RgbDist(uint a, uint b)
+        => Math.Abs((int)((a >> 16) & 255) - (int)((b >> 16) & 255))
+         + Math.Abs((int)((a >> 8) & 255) - (int)((b >> 8) & 255))
+         + Math.Abs((int)(a & 255) - (int)(b & 255));
+
     private static Pal Derive(Theme t, uint? accent)
     {
         var ink = t.Light ? 0xFF000000 : 0xFFFFFFFF;
@@ -585,14 +1020,34 @@ public static class Themes
         else if (theme == AdaptiveVideoName) s.Accent = "";
         if (save) s.Save();
         Current = ByName(s.Theme);
-        if (IsAdaptiveVideo) { _adaptiveVid = null; SyncAdaptiveFromOpenVideo(); }
+        _adaptiveSourceKey = null;
+        _adaptiveBaseName = null;
+        _adaptiveLiveTheme = null;
+        _liveActive = false;
+        _hasLiveTarget = false;
+        _liveMorphing = false;
+        _liveCurFValid = false;
+        if (IsLiveAdaptiveEnabled) SyncAdaptiveFromOpenVideo();
         _from = Snapshot();
-        _to = Derive(IsAdaptiveVideo && _adaptiveLiveTheme != null ? _adaptiveLiveTheme : Current, IsAdaptiveVideo ? null : AccentOverride);
+        _to = _liveActive && _adaptiveLiveTheme != null
+            ? Derive(_adaptiveLiveTheme, null)
+            : Derive(Current, IsAdaptiveVideo ? null : AccentOverride);
         _startedAt = UI.Now;
         _moving = save;
         if (!save) Set(_to);
         if (s.UiFont != prevFont) Gfx.ClearTextCache();
         Changed?.Invoke();
+        App.Invalidate();
+    }
+
+    /// <summary>Called when the user toggles the live video adaptation mode in Settings.</summary>
+    public static void OnAdaptationModeChanged()
+    {
+        _adaptiveSourceKey = null;
+        _adaptiveBaseName = null;
+        _lastFrameReqAt = 0;
+        if (WantsLiveVideoFrames()) MpvPlayer.Instance.MarkFrameDirty();
+        SyncAdaptiveFromOpenVideo();
         App.Invalidate();
     }
 
@@ -631,24 +1086,124 @@ public static class Themes
     }
 
     public static event Action? Changed;
+    /// <summary>Throttled lightweight hook fired during live video color morphing (updates DWM window frame + mpv scrubber accent).</summary>
+    public static event Action? LiveChromeChanged;
 
     public static void Tick()
     {
         SyncAdaptiveFromOpenVideo();
-        if (!_moving) return;
-        var t = Math.Clamp((UI.Now - _startedAt) / 360f, 0, 1);
-        var e = t * t * (3 - 2 * t);
-        Set(Blend(_from, _to, e));
-        if (t >= 1) { _moving = false; Set(_to); Gfx.InvalidateBackdrop(); Changed?.Invoke(); App.Invalidate(); }
+        float dt = (float)Math.Clamp(UI.Dt, 0.001, 0.05);
+        StepSpatialField(dt);
+        if (_moving)
+        {
+            var t = Math.Clamp((UI.Now - _startedAt) / 560f, 0f, 1f);
+            var e = t * t * t * (t * (t * 6f - 15f) + 10f); // quintic smootherstep
+            Set(Blend(_from, _to, e));
+            if (t >= 1)
+            {
+                _moving = false;
+                Set(_to);
+                _liveCurF = ToPalF(_to);
+                _liveCurFValid = true;
+                _lastChromeBg = Th.Bg;
+                _lastChromeBrand = Th.Brand;
+                _lastChromeAt = UI.Now;
+                Gfx.InvalidateBackdrop();
+                Changed?.Invoke();
+                App.Invalidate();
+            }
+            UI.Animate();
+            return;
+        }
+
+        if (!_hasLiveTarget)
+        {
+            if (_liveMorphing && _spStrength <= 0.01f) _liveMorphing = false;
+            return;
+        }
+
+        // Ultra-silky C-infinity exponential color glide (cinematic, never jarring!)
+        int deltaMag = RgbDist(Th.Brand, _liveTarget.Brand) + RgbDist(Th.Bg, _liveTarget.Bg);
+        float adaptiveRate = 1.65f + Math.Clamp(deltaMag / 320f, 0f, 1f) * 1.75f;
+        float k = 1f - MathF.Exp(-dt * adaptiveRate);
+        float maxDelta = StepPalF(ref _liveCurF, _liveTarget, k);
+
+        if (maxDelta < 0.25f)
+        {
+            Set(_liveTarget);
+            _liveCurF = ToPalF(_liveTarget);
+            _hasLiveTarget = false;
+            _liveMorphing = false;
+            Gfx.InvalidateBackdrop();
+            if (RgbDist(Th.Bg, _lastChromeBg) >= 2 || RgbDist(Th.Brand, _lastChromeBrand) >= 2)
+            {
+                _lastChromeBg = Th.Bg;
+                _lastChromeBrand = Th.Brand;
+                _lastChromeAt = UI.Now;
+                LiveChromeChanged?.Invoke();
+            }
+            return;
+        }
+
+        Set(PackPalF(_liveCurF, _liveTarget.Light));
+        _liveMorphing = true;
         UI.Animate();
+
+        if (UI.Now - _lastChromeAt >= 200 && (RgbDist(Th.Bg, _lastChromeBg) >= 6 || RgbDist(Th.Brand, _lastChromeBrand) >= 6))
+        {
+            _lastChromeBg = Th.Bg;
+            _lastChromeBrand = Th.Brand;
+            _lastChromeAt = UI.Now;
+            LiveChromeChanged?.Invoke();
+        }
     }
 
     public static (uint Bg, uint Panel, uint Card, uint Text, uint Sub, uint Brand, uint OnBrand, uint Line) Preview(Theme t, bool useAccentOverride = true)
     {
-        var eff = t.Name == AdaptiveVideoName && _adaptiveLiveTheme != null ? _adaptiveLiveTheme : t;
+        var eff = t.Name == AdaptiveVideoName && _adaptiveLiveTheme != null && IsAdaptiveVideo ? _adaptiveLiveTheme : t;
         var p = Derive(eff, t.Name == AdaptiveVideoName ? null : (useAccentOverride ? AccentOverride : null));
         return (p.Bg, p.Panel, p.Card, p.Text, p.Sub, p.Brand, p.OnBrand, p.Line);
     }
 
     public static string Hex(uint c) => "#" + (c & 0xFFFFFF).ToString("X6");
+
+    internal static (bool Ok, string Summary) SelfTestLiveAdaptation()
+    {
+        var adaptive = ByName(AdaptiveVideoName);
+        var amoled = ByName("AMOLED");
+        var light = ByName("YouTube светлая");
+        var dark = ByName("FluxTube");
+
+        var aBlue = BuildAdaptedTheme(adaptive, 0xFF1E88FF, 0xFF00E5FF, false, 0.45f);
+        if ((aBlue.Brand & 0xFF) < 180 || Luma(aBlue.Bg) > 0.22f)
+            return (false, $"Adaptive blue bad: Brand={Hex(aBlue.Brand)} Bg={Hex(aBlue.Bg)}");
+
+        var aNeut = BuildAdaptedTheme(adaptive, 0xFFD4D4D4, 0xFF9A9A9A, true, 0.80f);
+        int nr = (int)((aNeut.Brand >> 16) & 255), ng = (int)((aNeut.Brand >> 8) & 255), nb = (int)(aNeut.Brand & 255);
+        if (Math.Max(nr, Math.Max(ng, nb)) - Math.Min(nr, Math.Min(ng, nb)) > 20)
+            return (false, $"Adaptive neutral not neutral: Brand={Hex(aNeut.Brand)}");
+
+        var amRed = BuildAdaptedTheme(amoled, 0xFFFF2244, 0xFFFF9900, false, 0.40f);
+        if (Luma(amRed.Bg) > 0.03f || ((amRed.Brand >> 16) & 255) < 180)
+            return (false, $"AMOLED adaptation broke black Bg or accent: Bg={Hex(amRed.Bg)} Brand={Hex(amRed.Brand)}");
+
+        var ltGreen = BuildAdaptedTheme(light, 0xFF33FF77, 0xFF00DDCC, false, 0.70f);
+        if (!ltGreen.Light || Luma(ltGreen.Bg) < 0.78f || Luma(ltGreen.Brand) > 0.55f)
+            return (false, $"Light adaptation bad: Bg={Hex(ltGreen.Bg)} Brand={Hex(ltGreen.Brand)}");
+
+        var dkOrange = BuildAdaptedTheme(dark, 0xFFFF8800, 0xFFFF3366, false, 0.50f);
+        if (dkOrange.Light || Luma(dkOrange.Bg) > 0.25f || ((dkOrange.Brand >> 16) & 255) < 180)
+            return (false, $"Dark adaptation bad: Bg={Hex(dkOrange.Bg)} Brand={Hex(dkOrange.Brand)}");
+
+        // Verify high-refresh-rate PalF convergence (zero 8-bit quantization stall at 240Hz!)
+        var from = Derive(dark, null);
+        var to = Derive(dkOrange, null);
+        var pf = ToPalF(from);
+        float k240 = 1f - MathF.Exp(-(1f / 240f) * 4.4f);
+        float maxD = 999f;
+        for (int i = 0; i < 420; i++) maxD = StepPalF(ref pf, to, k240);
+        if (maxD >= 0.45f) return (false, $"PalF 240Hz convergence stalled (maxDelta={maxD:0.00})");
+
+        return (true, $"themes OK (Adaptive/AMOLED/Light/Dark + 240Hz PalF d={maxD:0.02})");
+    }
 }

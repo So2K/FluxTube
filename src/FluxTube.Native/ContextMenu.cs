@@ -242,10 +242,11 @@ public static class Menus
 
     private static void DrawPanel(Panel p, int depth)
     {
-        var t = Math.Clamp((UI.Now - p.OpenedAt) / 110f, 0, 1);
-        if (t < 1) UI.Animate();
-        var ease = 1 - (1 - t) * (1 - t);
-        float dy = (1 - ease) * 6;
+        var t = Math.Clamp((UI.Now - p.OpenedAt) / 210f, 0f, 1f);
+        if (t < 1f) UI.Animate();
+        var inv = 1f - t;
+        var ease = 1f - inv * inv * inv * inv;
+        float dy = (1f - ease) * 10f;
         var r = new R(p.X, Gfx.Snap(p.Y + dy), p.W, p.H);
 
         // soft layered shadow + frosted matte glass surface + crisp border

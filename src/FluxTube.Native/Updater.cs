@@ -21,7 +21,7 @@ namespace FluxTube;
 /// </summary>
 public static class Updater
 {
-    public const string CurrentVersion = "9.2.37";
+    public const string CurrentVersion = "9.3.0";
     public const string Repo = "So2K/FluxTube";
 
     private static HttpClient _http = MakeClient(allowRedirect: true);

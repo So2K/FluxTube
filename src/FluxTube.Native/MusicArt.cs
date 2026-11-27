@@ -32,6 +32,7 @@ public static class MusicArt
         public float Aspect = 1f;
         public uint Dom1 = 0xFFD0D4DC, Dom2 = 0xFF8E94A0;
         public bool IsNeutral;
+        public float AvgLuma = 0.34f;
         public ID2D1Bitmap1? SharpBmp;
         public ID2D1Bitmap1? BlurBmp;
         public int DeviceGen;
@@ -42,7 +43,7 @@ public static class MusicArt
 
     private const int MaxCachedTracks = 6;
     private static readonly ConcurrentDictionary<string, Entry> _cache = new(StringComparer.Ordinal);
-    private static readonly ConcurrentDictionary<string, (uint Dom1, uint Dom2, bool IsNeutral)> _colorCache = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, (uint Dom1, uint Dom2, bool IsNeutral, float AvgLuma)> _colorCache = new(StringComparer.Ordinal);
     private static HttpClient _http = MakeClient();
     private static string _proxySnap = AppSettings.Current.Proxy ?? "";
 
@@ -124,14 +125,18 @@ public static class MusicArt
     /// and outside Direct2D BeginDraw! Immediately kicks off thumbnail download if not cached and retries transient failures.
     /// </summary>
     public static bool TryGetColors(string? videoId, out uint dom1, out uint dom2, out bool isNeutral)
+        => TryGetColors(videoId, out dom1, out dom2, out isNeutral, out _);
+
+    public static bool TryGetColors(string? videoId, out uint dom1, out uint dom2, out bool isNeutral, out float avgLuma)
     {
-        dom1 = 0; dom2 = 0; isNeutral = false;
+        dom1 = 0; dom2 = 0; isNeutral = false; avgLuma = 0.34f;
         if (string.IsNullOrEmpty(videoId)) return false;
         if (_colorCache.TryGetValue(videoId, out var cached))
         {
             dom1 = cached.Dom1;
             dom2 = cached.Dom2;
             isNeutral = cached.IsNeutral;
+            avgLuma = cached.AvgLuma;
             return dom1 != 0;
         }
         long now = UI.Now;
@@ -153,6 +158,7 @@ public static class MusicArt
             dom1 = e.Dom1;
             dom2 = e.Dom2;
             isNeutral = e.IsNeutral;
+            avgLuma = e.AvgLuma;
             return dom1 != 0;
         }
         if (st == 3 && now - Volatile.Read(ref e.FailedAt) > 3000)
@@ -287,7 +293,7 @@ public static class MusicArt
                         Buffer.BlockCopy(raw, ((y0 + row) * tw + x0) * 4, finalPx, row * rowBytes, rowBytes);
                 }
 
-                ExtractDominantColors(finalPx, cw, ch, out uint d1, out uint d2, out bool neutral);
+                ExtractDominantColors(finalPx, cw, ch, out uint d1, out uint d2, out bool neutral, out float imgLuma);
                 e.Pixels = finalPx;
                 e.W = cw;
                 e.H = ch;
@@ -295,8 +301,9 @@ public static class MusicArt
                 e.Dom1 = d1;
                 e.Dom2 = d2;
                 e.IsNeutral = neutral;
+                e.AvgLuma = imgLuma;
                 if (_colorCache.Count >= 128) _colorCache.Clear();
-                _colorCache[e.VideoId] = (d1, d2, neutral);
+                _colorCache[e.VideoId] = (d1, d2, neutral, imgLuma);
                 Volatile.Write(ref e.State, 1);
                 App.WakeUi();
                 App.Post(App.Invalidate);
@@ -378,7 +385,7 @@ public static class MusicArt
         }
     }
 
-    private static void ExtractDominantColors(byte[] px, int w, int h, out uint c1, out uint c2, out bool isNeutral)
+    private static void ExtractDominantColors(byte[] px, int w, int h, out uint c1, out uint c2, out bool isNeutral, out float imgLuma)
     {
         Span<double> hr = stackalloc double[12];
         Span<double> hg = stackalloc double[12];
@@ -386,7 +393,7 @@ public static class MusicArt
         Span<double> hw = stackalloc double[12];
         int sx = Math.Max(1, w / 36), sy = Math.Max(1, h / 36);
         int totalSamples = 0, visibleSamples = 0, chromaticSamples = 0, whiteNeutralSamples = 0;
-        double sumR = 0, sumG = 0, sumB = 0, sumLuma = 0;
+        double sumR = 0, sumG = 0, sumB = 0, sumLuma = 0, sumAllLuma = 0;
 
         for (int y = 0; y < h; y += sy)
         {
@@ -400,6 +407,7 @@ public static class MusicArt
                 float sat = mx > 0.01f ? d / mx : 0f;
                 float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
                 totalSamples++;
+                sumAllLuma += luma;
                 if (mx >= 0.12f)
                 {
                     visibleSamples++;
@@ -432,7 +440,8 @@ public static class MusicArt
         // Detect white / grayscale / minimalist neutral videos so tiny colored logos or noise NEVER turn them red/blue!
         float chromaticFrac = chromaticSamples / (float)Math.Max(1, visibleSamples);
         float whiteFrac = whiteNeutralSamples / (float)Math.Max(1, totalSamples);
-        float avgLuma = visibleSamples > 0 ? (float)(sumLuma / visibleSamples) : 0.5f;
+        float avgLuma = visibleSamples > 0 ? (float)(sumLuma / visibleSamples) : 0.12f;
+        imgLuma = totalSamples > 0 ? (float)(sumAllLuma / totalSamples) : 0.34f;
         isNeutral = best1 < 0 || chromaticFrac < 0.15f || (whiteFrac >= 0.58f && chromaticFrac < 0.28f);
 
         if (isNeutral)

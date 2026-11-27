@@ -296,11 +296,22 @@ public sealed class SettingsPage : IPage
         ("off", "Выкл (Классика)", "Off (Classic)"),
     ];
     private static readonly (string Key, string Ru, string En)[] CornerStyles =
-        [("sharp", "Острые (0px)", "Sharp (0px)"), ("normal", "Обычные", "Normal"), ("round", "Мягкие", "Rounded")];
+        [("sharp", "Острые (0px)", "Sharp (0px)"), ("normal", "Обычные", "Normal"), ("ios", "iOS Apple", "iOS Apple"), ("round", "Мягкие", "Rounded")];
     private static readonly (string Key, string Ru, string En)[] CardStyles =
         [("clean", "Чистый", "Clean"), ("framed", "Рамка (RE / Alien)", "Framed (RE / Alien)"), ("dashed", "Пунктир (Кавай)", "Dashed (Kawaii)"), ("brutal", "Брутализм (Ч/Б)", "Brutalist"), ("neon", "Неон-контур", "Neon Rim")];
     private static readonly (string Key, string Ru, string En)[] FontPresets =
         [("segoe", "Segoe UI", "Segoe UI"), ("serif", "Georgia (Requiem)", "Georgia (Serif)"), ("tech", "Bahnschrift (Village)", "Bahnschrift (Tech)"), ("mono", "Consolas (Neon)", "Consolas (Mono)"), ("soft", "Trebuchet (Kawaii)", "Trebuchet (Soft)"), ("comic", "Comic Sans", "Comic Sans")];
+    private static readonly (string Key, string Ru, string En)[] VideoThemeModes =
+    [
+        ("all", "Все темы (Live)", "All themes (Live)"),
+        ("adaptive", "Только «Адаптивная»", "Adaptive theme only"),
+        ("thumb", "Только по превью", "Thumbnail only"),
+    ];
+    private static readonly (string Key, string Ru, string En)[] PlayerStyles =
+    [
+        ("flux", "Стиль FluxTube", "FluxTube Style"),
+        ("youtube", "Стиль YouTube", "YouTube Style"),
+    ];
     private static readonly (string Code, string Ru, string En)[] AudioLangs =
     [
         ("", "Оригинал (как на YouTube)", "Original (YouTube default)"),
@@ -337,6 +348,7 @@ public sealed class SettingsPage : IPage
     {
         AppSettings.Current.Save();
         if (MpvPlayer.Instance.IsReady) MpvPlayer.Instance.ApplySettings();
+        Shell.PushPlayerState();
     }
 
     private async Task ShowVersionAsync()
@@ -554,6 +566,10 @@ public sealed class SettingsPage : IPage
         }
 
         _y += ThemePicker.Draw(_x, _y, _w);
+
+        PillGridRow("vtheme", L.T("Адаптация тем под видео (Live)", "Live video theme adaptation"),
+            L.T("При просмотре видео цвета подстраиваются в реал-тайме под текущий кадр; в режиме «Только звук» — по превьюшке", "Adapts colors in real-time to the current video frame; uses the thumbnail in audio-only mode"),
+            VideoThemeModes, s.VideoThemeAdapt, v => { s.VideoThemeAdapt = v; Themes.OnAdaptationModeChanged(); });
 
         var customThemeRow = Row(L.T("Конструктор и мутация тем", "Theme studio & mutator"),
             L.T("Мутируйте в 1 клик, сохраните текущий вид как тему или правьте код (ПКМ по теме)", "Mutate in 1 click, save your current look as a theme, or edit code (right-click theme)"), 58, 415);
@@ -900,6 +916,17 @@ public sealed class SettingsPage : IPage
             SeasonalEffects, s.SeasonalEffect, v => s.SeasonalEffect = v);
 
         Section(L.T("Плеер", "Player"));
+        PillGridRow("pstyle", L.T("Стиль плеера", "Player style"),
+            L.T("Плавающая стеклянная панель в стиле приложения или классическая панель YouTube (запоминается)", "Floating glass dock matching app style, or classic YouTube bottom bar (saved)"),
+            PlayerStyles, s.PlayerStyle, v => { s.PlayerStyle = v; Shell.PushPlayerState(); });
+        ToggleRow("iosmotion", L.T("Сглаживание видео (iOS Apple ProMotion)", "Video smoothing (iOS Apple ProMotion)"), s.AppleSmoothMotion,
+            v => { s.AppleSmoothMotion = v; MpvPlayer.Instance.ApplySettings(); },
+            L.T("Плавная GPU-интерполяция кадров и синхронизация с экраном как на iPhone / iPad ProMotion (убирает рывки 24/30 fps)",
+                "Smooth GPU frame interpolation & VSync display cadence like iPhone / iPad ProMotion (eliminates 24/30 fps judder)"));
+        ToggleRow("analytics", L.T("Аналитика видео и каналов (диаграммы и статистика)", "Video & Channel Analytics (charts & stats)"), s.AnalyticsEnabled,
+            v => { s.AnalyticsEnabled = v; if (!v) AnalyticsPanel.Close(); },
+            L.T("Добавляет кнопку «Аналитика» под видео и на странице канала: анимированные диаграммы, рейтинг, ER%, SEO-теги, SponsorBlock и динамика просмотров",
+                "Adds an Analytics button on videos & channels: animated charts, approval donut, ER%, hidden SEO tags, SponsorBlock breakdown, and recent video trends"));
         ChoiceRow("pq", L.T("Качество по умолчанию", "Default quality"), s.PlayerQuality, AppSettings.Qualities.Where(q => q != "audio"), v => { s.PlayerQuality = v; Resolver.Instance.Invalidate(); });
         var curAudioTuple = AudioLangs.FirstOrDefault(a => a.Code == s.AudioLanguage);
         var curAudioName = curAudioTuple.Ru != null ? L.T(curAudioTuple.Ru, curAudioTuple.En) : s.AudioLanguage;
@@ -942,6 +969,24 @@ public sealed class SettingsPage : IPage
                 "Bass hits move the video image. Also toggle with Video beat below the player."));
         ToggleRow("bassshake", L.T("Тряска под бас в режиме «Только звук»", "Bass-reactive shake in Audio-Only mode"), s.MusicBassShake, v => s.MusicBassShake = v,
             L.T("Обложка, буквы заголовка, лайки, кругляшки на волне и кнопки независимо прыгают в такт музыке.", "Cover art, title letters, likes, waveform avatars and buttons bounce independently to the beat."));
+        ToggleRow("visuncap", L.T("Снять ограничение высоты визуализатора частот", "Remove frequency visualizer height limiter"), s.VisualizerUncapped, v => s.VisualizerUncapped = v,
+            L.T("Отключает авто-лимитер частот — столбики и волны пробивают потолок на максимум в такт громкости", "Disables the auto-limiter ceiling so frequency bars & waves shoot freely to full height"));
+        var vbRow = Row(L.T("Сила (высота) визуализатора частот", "Frequency visualizer height / boost"),
+            L.T("Чем выше значение, тем сильнее и выше вылетают частоты вверх (60% – 300%)", "Higher values push frequency bars & waves dramatically higher (60% – 300%)"), 56, 220);
+        if (Visible(vbRow.Y, vbRow.H))
+        {
+            float vx = vbRow.Right - 14;
+            var vpPlus = new R(vx - 30, vbRow.Y + 13, 30, 30);
+            Gfx.Fill(vpPlus, Th.A(0.10f), 15);
+            if (UI.IconButton(UI.Id("set:vb+"), vpPlus, Th.Add, 11)) { s.VisualizerBoost = Math.Clamp(MathF.Round((s.VisualizerBoost + 0.2f) * 10f) / 10f, 0.6f, 3.0f); Saved(); App.Invalidate(); }
+            vx -= 38;
+            var vbTxt = Gfx.Text($"{(int)MathF.Round(s.VisualizerBoost * 100)}%", 13, 600);
+            Gfx.Draw(vbTxt, vx - vbTxt.W, vbRow.Y + (vbRow.H - vbTxt.H) / 2, Th.Text);
+            vx -= vbTxt.W + 10;
+            var vpMinus = new R(vx - 30, vbRow.Y + 13, 30, 30);
+            Gfx.Fill(vpMinus, Th.A(0.10f), 15);
+            if (UI.IconButton(UI.Id("set:vb-"), vpMinus, "\uE738", 11)) { s.VisualizerBoost = Math.Clamp(MathF.Round((s.VisualizerBoost - 0.2f) * 10f) / 10f, 0.6f, 3.0f); Saved(); App.Invalidate(); }
+        }
         ToggleRow("wheelvol", L.T("Колёсико мыши меняет громкость на видео и в музыке", "Mouse wheel adjusts volume over video & music"), s.WheelVolumeOnVideo, v => s.WheelVolumeOnVideo = v,
             L.T("Работает над обычным видео, Shorts и сценой «Только звук». Выключено: колесо скроллит страницу (в Shorts листает ленту).", "Works over regular video, Shorts, and Audio-Only stage. Off: wheel scrolls the page (and flips Shorts)."));
         ToggleRow("shiftframe", L.T("Shift + колёсико: покадровая прокрутка видео", "Shift + wheel: frame-by-frame scrubbing"), s.ShiftWheelFrameStep, v => s.ShiftWheelFrameStep = v,

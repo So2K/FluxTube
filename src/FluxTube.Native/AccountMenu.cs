@@ -325,10 +325,11 @@ public static class AccountMenu
             _ => _mainH,
         };
         h = MathF.Min(h, MathF.Max(180, Gfx.H - _anchorTop - 20));
-        var t = Math.Clamp((UI.Now - _openedAt) / 140f, 0, 1);
-        if (t < 1) UI.Animate();
-        var ease = 1 - (1 - t) * (1 - t);
-        var r = new R(Gfx.Snap(_anchorRight - w), Gfx.Snap(_anchorTop + (1 - ease) * -8), w, h);
+        var t = Math.Clamp((UI.Now - _openedAt) / 240f, 0f, 1f);
+        if (t < 1f) UI.Animate();
+        var inv = 1f - t;
+        var ease = 1f - inv * inv * inv * inv;
+        var r = new R(Gfx.Snap(_anchorRight - w), Gfx.Snap(_anchorTop + (1f - ease) * -14f), w, h);
         Rect = r;
 
         Gfx.Fill(new R(r.X + 2, r.Y + 6, r.W - 4, r.H), Gfx.Fade(0xFF000000, 0.3f * ease), 14);

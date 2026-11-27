@@ -339,7 +339,8 @@ public static unsafe class BgEngine
         uint q1 = c1 & 0x00FEFEFEu, q2 = c2 & 0x00FEFEFEu;
         if (_patBrush != null && _patKey == key && _patC1 == q1 && _patC2 == q2) return;
         long now = Environment.TickCount64;
-        if (_patBrush != null && _patKey == key && now - _patBakedAt < 90) return;
+        long throttle = Themes.IsLiveMorphing ? 150 : 90;
+        if (_patBrush != null && _patKey == key && now - _patBakedAt < throttle) return;
 
         _patBakedAt = now;
         _patKey = key;

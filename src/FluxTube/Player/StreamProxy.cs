@@ -35,7 +35,7 @@ public sealed class StreamProxy
         public int HeadBytes;
         public byte[]? Head;       // only for streams that are not cached on disk
         public Task? HeadTask;
-        public long Chunk = 3 * 1024 * 1024;
+        public long Chunk = 4 * 1024 * 1024;
         public bool Fragile;       // no retries on refusal
         public bool External;      // non-YouTube stream (e.g. Monochrome / hifi-api FLAC): never refresh via QuickStream
         public int Retries = 3;    // 0 until a link from a quick request has proved itself on the first bytes
@@ -48,7 +48,15 @@ public sealed class StreamProxy
         public int AuthFails;
     }
 
+    private sealed class LiveDvrEntry
+    {
+        public required string Url;
+        public Dictionary<string, string> Headers = new();
+        public long FirstSq = -1;
+    }
+
     private readonly ConcurrentDictionary<string, Entry> _entries = new();
+    private readonly ConcurrentDictionary<string, LiveDvrEntry> _dvr = new();
     private readonly HttpClient _http;
     private TcpListener? _listener;
     private int _port;
@@ -58,13 +66,14 @@ public sealed class StreamProxy
         var handler = new SocketsHttpHandler
         {
             AutomaticDecompression = DecompressionMethods.None,
-            MaxConnectionsPerServer = 16,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
-            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
-            ConnectTimeout = TimeSpan.FromSeconds(6),
+            MaxConnectionsPerServer = 24,
+            EnableMultipleHttp2Connections = true,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(3),
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(45),
+            ConnectTimeout = TimeSpan.FromSeconds(4),
         };
         if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy)) { handler.Proxy = new WebProxy(AppSettings.Current.Proxy); handler.UseProxy = true; }
-        _http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
+        _http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan, DefaultRequestVersion = HttpVersion.Version20, DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower };
     }
 
     public void Start()
@@ -82,6 +91,112 @@ public sealed class StreamProxy
     }
 
     private string Local(string key) => $"http://127.0.0.1:{_port}/{key}";
+
+    /// <summary>
+    /// Wraps a YouTube LIVE HLS manifest in a local DVR sliding-window playlist (up to 1 hour of rewind via sq/ segment numbering)
+    /// so mpv starts at the live edge AND lets the user scrub back to watch earlier moments on the current stream!
+    /// </summary>
+    public string RegisterLiveDvr(string hlsUrl, Dictionary<string, string> headers)
+    {
+        Start();
+        var key = Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(hlsUrl)))[..16].ToLowerInvariant();
+        _dvr[key] = new LiveDvrEntry { Url = hlsUrl, Headers = new Dictionary<string, string>(headers) };
+        if (_dvr.Count > 32) _dvr.Clear();
+        _dvr[key] = new LiveDvrEntry { Url = hlsUrl, Headers = new Dictionary<string, string>(headers) };
+        return $"http://127.0.0.1:{_port}/dvr/{key}.m3u8";
+    }
+
+    private async Task ServeLiveDvrAsync(NetworkStream net, string key, CancellationToken ct)
+    {
+        if (!_dvr.TryGetValue(key, out var d))
+        {
+            await WriteAsync(net, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            return;
+        }
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, d.Url);
+            foreach (var (k, v) in d.Headers) req.Headers.TryAddWithoutValidation(k, v);
+            using var resp = await _http.SendAsync(req, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                await WriteAsync(net, $"HTTP/1.1 {(int)resp.StatusCode} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                return;
+            }
+            var raw = await resp.Content.ReadAsStringAsync(ct);
+            string output = raw;
+            var lines = raw.Split('\n');
+            string? lastSeg = null;
+            double segDur = 5.0;
+            for (int i = lines.Length - 1; i >= 0; i--)
+            {
+                var l = lines[i].Trim();
+                if (lastSeg == null && l.StartsWith("http", StringComparison.OrdinalIgnoreCase)) lastSeg = l;
+                else if (lastSeg != null && l.StartsWith("#EXTINF:", StringComparison.Ordinal))
+                {
+                    var comma = l.IndexOf(',');
+                    if (comma > 8 && double.TryParse(l[8..comma], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var dd) && dd > 0.5)
+                        segDur = dd;
+                    break;
+                }
+            }
+            if (lastSeg != null)
+            {
+                var sqIdx = lastSeg.IndexOf("/sq/", StringComparison.Ordinal);
+                if (sqIdx > 0)
+                {
+                    var sqEnd = lastSeg.IndexOf('/', sqIdx + 4);
+                    if (sqEnd > sqIdx + 4 && long.TryParse(lastSeg[(sqIdx + 4)..sqEnd], out var latestSq) && latestSq > 6)
+                    {
+                        string prefix = lastSeg[..(sqIdx + 4)];
+                        string suffix = lastSeg[sqEnd..];
+                        // Expose up to 1 hour (720 * 5s) of DVR rewind window while keeping live edge current
+                        long maxBack = Math.Min(latestSq, (long)Math.Round(3600.0 / segDur));
+                        long firstSq = Math.Max(0, latestSq - maxBack);
+                        if (d.FirstSq < 0)
+                        {
+                            // Quick probe once on initial load to avoid requesting expired segments on shorter streams
+                            if (firstSq > 0)
+                            {
+                                using var hreq = new HttpRequestMessage(HttpMethod.Head, prefix + firstSq + suffix);
+                                foreach (var (k, v) in d.Headers) hreq.Headers.TryAddWithoutValidation(k, v);
+                                try
+                                {
+                                    using var hresp = await _http.SendAsync(hreq, HttpCompletionOption.ResponseHeadersRead, ct);
+                                    if (!hresp.IsSuccessStatusCode) firstSq = Math.Max(0, latestSq - Math.Min(latestSq, 120));
+                                }
+                                catch { firstSq = Math.Max(0, latestSq - Math.Min(latestSq, 120)); }
+                            }
+                            d.FirstSq = firstSq;
+                        }
+                        else if (latestSq - d.FirstSq > maxBack + 60)
+                        {
+                            d.FirstSq = firstSq;
+                        }
+                        firstSq = Math.Max(d.FirstSq, 0);
+                        var sb = new StringBuilder((int)((latestSq - firstSq + 4) * (prefix.Length + suffix.Length + 30)));
+                        sb.Append("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:").Append((int)Math.Ceiling(segDur))
+                          .Append("\n#EXT-X-MEDIA-SEQUENCE:").Append(firstSq).Append('\n');
+                        string extinf = "#EXTINF:" + segDur.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture) + ",\n";
+                        for (long sq = firstSq; sq <= latestSq; sq++)
+                        {
+                            sb.Append(extinf).Append(prefix).Append(sq).Append(suffix).Append('\n');
+                        }
+                        output = sb.ToString();
+                    }
+                }
+            }
+            var bytes = Encoding.UTF8.GetBytes(output);
+            var hdr = $"HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: {bytes.Length}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
+            await WriteAsync(net, hdr);
+            await net.WriteAsync(bytes, ct);
+        }
+        catch (Exception ex)
+        {
+            Paths.Log("live dvr proxy: " + ex.Message);
+            try { await WriteAsync(net, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); } catch { }
+        }
+    }
 
     public static int ItagOf(string url)
     {
@@ -524,7 +639,7 @@ public sealed class StreamProxy
         // a stream may be playing (from the quick link or from disk) before its proper link exists
         if (e.Url == null) await e.UrlReady.Task.WaitAsync(TimeSpan.FromSeconds(45), ct);
         var wait = e.AvailableAt - DateTime.UtcNow;
-        if (wait > TimeSpan.Zero) await Task.Delay(wait + TimeSpan.FromMilliseconds(150), ct);
+        if (wait > TimeSpan.Zero) await Task.Delay(wait + TimeSpan.FromMilliseconds(40), ct);
         for (int attempt = 0; ; attempt++)
         {
             var req = new HttpRequestMessage(HttpMethod.Get, e.Url);
@@ -570,6 +685,11 @@ public sealed class StreamProxy
         try
         {
             var (method, path, range) = await ReadRequestAsync(net);
+            if (path.StartsWith("/dvr/", StringComparison.Ordinal) && path.EndsWith(".m3u8", StringComparison.Ordinal))
+            {
+                await ServeLiveDvrAsync(net, path[5..^5], cts.Token);
+                return;
+            }
             var key = path.TrimStart('/');
             if (!_entries.TryGetValue(key, out var e)) { await WriteAsync(net, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); return; }
             e.Touched = DateTime.UtcNow;
@@ -636,8 +756,8 @@ public sealed class StreamProxy
                     pos += n;
                     continue;
                 }
-                // 2. the network, in bounded 3 MB chunks (fast, resists mid-request DPI/ISP throttling); stored as it passes through
-                var size = first && pos == 0 ? Math.Min(e.Chunk, 1024 * 1024) : e.Chunk;
+                // 2. the network, in fast 512 KB first chunk (instant TTFB) then 4 MB chunks (30+ MB/s sustained); stored as it passes through
+                var size = first && pos == 0 ? Math.Min(e.Chunk, 512 * 1024) : e.Chunk;
                 first = false;
                 var to = Math.Min(end, pos + size - 1);
                 if (cache != null) to = Math.Min(to, cache.NextStart(pos) - 1);

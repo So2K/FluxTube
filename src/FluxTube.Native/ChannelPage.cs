@@ -263,8 +263,14 @@ public sealed class ChannelPage(string channelId, string name) : IPage
                 if (UI.Pill(UI.Id("ch:sub", _scroll), bx, ty, 36, null, subText, out var sw, Th.Text, Th.Bg)) ToggleSubscribe();
                 bx += sw + 8;
             }
-            if (UI.Pill(UI.Id("ch:web", _scroll), bx, ty, 36, Th.Link, L.T("На YouTube", "On YouTube"), out _))
+            if (UI.Pill(UI.Id("ch:web", _scroll), bx, ty, 36, Th.Link, L.T("На YouTube", "On YouTube"), out var ww))
                 W.Open("https://www.youtube.com/" + (c.Handle.StartsWith('@') ? c.Handle : "channel/" + channelId));
+            bx += ww + 8;
+            if (AppSettings.Current.AnalyticsEnabled)
+            {
+                if (UI.Pill(UI.Id("ch:analytics", _scroll), bx, ty, 36, null, L.T("Аналитика", "Analytics"), out _, accent: AnalyticsPanel.Open))
+                    AnalyticsPanel.OpenChannel(channelId, c.Title, c.Avatar, c.Subscribers, c.VideoCount, c.Handle);
+            }
             ty += 36;
         }
         else if (_failed)

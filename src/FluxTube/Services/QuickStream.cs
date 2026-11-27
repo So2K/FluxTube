@@ -28,8 +28,11 @@ public static class QuickStream
 
     private static readonly HttpClient Http = Make();
     private static readonly ConcurrentDictionary<string, Task<StreamInfo?>> _cache = new();
-    private static long _blockedUntil;
-    public static bool IsBlocked => Environment.TickCount64 < Interlocked.Read(ref _blockedUntil);
+    private static long _visionBlockedUntil;
+    private static long _questBlockedUntil;
+    private static bool IsVisionBlocked => Environment.TickCount64 < Interlocked.Read(ref _visionBlockedUntil);
+    private static bool IsQuestBlocked => Environment.TickCount64 < Interlocked.Read(ref _questBlockedUntil);
+    public static bool IsBlocked => IsVisionBlocked && IsQuestBlocked;
     private static readonly object _visitorLock = new();
     private static Task<string?>? _visitor;
     private static DateTime _visitorAt;
@@ -40,9 +43,10 @@ public static class QuickStream
         {
             AutomaticDecompression = DecompressionMethods.All, UseCookies = false,
             PooledConnectionLifetime = TimeSpan.FromMinutes(10), PooledConnectionIdleTimeout = TimeSpan.FromMinutes(4), EnableMultipleHttp2Connections = true,
+            ConnectTimeout = TimeSpan.FromSeconds(4),
         };
         if (!string.IsNullOrWhiteSpace(AppSettings.Current.Proxy)) { h.Proxy = new WebProxy(AppSettings.Current.Proxy); h.UseProxy = true; }
-        return new HttpClient(h) { Timeout = TimeSpan.FromSeconds(8), DefaultRequestVersion = HttpVersion.Version20 };
+        return new HttpClient(h) { Timeout = TimeSpan.FromSeconds(5), DefaultRequestVersion = HttpVersion.Version20, DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower };
     }
 
     /// <summary>Gets the anonymous visitor id and opens the connection ahead of the first click.</summary>
@@ -116,7 +120,7 @@ public static class QuickStream
         });
     }
 
-    public static void Invalidate() { _cache.Clear(); Interlocked.Exchange(ref _blockedUntil, 0); } // quality or account changed
+    public static void Invalidate() { _cache.Clear(); Interlocked.Exchange(ref _visionBlockedUntil, 0); Interlocked.Exchange(ref _questBlockedUntil, 0); } // quality or account changed
 
     // ---- subtitles and dubbed audio: listed in the player answer we already have ----
     public sealed record CaptionTrack(string Lang, string Name, bool Auto, string Url);
@@ -323,14 +327,32 @@ public static class QuickStream
         {
             try
             {
-                var visitor = await VisitorAsync();
-                if (visitor == null) return;
-                var n = await PlayerAsync(Vision, id, visitor);
-                if (n != null && n.S("playabilityStatus", "status") == "OK")
+                string? spec = null;
+                if (!IsVisionBlocked)
                 {
-                    Remember(Vision, id, n);
+                    var visitor = await VisitorAsync();
+                    if (visitor != null)
+                    {
+                        var n = await PlayerAsync(Vision, id, visitor);
+                        if (n != null)
+                        {
+                            if (n.S("playabilityStatus", "status") == "OK") Remember(Vision, id, n);
+                            spec = n.S("storyboards", "playerStoryboardSpecRenderer", "spec")
+                                ?? n.S("storyboards", "playerLiveStoryboardSpecRenderer", "spec");
+                        }
+                    }
+                }
+                if (string.IsNullOrEmpty(spec))
+                    spec = await InnerTube.Instance.StoryboardSpecAsync(id);
+                if (!string.IsNullOrEmpty(spec))
+                {
                     TrimCache(_specs, 180);
-                    _specs[id] = n.S("storyboards", "playerStoryboardSpecRenderer", "spec") ?? "";
+                    _specs[id] = spec;
+                }
+                else
+                {
+                    TrimCache(_specs, 180);
+                    _specs[id] = "";
                 }
             }
             catch (Exception e) { Paths.Log($"storyboard spec {id}: {e.Message}"); }
@@ -404,10 +426,11 @@ public static class QuickStream
         {
             var visitor = await VisitorAsync();
             if (visitor == null) { Paths.Log($"quick {id}: no visitor id"); return null; }
-            // the whole-stream client first; the beginning-only one is asked only when it refuses
+            // Try whole-stream Vision first (if not bot-blocked), then immediately fall back to Quest (ANDROID_VR) for instant 300ms start!
             foreach (var client in wantV == 0 ? new[] { Vision, Quest } : [Vision])
             {
-                if (IsBlocked) break;
+                if (client == Vision && IsVisionBlocked) continue;
+                if (client == Quest && IsQuestBlocked) continue;
                 JsonNode? n;
                 try { n = await PlayerAsync(client, id, visitor); } catch (Exception e) { Paths.Log($"quick {id} {client.Name}: {e.Message}"); continue; }
                 if (n == null) continue;
@@ -441,9 +464,11 @@ public static class QuickStream
             if (visitor == null) return null;
             foreach (var client in new[] { Vision, Quest })
             {
+                if (client == Vision && IsVisionBlocked) continue;
+                if (client == Quest && IsQuestBlocked) continue;
                 JsonNode? n;
                 try { n = await PlayerAsync(client, videoId, visitor); } catch { continue; }
-                if (n == null || n.S("playabilityStatus", "status") != "OK") continue;
+                if (n == null) continue;
                 var s = await FromResponse(client, videoId, n, wantV: 0, wantA: 0, previewMaxHeight: 480);
                 if (s != null) return s;
             }
@@ -460,7 +485,10 @@ public static class QuickStream
             var reason = n.S("playabilityStatus", "reason") ?? "";
             if (status == "LOGIN_REQUIRED" && (reason.Contains("бот", StringComparison.OrdinalIgnoreCase)
                 || reason.Contains("bot", StringComparison.OrdinalIgnoreCase)))
-                Interlocked.Exchange(ref _blockedUntil, Environment.TickCount64 + 5 * 60_000);
+            {
+                if (c == Vision) Interlocked.Exchange(ref _visionBlockedUntil, Environment.TickCount64 + 5 * 60_000);
+                else Interlocked.Exchange(ref _questBlockedUntil, Environment.TickCount64 + 5 * 60_000);
+            }
             Paths.Log($"quick {id} {c.Name}: {status} {reason}");
             return null;
         }
@@ -481,7 +509,8 @@ public static class QuickStream
         if ((isLive || adaptive == null) && !string.IsNullOrEmpty(hlsUrl) && wantV == 0)
         {
             Paths.Log($"quick {id} {c.Name}: direct HLS stream{(isLive ? " (LIVE)" : "")}");
-            return new StreamInfo(id, hlsUrl, null, headers, title, dur, DateTime.UtcNow) { Vitag = 0, Aitag = 0, Preview = false };
+            var playUrl = isLive ? StreamProxy.Instance.RegisterLiveDvr(hlsUrl, headers) : hlsUrl;
+            return new StreamInfo(id, playUrl, null, headers, title, dur, DateTime.UtcNow) { Vitag = 0, Aitag = 0, Preview = false, IsLive = isLive };
         }
         if (adaptive == null) return null;
 

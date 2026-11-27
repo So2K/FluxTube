@@ -25,7 +25,8 @@ public static class Cards
         {
             var run = Gfx.Text(v.DurationBadge, 11.5f, 600);
             var b = new R(r.Right - run.W - 15, r.Bottom - run.H - 10, run.W + 9, run.H + 3);
-            Gfx.Fill(b, v.IsLive ? Th.Brand : Th.Badge, 4);
+            // LIVE badge is ALWAYS YouTube/Apple crimson red regardless of active theme accent!
+            Gfx.Fill(b, v.IsLive ? 0xFFE52D27u : Th.Badge, 4);
             Gfx.Draw(run, b.X + 4.5f, b.Y + 1, 0xFFFFFFFF);
         }
         if (v.Progress > 0.001)
@@ -171,15 +172,20 @@ public static class Cards
             if (hSec >= 0.35)
             {
                 // Real hardware-decoded muted HD live video preview (hq720.jpg stays underneath until 1st frame renders!)
+                // + guaranteed instant animated Storyboard preview fallback (via authenticated InnerTube) whenever live stream is loading or bot-gated!
                 PreviewPlayer.Want(v.VideoId, thumbR, Gfx.Clip, thumbRad);
                 bool liveReady = PreviewPlayer.IsReadyFor(v.VideoId);
                 Thumb(thumbR, v, true, thumbRad, badge: !liveReady, behind: behind);
                 if (!liveReady)
                 {
-                    var pr = Gfx.Text("HD", 10.5f, 700);
-                    var pb = new R(thumbR.X + 8, thumbR.Y + 8, pr.W + 12, pr.H + 4);
-                    Gfx.Fill(pb, Gfx.Fade(0xFF0A0A0E, 0.72f), Gfx.Corner(5));
-                    Gfx.Draw(pr, pb.X + 6, pb.Y + 2, 0xFFFFFFFF);
+                    bool sbActive = Storyboard.TryDrawCardPreview(v.VideoId, thumbR, thumbRad, behind, hSec);
+                    if (!sbActive)
+                    {
+                        var pr = Gfx.Text("HD", 10.5f, 700);
+                        var pb = new R(thumbR.X + 8, thumbR.Y + 8, pr.W + 12, pr.H + 4);
+                        Gfx.Fill(pb, Gfx.Fade(0xFF0A0A0E, 0.72f), Gfx.Corner(5));
+                        Gfx.Draw(pr, pb.X + 6, pb.Y + 2, 0xFFFFFFFF);
+                    }
                 }
             }
             else Thumb(thumbR, v, true, thumbRad, behind: behind);
@@ -1114,7 +1120,23 @@ public sealed class WatchPage : IPage
     private bool _infoLoading, _descOpen;
     private string _dislikes = "—", _likes = "—", _speed = "1×";
     private string? _note;
-    private readonly int _infoScroll, _relScroll;
+    private readonly int _infoScroll, _relScroll, _chatScroll;
+    private bool _chatOpen = true;
+    private bool _chatPinned = true;
+    private readonly List<LiveChatMessage> _chatMsgs = [];
+    private readonly List<long> _chatAppearAt = [];
+    private readonly HashSet<string> _chatIds = [];
+    private int _chatGen;
+    private string? _chatToken;
+    private string? _chatSendParams;
+    private string? _chatPlaceholder;
+    private string? _chatRestricted;
+    private string? _chatRestrictedDetail;
+    private List<LiveChatViewOption>? _chatViews;
+    private int _chatMaxChars = 200;
+    private LiveChatMessage? _chatPinnedMsg;
+    private Edit? _chatEdit;
+    private bool _sendingChat;
     private float _relTextW;
     private List<SoundCloudBar.TimedMarker> _scMarkers = [];
     private int _scMarkerComments = -1;
@@ -1167,6 +1189,7 @@ public sealed class WatchPage : IPage
         _listScroll = UI.Id("watch:list:" + v.VideoId);
         _infoScroll = UI.Id("watch:info:" + v.VideoId);
         _relScroll = UI.Id("watch:rel:" + v.VideoId);
+        _chatScroll = UI.Id("watch:chat:" + v.VideoId);
     }
 
     /// <summary>Chapters of this video for the player's seek bar (empty while another video is playing).</summary>
@@ -1176,6 +1199,16 @@ public sealed class WatchPage : IPage
         if (_info == null || PlaybackTracker.Instance.Current?.VideoId != Video.VideoId) return arr;
         foreach (var (start, title) in _info.Chapters)
             arr.Add(new System.Text.Json.Nodes.JsonArray(System.Text.Json.Nodes.JsonValue.Create(start), System.Text.Json.Nodes.JsonValue.Create(title)));
+        return arr;
+    }
+
+    /// <summary>100-point YouTube "Most Replayed" intensity array (0..1) for the player's seekbar mountain graph.</summary>
+    public System.Text.Json.Nodes.JsonArray HeatmapJson()
+    {
+        var arr = new System.Text.Json.Nodes.JsonArray();
+        if (_info == null || _info.Heatmap.Count < 4 || PlaybackTracker.Instance.Current?.VideoId != Video.VideoId) return arr;
+        foreach (var v in _info.Heatmap)
+            arr.Add(System.Text.Json.Nodes.JsonValue.Create(Math.Round(v, 3)));
         return arr;
     }
 
@@ -1286,13 +1319,197 @@ public sealed class WatchPage : IPage
         var sp = MpvPlayer.Instance.Speed;
         if (sp > 0.1) _speed = sp.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "×";
         if (_info == null && !_infoLoading) LoadInfo(bypassCache: false);
+        else if (_chatOpen && !string.IsNullOrEmpty(_chatToken)) StartLiveChat(_chatToken);
     }
 
     public void Hidden()
     {
+        _chatGen++;
         SharePanel.Close();
         _commentEdit?.Hide();
+        _chatEdit?.Hide();
         if (_comments.Count > 120) _comments.RemoveRange(120, _comments.Count - 120);
+    }
+
+    private void SubmitChatMessage()
+    {
+        if (_sendingChat || _chatEdit == null) return;
+        var text = _chatEdit.Text.Trim();
+        if (text.Length == 0) return;
+        if (!CookieStore.IsLoggedIn) { Shell.Toast(L.T("Войдите в аккаунт YouTube, чтобы писать в чат", "Sign in to YouTube to chat"), Th.Warn); return; }
+        var sendParams = _chatSendParams;
+        if (string.IsNullOrEmpty(sendParams))
+        {
+            Shell.Toast(L.T("Чат ещё подключается или закрыт для сообщений", "Chat is still connecting or restricted"), Th.Warn, 3000);
+            return;
+        }
+        _sendingChat = true;
+        var gen = _chatGen;
+        App.Invalidate();
+        _ = Task.Run(async () =>
+        {
+            var (ok, err) = await InnerTube.Instance.SendLiveChatMessageAsync(sendParams, text).ConfigureAwait(false);
+            App.Post(() =>
+            {
+                _sendingChat = false;
+                if (!ok)
+                {
+                    Shell.Toast(L.T("Не удалось отправить: ", "Failed to send: ") + (err ?? L.T("ошибка YouTube", "YouTube error")), Th.Warn, 4000);
+                    App.Invalidate();
+                    return;
+                }
+                if (_chatEdit != null) _chatEdit.Text = "";
+                Sfx.Like();
+                if (gen == _chatGen)
+                {
+                    var acc = AccountMenu.Current;
+                    var localId = "local:" + Environment.TickCount64;
+                    _chatIds.Add(localId);
+                    _chatMsgs.Add(new LiveChatMessage(localId, acc?.Name is { Length: > 0 } nm ? nm : L.T("Вы", "You"), acc?.Photo, text, false, false, false, false, false, null, null, 0));
+                    _chatAppearAt.Add(UI.Now);
+                    _chatPinned = true;
+                    UI.Animate();
+                }
+                App.Invalidate();
+            });
+        });
+    }
+
+    private void StartLiveChat(string token)
+    {
+        _chatToken = token;
+        var vid = Video.VideoId;
+        var gen = ++_chatGen;
+        _ = Task.Run(async () =>
+        {
+            var cur = token;
+            long lastFreshProbe = 0;
+            int consecutiveErrors = 0;
+            while (gen == _chatGen && !string.IsNullOrEmpty(cur))
+            {
+                try
+                {
+                    // Always advance on the incremental continuation token so live messages flow cleanly with ZERO duplicate reload spam!
+                    var res = await InnerTube.Instance.LiveChatAsync(cur).ConfigureAwait(false);
+                    if (gen != _chatGen) return;
+                    consecutiveErrors = 0;
+
+                    string? sp = res.SendParams;
+                    string? rm = res.RestrictedMessage;
+                    string? rd = res.RestrictedDetail;
+                    string? ph = res.InputPlaceholder;
+                    int mc = res.MaxChars;
+                    if (res.Views is { Count: > 0 }) _chatViews = res.Views;
+
+                    // If currently restricted (or sendParams not yet granted) while logged in, probe a fresh uncached WatchAsync token every 3s
+                    // ONLY for actionPanel eligibility (never re-inserting duplicate messages!).
+                    bool needGate = (!string.IsNullOrEmpty(rm) || !string.IsNullOrEmpty(_chatRestricted) || string.IsNullOrEmpty(_chatSendParams)) && string.IsNullOrEmpty(sp);
+                    if (needGate && CookieStore.IsLoggedIn && Environment.TickCount64 - lastFreshProbe >= 3000)
+                    {
+                        lastFreshProbe = Environment.TickCount64;
+                        try
+                        {
+                            var freshInfo = await InnerTube.Instance.WatchAsync(vid).ConfigureAwait(false);
+                            if (gen == _chatGen && !string.IsNullOrEmpty(freshInfo.LiveChatToken))
+                            {
+                                var probe = await InnerTube.Instance.LiveChatAsync(freshInfo.LiveChatToken).ConfigureAwait(false);
+                                if (!string.IsNullOrEmpty(probe.SendParams)) { sp = probe.SendParams; rm = null; rd = null; }
+                                else if (!string.IsNullOrEmpty(probe.RestrictedMessage)) { rm = probe.RestrictedMessage; rd = probe.RestrictedDetail; }
+                                if (!string.IsNullOrEmpty(probe.InputPlaceholder)) ph = probe.InputPlaceholder;
+                                if (probe.MaxChars > 0) mc = probe.MaxChars;
+                            }
+                        }
+                        catch { }
+                    }
+
+                    bool stateChanged = false;
+                    bool justUnlocked = false;
+                    if (!string.IsNullOrEmpty(sp))
+                    {
+                        if (!string.IsNullOrEmpty(_chatRestricted)) justUnlocked = true;
+                        _chatSendParams = sp;
+                        _chatRestricted = null;
+                        _chatRestrictedDetail = null;
+                        stateChanged = true;
+                    }
+                    else if (!string.IsNullOrEmpty(rm))
+                    {
+                        if (_chatRestricted != rm || _chatRestrictedDetail != rd) stateChanged = true;
+                        _chatRestricted = rm;
+                        _chatRestrictedDetail = rd;
+                        _chatSendParams = null;
+                    }
+                    if (!string.IsNullOrEmpty(ph) && _chatPlaceholder != ph) { _chatPlaceholder = ph; stateChanged = true; }
+                    if (mc > 0) _chatMaxChars = mc;
+                    if (res.PinnedMessage != null) { _chatPinnedMsg = res.PinnedMessage; stateChanged = true; }
+
+                    if (res.Messages.Count > 0 || res.DeletedIds.Count > 0 || stateChanged)
+                    {
+                        App.Post(() =>
+                        {
+                            if (gen != _chatGen) return;
+                            if (justUnlocked)
+                                Shell.Toast(L.T("Доступ к чату открыт — теперь можно писать!", "Chat unlocked — you can now send messages!"), Th.Good, 2600);
+                            if (res.DeletedIds.Count > 0)
+                            {
+                                var delSet = new HashSet<string>(res.DeletedIds);
+                                for (int i = _chatMsgs.Count - 1; i >= 0; i--)
+                                {
+                                    if (delSet.Contains(_chatMsgs[i].Id))
+                                    {
+                                        _chatMsgs.RemoveAt(i);
+                                        if (i < _chatAppearAt.Count) _chatAppearAt.RemoveAt(i);
+                                    }
+                                }
+                            }
+                            long nowMs = UI.Now;
+                            int stagger = 0;
+                            foreach (var m in res.Messages)
+                            {
+                                // Deduplicate system notices by text so "Только для подписчиков" is shown ONCE, never spammed!
+                                string dedupKey = m.IsSystem ? ("sys:" + m.Text) : m.Id;
+                                if (dedupKey.Length > 0 && !_chatIds.Add(dedupKey)) continue;
+                                _chatMsgs.Add(m);
+                                _chatAppearAt.Add(nowMs + Math.Min(stagger * 28L, 180L));
+                                stagger++;
+                            }
+                            if (_chatMsgs.Count > 160)
+                            {
+                                int drop = _chatMsgs.Count - 160;
+                                _chatMsgs.RemoveRange(0, drop);
+                                _chatAppearAt.RemoveRange(0, drop);
+                            }
+                            if (res.Messages.Count > 0) UI.Animate();
+                            App.Invalidate();
+                        });
+                    }
+                    if (res.NextToken != null) { cur = res.NextToken; _chatToken = cur; }
+                    bool stillRestricted = !string.IsNullOrEmpty(_chatRestricted) || (CookieStore.IsLoggedIn && string.IsNullOrEmpty(_chatSendParams));
+                    await Task.Delay(stillRestricted ? 1000 : res.TimeoutMs).ConfigureAwait(false);
+                }
+                catch (Exception e)
+                {
+                    Paths.Log("live chat poll: " + e.Message);
+                    consecutiveErrors++;
+                    // Auto-recover from transient YouTube 503 / expired continuation by fetching a fresh live chat token
+                    if (consecutiveErrors >= 2)
+                    {
+                        try
+                        {
+                            var fresh = await InnerTube.Instance.WatchAsync(vid).ConfigureAwait(false);
+                            if (gen == _chatGen && !string.IsNullOrEmpty(fresh.LiveChatToken))
+                            {
+                                cur = fresh.LiveChatToken;
+                                _chatToken = cur;
+                                consecutiveErrors = 0;
+                            }
+                        }
+                        catch { }
+                    }
+                    await Task.Delay(2000).ConfigureAwait(false);
+                }
+            }
+        });
     }
 
     public void Refresh()
@@ -1347,6 +1564,12 @@ public sealed class WatchPage : IPage
                     _relTextW = 0;
                     _likes = string.IsNullOrEmpty(info.Likes) ? "—" : info.Likes;
                     _rating = info.LikeStatus is "LIKE" or "DISLIKE" ? info.LikeStatus : "";
+                    _subscribed = info.Subscribed;
+                    if (!string.IsNullOrEmpty(info.LiveChatToken))
+                    {
+                        _chatToken = info.LiveChatToken;
+                        if (_chatOpen) StartLiveChat(info.LiveChatToken);
+                    }
                     _createCommentParams ??= info.CreateCommentParams;
                     _infoLoading = false;
                     if (string.IsNullOrEmpty(Video.Title))
@@ -1440,7 +1663,7 @@ public sealed class WatchPage : IPage
         var gen = _commentGen;
         _ = Task.Run(async () =>
         {
-            var (ok, err) = await InnerTube.Instance.CreateCommentAsync(createParams, text, vid);
+            var (ok, err, delAct) = await InnerTube.Instance.CreateCommentAsync(createParams, text, vid);
             App.Post(() =>
             {
                 _postingComment = false;
@@ -1460,10 +1683,86 @@ public sealed class WatchPage : IPage
                             Text = text,
                             When = L.T("только что", "just now"),
                             Likes = "0",
+                            DeleteAction = delAct,
+                            IsOwn = true,
                         },
                     });
                 }
                 Shell.Toast(L.T("Комментарий опубликован", "Comment posted"), Th.Good, 2400);
+                App.Invalidate();
+            });
+        });
+    }
+
+    private bool? _subscribed;
+    private bool _subBusy;
+
+    private void ToggleSubscribe()
+    {
+        var chId = _info?.ChannelId ?? Video.ChannelId;
+        if (string.IsNullOrEmpty(chId)) return;
+        if (!CookieStore.IsLoggedIn) { Shell.Toast(L.T("Войдите в аккаунт YouTube, чтобы подписываться", "Sign in to YouTube to subscribe"), Th.Warn); return; }
+        if (_subBusy) return;
+        bool want = !(_subscribed ?? false);
+        _subscribed = want;
+        _subBusy = true;
+        if (want) Sfx.Like(); else Sfx.Back();
+        App.Invalidate();
+        _ = Task.Run(async () =>
+        {
+            bool ok = false;
+            try { ok = await InnerTube.Instance.SubscribeAsync(chId, want); } catch { }
+            App.Post(() =>
+            {
+                _subBusy = false;
+                if (!ok)
+                {
+                    _subscribed = !want;
+                    Shell.Toast(L.T("Не удалось изменить подписку", "Failed to update subscription"), Th.Warn);
+                }
+                else
+                {
+                    Shell.Toast(want ? L.T("Вы подписались на канал", "Subscribed to channel") : L.T("Вы отписались от канала", "Unsubscribed from channel"), Th.Good, 2000);
+                    // Immediately re-check live chat eligibility after subscribing so subscriber-only chat unlocks right away!
+                    if (want && _chatOpen && !string.IsNullOrEmpty(_info?.LiveChatToken))
+                        StartLiveChat(_info.LiveChatToken);
+                }
+                App.Invalidate();
+            });
+        });
+    }
+
+    private void DeleteComment(CRow row)
+    {
+        if (!CookieStore.IsLoggedIn) return;
+        var delAct = row.C.DeleteAction;
+        if (string.IsNullOrEmpty(delAct))
+        {
+            // Locally posted comment without token returned — remove locally and inform user
+            _comments.Remove(row);
+            foreach (var r in _comments) r.Replies.Remove(row);
+            Shell.Toast(L.T("Комментарий скрыт (обновите страницу для синхронизации с YouTube)", "Comment removed locally (refresh to sync with YouTube)"), Th.Sub, 2600);
+            App.Invalidate();
+            return;
+        }
+        var vid = Video.VideoId;
+        _ = Task.Run(async () =>
+        {
+            bool ok = false;
+            try { ok = await InnerTube.Instance.DeleteCommentAsync(delAct, vid); } catch { }
+            App.Post(() =>
+            {
+                if (ok)
+                {
+                    _comments.Remove(row);
+                    foreach (var r in _comments) r.Replies.Remove(row);
+                    Sfx.Back();
+                    Shell.Toast(L.T("Комментарий удалён", "Comment deleted"), Th.Good, 2200);
+                }
+                else
+                {
+                    Shell.Toast(L.T("YouTube не позволил удалить комментарий", "YouTube could not delete the comment"), Th.Warn, 3000);
+                }
                 App.Invalidate();
             });
         });
@@ -1641,10 +1940,27 @@ public sealed class WatchPage : IPage
         PageBeatMotion.Current?.At(x0 + w / 2, y + 30);
 
         Cards.Avatar(x0, y, avatar, c.Avatar, c.Author.TrimStart('@'));
-        if (UI.RightClick(new R(x0, y, w, h - 8)))
-            Sel.Popup([new(L.T("Копировать комментарий", "Copy comment"), () => Cards.CopyText(c.Text, L.T("Комментарий скопирован", "Comment copied")), icon: Th.Copy),
-                       new(L.T("Копировать с автором", "Copy with author"), () => Cards.CopyText(c.Author + ": " + c.Text, L.T("Комментарий скопирован", "Comment copied")), icon: Th.Comment),
-                       new(L.T("Копировать ник", "Copy handle"), () => Cards.CopyText(c.Author, L.T("Ник скопирован", "Handle copied")), icon: Th.Account)]);
+        var accCur = AccountMenu.Current;
+        bool isOwn = c.IsOwn || c.DeleteAction != null
+            || (CookieStore.IsLoggedIn && accCur != null && (
+                (!string.IsNullOrEmpty(accCur.Handle) && string.Equals(c.Author, accCur.Handle, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrEmpty(accCur.Name) && string.Equals(c.Author.TrimStart('@'), accCur.Name, StringComparison.OrdinalIgnoreCase))));
+        var rowR = new R(x0, y, w, h - 8);
+        if (UI.RightClick(rowR))
+        {
+            var m = new List<MenuItem>
+            {
+                new(L.T("Копировать комментарий", "Copy comment"), () => Cards.CopyText(c.Text, L.T("Комментарий скопирован", "Comment copied")), icon: Th.Copy),
+                new(L.T("Копировать с автором", "Copy with author"), () => Cards.CopyText(c.Author + ": " + c.Text, L.T("Комментарий скопирован", "Comment copied")), icon: Th.Comment),
+                new(L.T("Копировать ник", "Copy handle"), () => Cards.CopyText(c.Author, L.T("Ник скопирован", "Handle copied")), icon: Th.Account),
+            };
+            if (isOwn)
+            {
+                m.Add(MenuItem.Sep);
+                m.Add(new(L.T("Удалить комментарий", "Delete comment"), () => DeleteComment(row), icon: Th.Delete, danger: true));
+            }
+            Sel.Popup(m);
+        }
         float tx = x0 + avatar + 16;
         var au = Gfx.Text(c.Author, 13, 600);
         if (c.ByOwner) { var b = new R(tx - 6, y - 2, au.W + 12, au.H + 4); Gfx.Fill(b, Th.A(0.16f), b.H / 2); }
@@ -1652,6 +1968,12 @@ public sealed class WatchPage : IPage
         var wx = tx + au.W + 10;
         if (c.Pinned) { var pinLbl = L.T("закреплён", "pinned"); Gfx.Draw(pinLbl, wx, y + 1, 12, Th.Sub); wx += Gfx.Text(pinLbl, 12).W + 8; }
         Gfx.Draw(c.When, wx, y + 1, 12, Th.Dim);
+        if (isOwn && UI.Hover(rowR))
+        {
+            var delR = new R(x0 + w - 28, y - 2, 26, 26);
+            if (UI.IconButton(UI.Id(_infoScroll, 70000 + i), delR, Th.Delete, 12, Th.Warn))
+                App.Post(() => DeleteComment(row));
+        }
         var ty = y + 22;
         Sel.Text(UI.Id(_infoScroll, 20000 + i), c.Text, tx, ty, 14, Th.Text, 400, tw, row.Open ? 0 : 5, links: true, onLink: OnLink);
         ty += text.H;
@@ -1744,26 +2066,88 @@ public sealed class WatchPage : IPage
         if (SharePanel.Open) UI.Modal = new R(-1e6f, -1e6f, 0, 0);
         // Clip the entire WatchPage strictly to its tab area so shake & effects NEVER leak into top bar/sidebar/tabs
         Gfx.PushClip(r);
-        const float padX = 20, topPad = 10;
+        const float padX = 24, topPad = 14;
+        bool hasLiveChat = !string.IsNullOrEmpty(_info?.LiveChatToken);
+        bool sideCol = !AppSettings.Current.TheaterMode && r.W >= 1080f;
+        bool theaterChatSide = AppSettings.Current.TheaterMode && hasLiveChat && _chatOpen && r.W >= 1000f;
+        bool anyRightCol = sideCol || theaterChatSide;
+        const float sideGap = 20f;
+        float sideW = sideCol ? Math.Clamp(r.W * 0.28f, 340f, 400f)
+            : (theaterChatSide ? Math.Clamp(r.W * 0.24f, 320f, 380f) : 0f);
         float x0 = Gfx.Snap(r.X + padX);
-        float mainW = Gfx.Snap(r.W - padX * 2);
-        float videoW = mainW;
-        float videoH = Gfx.Snap(MathF.Max(360f, r.H * 0.90f));
-        float videoX = x0;
+        float mainW = Gfx.Snap(r.W - padX * 2 - (anyRightCol ? sideW + sideGap : 0f));
         var id = Video.VideoId;
+        bool isAudioStage = AppSettings.Current.AudioOnlyMode && !Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id;
+        float videoW, videoH, videoX;
+        if (isAudioStage)
+        {
+            videoW = mainW;
+            videoH = Gfx.Snap(MathF.Max(380f, r.H * 0.86f));
+            videoX = x0;
+        }
+        else
+        {
+            // Fit the video container to the EXACT live video aspect ratio (16:9 default) -> ZERO black pillarbox/letterbox bars!
+            float aspect = MpvPlayer.Instance.CurrentVideoId == id ? MpvPlayer.Instance.VideoAspect : (16f / 9f);
+            float maxVH = sideCol ? MathF.Max(340f, r.H * 0.78f) : MathF.Max(380f, r.H * 0.82f);
+            videoW = mainW;
+            videoH = videoW / aspect;
+            if (videoH > maxVH)
+            {
+                videoH = maxVH;
+                videoW = MathF.Min(mainW, videoH * aspect);
+            }
+            videoW = Gfx.Snap(videoW);
+            videoH = Gfx.Snap(videoH);
+            videoX = Gfx.Snap(x0 + (mainW - videoW) * 0.5f);
+        }
 
         void DrawVideoBox(R video, R? clip)
         {
             var sOpt = AppSettings.Current;
+            float vRad = Gfx.Corner(12);
             bool audioStage = sOpt.AudioOnlyMode && !Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id;
             if (!audioStage)
             {
                 Ambient.Draw(video, id, isShort: false);
-                if (Shell.VideoBeatGlow > 0.02f && !Pip.Active && MpvPlayer.Instance.CurrentVideoId == id)
-                    Gfx.Stroke(video.Inset(-1.5f), Gfx.Fade(Th.Brand, Shell.VideoBeatGlow * 0.52f), Gfx.Corner(13.5f), 2.0f);
+                // Stylish depth shadow + theme-synced video container frame (adapts to corners, card style, neon glow & beat!)
+                var cs = sOpt.UiCardStyle;
+                if (cs == "brutal")
+                {
+                    Gfx.Fill(new R(video.X + 5, video.Y + 5, video.W, video.H), Gfx.Fade(Th.Ink, Th.Light ? 0.36f : 0.28f), vRad);
+                }
+                else
+                {
+                    Gfx.Fill(new R(video.X - 1, video.Y + 4, video.W + 2, video.H + 2), Gfx.Fade(0xFF000000, Th.Light ? 0.24f : 0.48f), vRad + 2);
+                }
+
+                float beatGlow = !Pip.Active && MpvPlayer.Instance.CurrentVideoId == id ? Shell.VideoBeatGlow : 0f;
+                if (sOpt.UiNeonGlow || cs == "neon")
+                {
+                    uint b2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
+                    Gfx.NeonGlow(video.Inset(-1.5f), vRad + 1.5f, Gfx.Mix(Th.Brand, b2, 0.35f), 0.58f + beatGlow * 0.45f);
+                }
+                else if (beatGlow > 0.02f)
+                {
+                    Gfx.Stroke(video.Inset(-1.5f), Gfx.Fade(Th.Brand, beatGlow * 0.56f), vRad + 1.5f, 2.0f);
+                }
             }
-            Gfx.Fill(video, 0xFF0A0A0E, 12);
-            if (!audioStage) Shell.WantVideo(video, id, clip, radius: 12);
+            Gfx.Fill(video, 0xFF0A0A0E, vRad);
+            if (!audioStage)
+            {
+                var cs = sOpt.UiCardStyle;
+                if (cs == "brutal")
+                    Gfx.Stroke(video.Inset(-1f), Gfx.Fade(Th.Ink, 0.85f), vRad, 2.0f);
+                else if (cs == "dashed")
+                    Gfx.StrokeDashed(video.Inset(-1.5f), Gfx.Fade(Th.Brand, 0.68f), vRad + 1.5f, 1.4f);
+                else if (cs == "framed")
+                    Gfx.Stroke(video.Inset(-1f), Gfx.Fade(Gfx.Mix(Th.Text, Th.Brand, 0.38f), 0.34f), vRad + 1f, 1.2f);
+                else if (cs == "neon")
+                    Gfx.Stroke(video.Inset(-1f), Gfx.Fade(Th.Brand2 != 0 ? Th.Brand2 : Th.Brand, 0.72f), vRad + 1f, 1.4f);
+                else
+                    Gfx.Stroke(video.Inset(-0.5f), Gfx.Fade(Gfx.Mix(Th.Ink, Th.Brand, 0.28f), Th.Light ? 0.22f : 0.16f), vRad + 0.5f, 1.0f);
+                Shell.WantVideo(video, id, clip, radius: vRad);
+            }
             if (Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id)
             {
                 Gfx.Fill(video, 0xFF0A0A0C, 12);
@@ -1841,27 +2225,30 @@ public sealed class WatchPage : IPage
             if (art != null)
             {
                 float fadeA = MusicArt.Alpha(art);
+                float domLum = (0.2126f * ((art.Dom1 >> 16) & 255) + 0.7152f * ((art.Dom1 >> 8) & 255) + 0.0722f * (art.Dom1 & 255)) / 255f;
+                bool brightArt = art.IsNeutral || domLum > 0.52f || Th.Light;
                 if (fullArtMode && art.SharpBmp != null)
                 {
-                    Gfx.ImageRoundedCover(art.SharpBmp, bgArtR, stageRad, 0.96f * fadeA);
-                    // Cinema legibility gradient scrim (top subtle vignette + bottom dark dock fade)
-                    Gfx.FillVerticalFade(new R(video.X, video.Y, video.W, 96), 0x040407, 0.62f, 0.24f, 0.0f);
-                    Gfx.FillVerticalFade(new R(video.X, video.Bottom - 295, video.W, 295), 0x040407, 0.0f, 0.52f, 0.92f);
+                    Gfx.ImageRoundedCover(art.SharpBmp, bgArtR, stageRad, (brightArt ? 0.78f : 0.94f) * fadeA);
+                    // Deep dark cinema veil so bright/white thumbnails never glare
+                    Gfx.Fill(video, Gfx.Fade(0xFF030307, brightArt ? 0.42f : 0.18f), stageRad);
+                    Gfx.FillVerticalFade(new R(video.X, video.Y, video.W, 108), 0x030306, 0.74f, 0.34f, 0.0f);
+                    Gfx.FillVerticalFade(new R(video.X, video.Bottom - 310, video.W, 310), 0x030306, 0.0f, 0.62f, 0.95f);
                 }
                 else if (art.BlurBmp != null)
                 {
-                    Gfx.ImageRoundedCover(art.BlurBmp, bgArtR, stageRad, (Th.Light ? 0.68f : 0.86f) * fadeA);
-                    Gfx.FillVerticalFade(video, 0x050509, 0.28f, 0.52f, 0.88f);
+                    Gfx.ImageRoundedCover(art.BlurBmp, bgArtR, stageRad, (brightArt ? 0.56f : 0.78f) * fadeA);
+                    Gfx.FillVerticalFade(video, 0x030307, brightArt ? 0.56f : 0.42f, brightArt ? 0.74f : 0.64f, 0.95f);
                 }
                 else if (art.SharpBmp != null)
                 {
-                    Gfx.ImageRoundedCover(art.SharpBmp, bgArtR, stageRad, 0.36f * fadeA);
-                    Gfx.FillVerticalFade(video, 0x050509, 0.42f, 0.66f, 0.92f);
+                    Gfx.ImageRoundedCover(art.SharpBmp, bgArtR, stageRad, (brightArt ? 0.26f : 0.34f) * fadeA);
+                    Gfx.FillVerticalFade(video, 0x030307, 0.54f, 0.76f, 0.95f);
                 }
             }
             else
             {
-                Gfx.FillFrosted(video, Th.Panel, stageRad, opacity: 0.92f, border: false);
+                Gfx.FillFrosted(video, 0xFF0A0A10, stageRad, opacity: 0.95f, border: false);
             }
 
             // Dominant-color studio blooms reacting to bass (dedicated slots 9 & 10 -> zero collision!)
@@ -1890,13 +2277,15 @@ public sealed class WatchPage : IPage
             if (isThisStagePlaying)
                 MusicStageEffects.DrawBackdropEffects(video, dom1, dom2);
 
-            // Atmospheric dimming during quiet breakdowns & slow rising flash when sound returns
+            // Atmospheric dimming during quiet breakdowns & pre-drop buildup ("calm before the storm") + flash on drop
             float qDim = isThisStagePlaying ? AudioAnalyzer.QuietDim : 0f;
-            float qFlash = isThisStagePlaying ? AudioAnalyzer.QuietFlash : 0f;
-            if (qDim > 0.01f)
-                Gfx.Fill(video, Gfx.Fade(0xFF030308, qDim * 0.46f), stageRad);
+            float buildup = isThisStagePlaying ? AudioAnalyzer.BuildupLevel : 0f;
+            float qFlash = isThisStagePlaying ? MathF.Max(AudioAnalyzer.QuietFlash, AudioAnalyzer.DropImpact * 0.65f) : 0f;
+            float stormDim = Math.Clamp(qDim * 0.72f + buildup * 0.42f, 0f, 0.78f);
+            if (stormDim > 0.01f)
+                Gfx.Fill(video, Gfx.Fade(0xFF020206, stormDim), stageRad);
             if (qFlash > 0.01f)
-                Gfx.Fill(video, Gfx.Fade(Gfx.Mix(dom1, 0xFFFFFFFF, 0.62f), qFlash * 0.22f), stageRad);
+                Gfx.Fill(video, Gfx.Fade(Gfx.Mix(dom1, 0xFFFFFFFF, 0.62f), qFlash * 0.24f), stageRad);
             Gfx.PopRoundedClip(stageRoundClip);
 
             // Foreground stage clip (keeps DC.Target switches in DrawDancingText 100% free of active D2D layers!)
@@ -2479,14 +2868,14 @@ public sealed class WatchPage : IPage
         var descRun = desc.Length > 0 ? Gfx.Text(desc, 13.5f, 400, mainW - 32, _descOpen ? 0 : 4) : null;
         var canToggle = desc.Length > 280 || desc.Count(c => c == '\n') > 3;
         float descBoxH = 14 + 20 + (descRun != null ? descRun.H + 6 : 0) + (canToggle ? 24 : 0) + 12;
-        var listInline = _list != null;
+        var listInline = _list != null && !sideCol;
         const float relGap = 14;
         int relatedCols = Math.Max(1, (int)((mainW + relGap) / (270 + relGap)));
         float relatedCardW = MathF.Floor((mainW - relGap * (relatedCols - 1)) / relatedCols);
         float relatedThumbH = MathF.Round(relatedCardW * 9f / 16f);
         float relatedRowH = relatedThumbH + 96f;
         int relatedRows = (_related.Count + relatedCols - 1) / relatedCols;
-        float relatedH = 44 + relatedRows * relatedRowH + (_relCont != null ? 54 : 16);
+        float relatedH = sideCol ? 0f : (44 + relatedRows * relatedRowH + (_relCont != null ? 54 : 16));
         float infoContentH = 14 + titleRun.H + 14 + 44 + _actionExtraH + 14 + descBoxH + (_note != null ? 40 : 0) + relatedH + 30 + _commentsH + (listInline ? _listInlineH : 0);
 
         var view = new R(x0, r.Y, mainW + 12, r.H);
@@ -2499,8 +2888,8 @@ public sealed class WatchPage : IPage
         float pageCenterX = videoBase.X + videoBase.W / 2;
         pageBeat.At(pageCenterX, videoBase.Y + videoBase.H / 2, AppSettings.Current.AudioOnlyMode);
         DrawVideoBox(video, view);
-        pageBeat.At(pageCenterX, videoBase.Bottom + 40);
-        float y = videoBase.Bottom + 12;
+        pageBeat.At(pageCenterX, videoBase.Bottom + 44);
+        float y = videoBase.Bottom + 20;
 
         // In normal video mode, no waveform strip under the player — instead feed timed comment avatar circles
         // directly to the mpv media player bar (fluxosc.lua) right above the seekbar!
@@ -2529,75 +2918,42 @@ public sealed class WatchPage : IPage
         y += titleRun.H + 14;
 
         pageBeat.At(pageCenterX, y + 22);
-        // channel + upgraded Like/Dislike pill + actions (wraps cleanly onto 2 rows if narrow so Like/Dislike NEVER vanishes!)
+        // Clean, zero-duplication action bar: Theater/PiP/Quality/Speed/Comments live in the player bar; EQ lives in the top bar.
         var chName = _info?.Channel ?? Video.Channel;
         var subText = _info?.Subscribers ?? "";
+        var s = AppSettings.Current;
         float bx = x0 + mainW, by = y + 4;
         const float ph = 36;
-        bx -= 40;
-        var rTh = new R(bx, by, 36, 36); var tfA1 = MusicBounce.Push(rTh, 28, amp: 1.0f);
-        if (UI.IconButton(UI.Id("theater", _infoScroll), rTh, Th.Theater, 16, AppSettings.Current.TheaterMode ? Th.Brand : Th.Text)) ToggleTheater();
-        MusicBounce.Pop(tfA1);
-        bx -= 42;
-        var rPip = new R(bx, by, 36, 36); var tfA2 = MusicBounce.Push(rPip, 25, amp: 1.0f);
-        if (UI.IconButton(UI.Id("pip", _infoScroll), rPip, "\uE8A7", 16, Pip.Active ? Th.Brand : Th.Text)) App.Post(Pip.Toggle);
-        MusicBounce.Pop(tfA2);
-        bx -= 42;
-        var rAo = new R(bx, by, 36, 36); var tfA3 = MusicBounce.Push(rAo, 22, amp: 1.05f);
-        if (UI.IconButton(UI.Id("audioonly", _infoScroll), rAo, Th.Headphones, 16, AppSettings.Current.AudioOnlyMode ? Th.Brand : Th.Text)) App.Post(Shell.ToggleAudioOnlyMode);
-        MusicBounce.Pop(tfA3);
-        bx -= 42;
+        bx -= 38;
         var rMr = new R(bx, by, 36, 36); var tfA4 = MusicBounce.Push(rMr, 19, amp: 1.0f);
         if (UI.IconButton(UI.Id("more", _infoScroll), rMr, Th.More)) MoreMenu();
         MusicBounce.Pop(tfA4);
-        var s = AppSettings.Current;
         if (!s.AudioOnlyMode)
         {
-            var beatLabel = L.T("Видео в бит", "Video beat");
-            var beatW = UI.PillWidth(null, beatLabel);
-            bx -= beatW + 8;
-            var tfVb = MusicBounce.Push(new R(bx, by, beatW, ph), 17, amp: 1.0f);
-            if (UI.Pill(UI.Id("videobeat", _infoScroll), bx, by, ph, null, beatLabel, out _, accent: s.VideoBeatShake))
-                Shell.ToggleVideoBeatShake();
-            MusicBounce.Pop(tfVb);
-
-            var scLbl = L.T("Кругляшки", "Comments");
-            var scW = UI.PillWidth("\uE8BD", scLbl);
-            bx -= scW + 8;
-            var tfSc = MusicBounce.Push(new R(bx, by, scW, ph), 15, amp: 1.05f);
-            if (UI.Pill(UI.Id("scwave", _infoScroll), bx, by, ph, "\uE8BD", scLbl, out _, accent: s.SoundCloudWave))
-            {
-                s.SoundCloudWave = !s.SoundCloudWave;
-                s.Save();
-                Shell.PushPlayerState();
-                App.Invalidate();
-            }
-            MusicBounce.Pop(tfSc);
+            var musLbl = L.T("Только звук", "Audio only");
+            var musW = UI.PillWidth(Th.Headphones, musLbl);
+            bx -= musW + 8;
+            var tfAo = MusicBounce.Push(new R(bx, by, musW, ph), 16, amp: 1.0f);
+            if (UI.Pill(UI.Id("audioonly", _infoScroll), bx, by, ph, Th.Headphones, musLbl, out _))
+                App.Post(Shell.ToggleAudioOnlyMode);
+            MusicBounce.Pop(tfAo);
         }
-        var eqLbl = s.AudioFxEnabled ? AudioDsp.DisplayPresetName(s) : "EQ";
-        var eqW = UI.PillWidth(null, eqLbl);
-        bx -= eqW + 8;
-        var tfEqP = MusicBounce.Push(new R(bx, by, eqW, ph), 13, amp: 1.1f);
-        if (UI.Pill(UI.Id("eq", _infoScroll), bx, by, ph, null, eqLbl, out _, accent: s.AudioFxEnabled)) App.Post(AudioStudioPanel.Toggle);
-        MusicBounce.Pop(tfEqP);
+        if (s.AnalyticsEnabled)
+        {
+            var anLbl = L.T("Аналитика", "Analytics");
+            var anW = UI.PillWidth(null, anLbl);
+            bx -= anW + 8;
+            var tfAn = MusicBounce.Push(new R(bx, by, anW, ph), 13, amp: 0.95f);
+            if (UI.Pill(UI.Id("analytics", _infoScroll), bx, by, ph, null, anLbl, out _, accent: AnalyticsPanel.Open))
+                AnalyticsPanel.OpenVideo(id, Title, chName, _info?.ChannelId ?? Video.ChannelId, _info?.ChannelAvatar, _likes, _info?.Views, _info?.Date, subText);
+            MusicBounce.Pop(tfAn);
+        }
         var shareLbl = L.T("Поделиться", "Share");
         var shW = UI.PillWidth(Th.Share, shareLbl);
         bx -= shW + 8;
         var tfShP = MusicBounce.Push(new R(bx, by, shW, ph), 10, amp: 0.95f);
         if (UI.Pill(UI.Id("share", _infoScroll), bx, by, ph, Th.Share, shareLbl, out _)) OpenShare();
         MusicBounce.Pop(tfShP);
-        var ql = Cards.QualityName(s.PlayerQuality);
-        var qW = UI.PillWidth(null, ql);
-        bx -= qW + 8;
-        var tfQP = MusicBounce.Push(new R(bx, by, qW, ph), 7, amp: 0.95f);
-        if (UI.Pill(UI.Id("q", _infoScroll), bx, by, ph, null, ql, out _)) QualityMenu();
-        MusicBounce.Pop(tfQP);
-        var spTxt = Speed;
-        var spW = UI.PillWidth(null, spTxt);
-        bx -= spW + 8;
-        var tfSpP = MusicBounce.Push(new R(bx, by, spW, ph), 4, amp: 0.85f);
-        if (UI.Pill(UI.Id("sp", _infoScroll), bx, by, ph, null, spTxt, out _)) SpeedMenu();
-        MusicBounce.Pop(tfSpP);
         if (UI.Now - _dlCheckedAt > 1000) { _dlCheckedAt = UI.Now; _isDownloaded = Downloader.Instance.IsDownloaded(id, out _); }
         var dl = _isDownloaded ? L.T("Скачано", "Saved") : L.T("Скачать", "Download");
         var dlW = UI.PillWidth(Th.Download, dl);
@@ -2606,12 +2962,16 @@ public sealed class WatchPage : IPage
         if (UI.Pill(UI.Id("dl", _infoScroll), bx, by, ph, Th.Download, dl, out _)) DownloadMenu();
         MusicBounce.Pop(tfDlP);
 
+        var chId = _info?.ChannelId ?? Video.ChannelId;
+        bool isSub = _subscribed == true;
+        string subBtnLbl = isSub ? L.T("Вы подписаны", "Subscribed") : L.T("Подписаться", "Subscribe");
+        float subBtnW = chId != null ? UI.PillWidth(isSub ? Th.Check : null, subBtnLbl) : 0f;
         float estLikeW = 14 + 18 + 7 + Gfx.Text(_likes, 13.5f, 600).W + 14 + 1 + 12 + 18 + 7 + Gfx.Text(_dislikes, 13.5f, 600).W + 14;
-        var nameFullW = Gfx.Text(chName, 15, 600, 260).W;
-        var subFullW = subText.Length > 0 ? Gfx.Text(subText, 12, 400, 260).W : 0;
-        var minChNeed = MathF.Min(190, MathF.Max(nameFullW, subFullW));
+        var nameFullW = Gfx.Text(chName, 15, 600, 220).W;
+        var subFullW = subText.Length > 0 ? Gfx.Text(subText, 12, 400, 220).W : 0;
+        var minChNeed = MathF.Min(175, MathF.Max(nameFullW, subFullW)) + (subBtnW > 0 ? subBtnW + 14 : 0);
         float leftEdge = bx;
-        bool likeOnSameRow = bx - estLikeW - 8 > x0 + 54 + minChNeed + 14;
+        bool likeOnSameRow = bx - estLikeW - 8 > x0 + 54 + minChNeed + 12;
         if (likeOnSameRow)
         {
             bx -= estLikeW + 8;
@@ -2619,20 +2979,32 @@ public sealed class WatchPage : IPage
             DrawLikeDislikePill(bx, by, ph, out _);
         }
 
-        var chMaxW = MathF.Max(70, MathF.Min(260, leftEdge - (x0 + 54) - 14));
+        var chMaxW = MathF.Max(68, MathF.Min(230, leftEdge - (x0 + 54) - (subBtnW > 0 ? subBtnW + 26 : 14)));
         var chAvR = new R(x0, y + 1, 42, 42);
         var tfChAv = MusicBounce.Push(chAvR, 3, amp: 1.22f, textSafe: false);
         Cards.Avatar(chAvR.X, chAvR.Y, chAvR.W, _info?.ChannelAvatar, chName);
         MusicBounce.Pop(tfChAv);
         var nameRun = Gfx.Text(chName, 15, 600, chMaxW);
         var nameRect = new R(x0 + 54, y + 2, nameRun.W, nameRun.H);
-        Gfx.DrawDancingText(chName, nameRect.X, nameRect.Y, 15, UI.Hover(nameRect) && (_info?.ChannelId ?? Video.ChannelId) != null ? Th.Brand : Th.Text, 600, chMaxW, 1, amp: 0.85f, accentMixColor: Th.Brand);
+        Gfx.DrawDancingText(chName, nameRect.X, nameRect.Y, 15, UI.Hover(nameRect) && chId != null ? Th.Brand : Th.Text, 600, chMaxW, 1, amp: 0.85f, accentMixColor: Th.Brand);
         Cards.CopyMenu(nameRect, chName, L.T("Копировать название канала", "Copy channel name"));
         if (subText.Length > 0) Gfx.Draw(subText, x0 + 54, y + 24, 12, Th.Sub, 400, chMaxW);
-        var chId = _info?.ChannelId ?? Video.ChannelId;
         if (chId != null && (UI.Click(UI.Id("ch", _infoScroll), nameRect, playSfx: false) || UI.Click(UI.Id("chav", _infoScroll), new R(x0, y + 1, 42, 42), playSfx: false)))
             App.Post(() => Shell.OpenChannel(chId, chName));
-        y += 44;
+        if (chId != null && subBtnW > 0)
+        {
+            float subX = Gfx.Snap(x0 + 54 + MathF.Max(nameRun.W, MathF.Min(chMaxW, subFullW)) + 14);
+            if (subX + subBtnW <= leftEdge - 8)
+            {
+                var subR = new R(subX, by, subBtnW, ph);
+                var tfSub = MusicBounce.Push(subR, 5, amp: 0.92f);
+                if (UI.Pill(UI.Id("sub", _infoScroll), subX, by, ph, isSub ? Th.Check : null, subBtnLbl, out _,
+                    isSub ? Th.A(0.11f) : Th.Brand, isSub ? Th.Text : Th.OnBrand))
+                    App.Post(ToggleSubscribe);
+                MusicBounce.Pop(tfSub);
+            }
+        }
+        y += 48;
 
         float extraH = 0;
         if (!likeOnSameRow)
@@ -2653,9 +3025,11 @@ public sealed class WatchPage : IPage
         }
 
         pageBeat.At(pageCenterX, y + descBoxH / 2);
-        // description
+        // description card (frosted subtle surface with crisp hairline border)
         var box = new R(x0, y, mainW, descBoxH);
-        Gfx.Fill(box, Th.A(0.07f), 12);
+        float dRad = Gfx.Corner(14);
+        Gfx.Fill(box, Th.A(0.065f), dRad);
+        Gfx.Stroke(box, Th.A(0.10f), dRad, 1f);
         if (desc.Length > 0 && UI.RightClick(box))
         {
             var url = Video.Url; var full = Title + "\n" + url + "\n\n" + desc;
@@ -2679,8 +3053,17 @@ public sealed class WatchPage : IPage
         }
         y += descBoxH + 10;
         if (_note != null) { Gfx.Draw(_note, x0, y, 13, Th.Warn, 400, mainW, 2); y += 40; }
-        pageBeat.At(pageCenterX, y + 100);
-        y = DrawRelatedInline(x0, y + 14, mainW, view);
+        if (!sideCol)
+        {
+            if (hasLiveChat && !theaterChatSide)
+            {
+                float chatH = _chatOpen ? 420f : 44f;
+                float usedH = DrawLiveChat(new R(x0, y + 8, mainW, chatH));
+                y += usedH + 14f;
+            }
+            pageBeat.At(pageCenterX, y + 100);
+            y = DrawRelatedInline(x0, y + 14, mainW, view);
+        }
         var cy0 = y;
         pageBeat.At(pageCenterX, y + 100);
         y = DrawComments(x0, y + 14, mainW, view);
@@ -2688,6 +3071,35 @@ public sealed class WatchPage : IPage
         if (MathF.Abs(ch - _commentsH) > 0.5f) { _commentsH = ch; UI.Animate(); }
         pageBeat.Dispose();
         UI.EndScroll();
+
+        // Right sidebar: full Live Chat panel next to the player in Theater Mode, or Live Chat + Playlist + Related in classic 2-column mode
+        if (theaterChatSide)
+        {
+            float sx = Gfx.Snap(x0 + mainW + sideGap);
+            float sy = r.Y + topPad;
+            float sh = MathF.Max(340f, r.H - topPad - 12f);
+            DrawLiveChat(new R(sx, sy, sideW, sh));
+        }
+        else if (sideCol)
+        {
+            float sx = Gfx.Snap(x0 + mainW + sideGap);
+            float sy = r.Y + topPad;
+            float sh = MathF.Max(120f, r.H - topPad);
+            if (hasLiveChat)
+            {
+                float chatH = _chatOpen ? MathF.Min(MathF.Max(340f, sh * 0.62f), sh - 120f) : 44f;
+                float usedH = DrawLiveChat(new R(sx, sy, sideW, MathF.Max(44f, chatH)));
+                sy += usedH + 12f;
+                sh = MathF.Max(100f, r.Bottom - sy);
+            }
+            if (_list != null)
+            {
+                float plH = DrawPlaylist(new R(sx, sy, sideW, MathF.Min(420f, sh * 0.48f)));
+                sy += plH;
+                sh = MathF.Max(120f, r.Bottom - sy);
+            }
+            DrawRelated(new R(sx, sy, sideW, sh));
+        }
 
         // the share panel sits under the video, above everything else on the page
         if (SharePanel.Open)
@@ -2843,6 +3255,254 @@ public sealed class WatchPage : IPage
         }
         else y += 16;
         return y;
+    }
+
+    private float DrawLiveChat(R r)
+    {
+        float rad = Gfx.Corner(14);
+        if (!_chatOpen)
+        {
+            _chatEdit?.Hide();
+            var btn = new R(r.X, r.Y, r.W, 42);
+            bool hov = UI.Hover(btn);
+            Gfx.Fill(btn, hov ? Th.Hover : Th.Card, rad);
+            Gfx.Stroke(btn, Th.Line, rad, 1);
+            Gfx.Fill(new R(btn.X + 14, btn.Y + 17, 8, 8), 0xFFFF3B30, 4);
+            Gfx.Draw(L.T("Показать чат трансляции", "Show live chat"), btn.X + 30, btn.Y + 12, 13.5f, Th.Text, 600);
+            if (UI.Click(UI.Id("livechat:show"), btn))
+            {
+                _chatOpen = true;
+                if (!string.IsNullOrEmpty(_chatToken)) StartLiveChat(_chatToken);
+                App.Invalidate();
+            }
+            return 42;
+        }
+
+        Gfx.Fill(r, Th.Card, rad);
+        Gfx.Stroke(r, Th.Line, rad, 1);
+
+        // Header bar with live red dot + clickable chat mode selector (Top chat / Live chat) + Hide button
+        const float hdrH = 42f;
+        float pinH = _chatPinnedMsg != null ? 36f : 0f;
+        bool hasDetail = !string.IsNullOrEmpty(_chatRestrictedDetail);
+        float footH = !string.IsNullOrEmpty(_chatRestricted) ? (hasDetail ? 74f : 56f) : 52f;
+        Gfx.Fill(new R(r.X + 14, r.Y + 17, 8, 8), 0xFFFF3B30, 4);
+        var activeView = _chatViews?.FirstOrDefault(v => v.Selected)?.Title ?? L.T("Чат трансляции", "Live chat");
+        var hideLbl = L.T("Скрыть", "Hide");
+        var hw = UI.PillWidth(null, hideLbl);
+        if (_chatViews is { Count: > 1 })
+        {
+            var modeLbl = activeView + " ▾";
+            var modeR = new R(r.X + 28, r.Y + 7, MathF.Min(r.W - hw - 52, Gfx.Text(modeLbl, 13.5f, 600).W + 14), 28);
+            bool mHov = UI.Hover(modeR);
+            if (mHov) Gfx.Fill(modeR, Th.Hover, 8);
+            Gfx.Draw(modeLbl, modeR.X + 6, modeR.Y + 5, 13.5f, Th.Text, 600, modeR.W - 10, 1);
+            if (UI.Click(UI.Id("livechat:mode"), modeR))
+            {
+                Menus.Popup(_chatViews.Select(v => new MenuItem(v.Title, () =>
+                {
+                    _chatMsgs.Clear();
+                    _chatAppearAt.Clear();
+                    _chatIds.Clear();
+                    _chatPinned = true;
+                    StartLiveChat(v.Token);
+                    App.Invalidate();
+                }, check: v.Selected)).ToList());
+            }
+        }
+        else
+        {
+            Gfx.Draw(L.T("Чат трансляции", "Live chat"), r.X + 30, r.Y + 12, 14f, Th.Text, 600);
+        }
+        if (UI.Pill(UI.Id("livechat:hide"), r.Right - hw - 10, r.Y + 7, 28, null, hideLbl, out _))
+        {
+            _chatOpen = false;
+            _chatGen++;
+            _chatEdit?.Hide();
+            App.Invalidate();
+            return r.H;
+        }
+        Gfx.Fill(new R(r.X + 10, r.Y + hdrH, r.W - 20, 1), Th.Line);
+
+        var body = new R(r.X + 6, r.Y + hdrH + 4, r.W - 12, MathF.Max(60f, r.H - hdrH - pinH - footH - 8));
+        if (_chatMsgs.Count == 0)
+        {
+            Gfx.Draw(L.T("Подключение к чату…", "Connecting to live chat…"), body.X + 12, body.Y + 14, 13f, Th.Sub);
+        }
+        else
+        {
+            float msgW = body.W - 44;
+            float totalH = 6;
+            Span<float> heights = _chatMsgs.Count <= 200 ? stackalloc float[_chatMsgs.Count] : new float[_chatMsgs.Count];
+            for (int i = 0; i < _chatMsgs.Count; i++)
+            {
+                var m = _chatMsgs[i];
+                if (m.IsSystem)
+                {
+                    var tr = Gfx.Text(m.Text, 12.0f, 500, body.W - 32, 3);
+                    heights[i] = MathF.Max(26f, tr.H + 12f);
+                }
+                else
+                {
+                    var lineText = string.IsNullOrEmpty(m.SuperChatAmount) ? m.Text : $"{m.SuperChatAmount} · {m.Text}";
+                    float textH = lineText.Length > 0 ? Gfx.Text(lineText, 12.8f, 400, msgW, 4).H : 0f;
+                    float emojiH = (m.EmojiUrls is { Count: > 0 }) ? 22f : 0f;
+                    heights[i] = MathF.Max(26f, 18f + textH + (textH > 0 && emojiH > 0 ? 3f : 0f) + emojiH + 4f) + (m.SuperChatAmount != null ? 8f : 0f);
+                }
+                totalH += heights[i] + 3f;
+            }
+
+            float maxSc = MathF.Max(0, totalH - body.H);
+            float sc = UI.BeginScroll(_chatScroll, body, totalH);
+            if (_chatPinned && maxSc > sc + 1f)
+            {
+                UI.ScrollJump(_chatScroll, maxSc - sc);
+                sc = maxSc;
+            }
+            _chatPinned = maxSc <= 2f || (maxSc - sc) < 28f;
+
+            long nowMs = UI.Now;
+            bool anyAnim = false;
+            float cy = body.Y + 4 - sc;
+            for (int i = 0; i < _chatMsgs.Count; i++)
+            {
+                float mh = heights[i];
+                if (cy + mh >= body.Y - 8 && cy <= body.Bottom + 8)
+                {
+                    var m = _chatMsgs[i];
+                    long appear = i < _chatAppearAt.Count ? _chatAppearAt[i] : 0;
+                    float rawT = appear > 0 ? (nowMs - appear) / 260f : 1f;
+                    float a;
+                    float slideY;
+                    if (rawT < 1f)
+                    {
+                        anyAnim = true;
+                        float ct = Math.Clamp(rawT, 0f, 1f);
+                        float u = 1f - ct;
+                        float ease = 1f - u * u * u;
+                        a = ease;
+                        slideY = (1f - ease) * 10f;
+                    }
+                    else
+                    {
+                        a = 1f;
+                        slideY = 0f;
+                    }
+
+                    float my = cy + slideY;
+                    if (m.IsSystem)
+                    {
+                        var sysR = new R(body.X + 4, my, body.W - 12, mh);
+                        Gfx.Fill(sysR, Gfx.Fade(Th.Track, 0.72f * a), Gfx.Corner(9));
+                        Gfx.Stroke(sysR, Gfx.Fade(Th.Line, a), Gfx.Corner(9), 1);
+                        Gfx.Draw(m.Text, sysR.X + 10, sysR.Y + 6, 12.0f, Gfx.Fade(Th.Sub, a), 500, sysR.W - 20, 3);
+                    }
+                    else
+                    {
+                        if (m.SuperChatAmount != null)
+                        {
+                            var scR = new R(body.X + 4, my, body.W - 12, mh);
+                            Gfx.Fill(scR, Gfx.Fade(m.AccentColor, 0.24f * a), Gfx.Corner(9));
+                            Gfx.Stroke(scR, Gfx.Fade(m.AccentColor, 0.55f * a), Gfx.Corner(9), 1);
+                        }
+                        if (a > 0.08f) Cards.Avatar(body.X + 8, my + 3, 22, m.Avatar, m.Author);
+                        string roleTag = m.IsOwner ? " ★" : m.IsMod ? " 🛡" : m.IsVerified ? " ✓" : m.IsMember ? " ✦" : "";
+                        string badgeSuffix = !string.IsNullOrEmpty(m.BadgeText) ? $" [{m.BadgeText}]" : "";
+                        uint nameCol = m.IsOwner ? 0xFFFFD60A : m.IsMod ? 0xFF5EA8FF : m.IsMember ? 0xFF34D399 : Th.Sub;
+                        Gfx.Draw(m.Author + roleTag + badgeSuffix, body.X + 36, my + 2, 12.0f, Gfx.Fade(nameCol, a), 600, msgW, 1);
+                        float ty = my + 18f;
+                        var lineText = string.IsNullOrEmpty(m.SuperChatAmount) ? m.Text : $"{m.SuperChatAmount} · {m.Text}";
+                        if (lineText.Length > 0)
+                        {
+                            var tr = Gfx.Draw(lineText, body.X + 36, ty, 12.8f, Gfx.Fade(Th.Text, a), 400, msgW, 4);
+                            ty += tr.H + 3f;
+                        }
+                        if (m.EmojiUrls is { Count: > 0 } && a > 0.08f)
+                        {
+                            float ex = body.X + 36;
+                            foreach (var eu in m.EmojiUrls)
+                            {
+                                if (ex + 20f > body.Right - 8) break;
+                                var eimg = Images.Get(eu, 20, 20);
+                                if (eimg != null) Gfx.Image(eimg.Bmp!, new R(ex, ty, 19, 19), Images.Alpha(eimg) * a);
+                                ex += 22f;
+                            }
+                        }
+                    }
+                }
+                cy += mh + 3f;
+            }
+            if (anyAnim) UI.Animate();
+            UI.EndScroll();
+
+            // Floating Apple-glass "Jump to latest messages" button whenever the user scrolled up
+            if (!_chatPinned && maxSc > 20f)
+            {
+                var downLbl = L.T("↓ Новые сообщения", "↓ Latest messages");
+                var dw = UI.PillWidth(null, downLbl);
+                if (UI.Pill(UI.Id("livechat:down"), body.X + (body.W - dw) * 0.5f, body.Bottom - 36, 28, null, downLbl, out _, accent: true))
+                {
+                    _chatPinned = true;
+                    UI.ScrollJump(_chatScroll, maxSc - sc);
+                    App.Invalidate();
+                }
+            }
+        }
+
+        // Optional pinned live chat banner right above the composer
+        if (_chatPinnedMsg is { } pm)
+        {
+            float py = r.Bottom - footH - pinH;
+            var pinR = new R(r.X + 8, py + 2, r.W - 16, pinH - 4);
+            Gfx.Fill(pinR, Th.A(0.08f), Gfx.Corner(9));
+            Gfx.Stroke(pinR, Th.Line, Gfx.Corner(9), 1);
+            Cards.Avatar(pinR.X + 6, pinR.Y + 5, 20, pm.Avatar, pm.Author);
+            var pinTxt = $"{pm.Author}: {pm.Text}";
+            Gfx.Draw(pinTxt, pinR.X + 32, pinR.Y + 8, 12.0f, Th.Text, 500, pinR.W - 40, 1);
+        }
+
+        // Bottom live chat composer OR clear restriction banner with exact YouTube reason
+        float fy = r.Bottom - footH;
+        Gfx.Fill(new R(r.X + 10, fy, r.W - 20, 1), Th.Line);
+        bool overlayOpen = SharePanel.Open || Menus.Open || AccountMenu.Open || ThemeCodeEditor.Open || AudioStudioPanel.Open || LoginModal.Open || AnalyticsPanel.Open;
+        if (!string.IsNullOrEmpty(_chatRestricted))
+        {
+            _chatEdit?.Hide();
+            var restR = new R(r.X + 10, fy + 7, r.W - 20, footH - 14);
+            Gfx.Fill(restR, Gfx.Fade(Th.Warn, 0.13f), Gfx.Corner(10));
+            Gfx.Stroke(restR, Gfx.Fade(Th.Warn, 0.36f), Gfx.Corner(10), 1);
+            Gfx.Draw(_chatRestricted, restR.X + 10, restR.Y + 6, 12.2f, Th.Text, 600, restR.W - 20, 1);
+            if (!string.IsNullOrEmpty(_chatRestrictedDetail))
+                Gfx.Draw(_chatRestrictedDetail, restR.X + 10, restR.Y + 23, 11.4f, Th.Sub, 400, restR.W - 20, 2);
+        }
+        else if (CookieStore.IsLoggedIn && !overlayOpen)
+        {
+            var ph = !string.IsNullOrEmpty(_chatPlaceholder) ? _chatPlaceholder : L.T("Написать в чат…", "Say something…");
+            if (_chatEdit == null)
+            {
+                _chatEdit = new Edit(ph) { Bg = () => Th.Field };
+                _chatEdit.Enter = SubmitChatMessage;
+            }
+            else _chatEdit.SetPlaceholder(ph);
+
+            var sendLbl = _sendingChat ? "…" : "➤";
+            float sendW = 38f;
+            var boxR = new R(r.X + 10, fy + 8, MathF.Max(100f, r.W - 20 - sendW - 8), 36f);
+            Gfx.Fill(boxR, Th.Field, 10);
+            bool overLimit = _chatEdit.Text.Length > _chatMaxChars;
+            Gfx.Stroke(boxR, overLimit ? 0xFFFF3B30u : (_chatEdit.Focused ? Gfx.Fade(Th.Brand, 0.85f) : Th.Line), 10, _chatEdit.Focused ? 1.2f : 1f);
+            _chatEdit.Place(boxR, 12, 13);
+            bool canSend = !_sendingChat && !overLimit && !string.IsNullOrWhiteSpace(_chatEdit.Text) && !string.IsNullOrEmpty(_chatSendParams);
+            if (UI.Pill(UI.Id("livechat:send"), boxR.Right + 8, fy + 8, 36f, null, sendLbl, out _, accent: canSend) && canSend)
+                App.Post(SubmitChatMessage);
+        }
+        else
+        {
+            _chatEdit?.Hide();
+            if (!CookieStore.IsLoggedIn)
+                Gfx.Draw(L.T("Войдите в аккаунт, чтобы писать в чат", "Sign in to chat"), r.X + 14, fy + 18, 12.5f, Th.Sub);
+        }
+        return r.H;
     }
 
     private void DrawRelated(R r)
@@ -3087,9 +3747,22 @@ public sealed class WatchPage : IPage
 
     public void MoreMenu()
     {
+        var s = AppSettings.Current;
         var items = Cards.MenuFor(Full);
+        var styleSub = new List<MenuItem>
+        {
+            new(L.T("Стиль FluxTube (стекло)", "FluxTube Style (Glass)"), () => Shell.SetPlayerStyle("flux"), check: s.PlayerStyle != "youtube"),
+            new(L.T("Стиль YouTube", "YouTube Style"), () => Shell.SetPlayerStyle("youtube"), check: s.PlayerStyle == "youtube"),
+        };
         var top = new List<MenuItem>
         {
+            new(L.T("Качество видео", "Video quality") + $" ({Cards.QualityName(s.PlayerQuality)})", QualityMenu, icon: Th.Quality),
+            new(L.T("Скорость", "Playback speed") + $" ({Speed})", SpeedMenu, icon: Th.Speed),
+            new(L.T("Стиль плеера", "Player style"), null, styleSub, icon: Th.Settings),
+            new(L.T("Широкий экран (Кинотеатр)", "Theater mode"), ToggleTheater, check: s.TheaterMode, icon: Th.Theater, shortcut: "T"),
+            new(L.T("Картинка в картинке (PiP)", "Picture-in-Picture"), () => App.Post(Pip.Toggle), check: Pip.Active, icon: "\uE8A7"),
+            new(L.T("Видео в бит", "Video beat"), Shell.ToggleVideoBeatShake, check: s.VideoBeatShake, icon: Th.Headphones),
+            MenuItem.Sep,
             new(L.T("Поделиться…", "Share…"), OpenShare, icon: Th.Share),
             new(L.T("Копировать ссылку с текущего момента", "Copy link at current time"), () => Cards.Copy(SharePanel.LinkFor(Video.VideoId, MpvPlayer.Instance.TimePos)), icon: Th.Link, shortcut: "Ctrl+Shift+C"),
             new(L.T("Начать сначала", "Restart from beginning"), () => MpvPlayer.Instance.SeekAbsolute(0), icon: Th.Restart),

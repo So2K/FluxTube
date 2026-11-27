@@ -59,6 +59,32 @@ public static unsafe class App
         W.SetTimer(Hwnd, 2, delay, 0);
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessPowerThrottlingState { public uint Version, ControlMask, StateMask; }
+
+    [DllImport("kernel32.dll")]
+    private static extern nint GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int SetProcessInformation(nint hProcess, int processInformationClass, ref ProcessPowerThrottlingState info, int infoSize);
+
+    /// <summary>Opt out of Windows 11 EcoQoS background throttling so WASAPI audio never stutters when Alt-Tabbing into games or other apps.</summary>
+    private static void DisableBackgroundAudioThrottling()
+    {
+        try
+        {
+            var state = new ProcessPowerThrottlingState
+            {
+                Version = 1,
+                // PROCESS_POWER_THROTTLING_EXECUTION_SPEED (0x1) | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION (0x4)
+                ControlMask = 0x1u | 0x4u,
+                StateMask = 0u,
+            };
+            SetProcessInformation(GetCurrentProcess(), 4 /*ProcessPowerThrottling*/, ref state, Marshal.SizeOf<ProcessPowerThrottlingState>());
+        }
+        catch { }
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -68,6 +94,7 @@ public static unsafe class App
         ProfileOptimization.SetProfileRoot(Paths.Data);
         // SustainedLowLatency prevents stop-the-world Gen2 GC pauses during 144Hz scrolling & Music Mode
         GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+        DisableBackgroundAudioThrottling();
         try
         {
             return Run(args);
@@ -118,6 +145,7 @@ public static unsafe class App
             unchecked((int)0x80000000), unchecked((int)0x80000000), (int)(s.WindowWidth * sys), (int)(s.WindowHeight * sys), 0, 0, inst, 0);
         FrameColors();
         Themes.Changed += () => { FrameColors(); Edit.RepaintAll(); Shell.PushPlayerState(); };
+        Themes.LiveChromeChanged += () => { FrameColors(); Shell.PushPlayerAccent(); };
 
         // the system caption is replaced by our own top bar: apply the new frame now
         W.SetWindowPos(Hwnd, 0, 0, 0, 0, 0, W.SWP_NOMOVE | W.SWP_NOSIZE | W.SWP_NOZORDER | W.SWP_NOACTIVATE | W.SWP_FRAMECHANGED);
@@ -367,7 +395,7 @@ public static unsafe class App
                             Images.TrimMemory(minimized: true);
                             MusicArt.Trim(MpvPlayer.Instance.CurrentVideoId);
                         }
-                        GC.Collect(2, GCCollectionMode.Optimized, blocking: false);
+                        ThreadPool.QueueUserWorkItem(_ => GC.Collect(2, GCCollectionMode.Optimized, blocking: false));
                     }
                     else if (Gfx.DC != null)
                     {
@@ -700,8 +728,8 @@ internal static unsafe class VideoHost
                     W.SendMessageW(Pip.Hwnd, 0x00A1 /*WM_NCLBUTTONDOWN*/, 2 /*HTCAPTION*/, 0);
                     return 0;
                 }
-                // Coalesce 1000Hz-8000Hz gaming mouse packets to ~100Hz so libmpv's IPC ring & Lua OSC never choke!
-                if (now - _lastMpvMouseAt >= 10)
+                // Zero-lag mouse forwarding (~500Hz coalesce, 6ms trailing flush -> instant cursor tracking)
+                if (now - _lastMpvMouseAt >= 2)
                 {
                     _mousePending = false;
                     _lastMpvMouseAt = now;
@@ -714,7 +742,7 @@ internal static unsafe class VideoHost
                     W.TrackMouseEvent(&tme);
                     _tracking = true;
                     W.SetTimer(h, 1, 400, 0);
-                    W.SetTimer(h, 2, 50, 0); // instant Ctrl+hover detection & trailing mouse flush
+                    W.SetTimer(h, 2, 6, 0);
                 }
                 return 0;
             }
@@ -767,11 +795,13 @@ internal static unsafe class VideoHost
                 if (W.GetFocus() != App.Hwnd) W.SetFocus(App.Hwnd);
                 Suggest.Hide();
                 if (Shell.CloseModalOnOutsideClick()) return 0;
+                FlushPendingMouse();
                 _lmbSent = true;
                 Cmd("keydown", "MBTN_LEFT");
                 return 0;
             case W.WM_LBUTTONUP:
                 W.ReleaseCapture();
+                FlushPendingMouse();
                 if (_pipDownX >= 0) { _pipDownX = -1; _lmbSent = true; Cmd("keydown", "MBTN_LEFT"); }
                 if (_lmbSent) { _lmbSent = false; Cmd("keyup", "MBTN_LEFT"); }
                 return 0;

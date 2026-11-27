@@ -32,8 +32,9 @@ public static class Storyboard
     private static string _lastFile = "";
     private static int _lastW, _lastH, _slot;
     private static long _lastUse;
-    private static double _lastSeconds;
+    private static double _lastSeconds = -1;
     private static volatile bool _hasSheets;
+    private static volatile string? _wantSeekBarVideo;
 
     // Single reusable GPU sheet bitmap for YouTube-style hover preview on Home/Feed cards
     private static Vortice.Direct2D1.ID2D1Bitmap1? _cardBmp;
@@ -62,7 +63,7 @@ public static class Storyboard
         if (string.IsNullOrEmpty(videoId) || hoverSec < 0.35) return false;
         _lastUse = Environment.TickCount64;
         var book = BookFor(videoId);
-        if (book == null || book.Total <= 0 || book.TileW < 120) return false;
+        if (book == null || book.Total <= 0 || book.TileW < 60) return false;
 
         int per = Math.Max(1, book.Cols * book.Rows);
         int maxFrames = Math.Min(book.Total, per * 2); // cycle through up to 2 sheets for rich variety
@@ -159,6 +160,41 @@ public static class Storyboard
         return true;
     }
 
+    /// <summary>Samples a pinpoint 5x3 (15-zone) chroma-weighted color grid from the storyboard frame at this timestamp.</summary>
+    public static bool TrySampleGrid15(string videoId, double seconds, out SpatialGrid15 grid)
+    {
+        grid = default;
+        if (string.IsNullOrEmpty(videoId)) return false;
+        _lastUse = Environment.TickCount64;
+        var book = BookFor(videoId);
+        if (book == null) return false;
+        int idx = Math.Clamp((int)(seconds / book.Interval), 0, Math.Max(0, book.Total - 1));
+        int per = Math.Max(1, book.Cols * book.Rows), sheet = idx / per, cell = idx % per;
+        if (!book.Sheets.TryGetValue(sheet, out var px))
+        {
+            book.Sheets[sheet] = null;
+            _ = Task.Run(() => LoadSheet(videoId, book, sheet, notifySeekBar: false));
+            return false;
+        }
+        if (px == null || px.Length == 0 || !book.Size.TryGetValue(sheet, out var size)) return false;
+        var (sw, sh) = size;
+        int sx = cell % book.Cols * book.TileW, sy = cell / book.Cols * book.TileH;
+        if (sx + book.TileW > sw || sy + book.TileH > sh) return false;
+
+        int cw = Math.Max(1, book.TileW / SpatialGrid15.Cols);
+        int ch = Math.Max(1, book.TileH / SpatialGrid15.Rows);
+        for (int r = 0; r < SpatialGrid15.Rows; r++)
+            for (int c = 0; c < SpatialGrid15.Cols; c++)
+            {
+                var (cr, cg, cb) = AvgRegion(px, sw, sx + c * cw, sy + r * ch, cw, ch);
+                grid[r * SpatialGrid15.Cols + c] = 0xFF000000u
+                    | ((uint)Math.Clamp((int)(cr * 255f + 0.5f), 0, 255) << 16)
+                    | ((uint)Math.Clamp((int)(cg * 255f + 0.5f), 0, 255) << 8)
+                    |  (uint)Math.Clamp((int)(cb * 255f + 0.5f), 0, 255);
+            }
+        return true;
+    }
+
     private static (float R, float G, float B) AvgRegion(byte[] px, int strideW, int x0, int y0, int w, int h)
     {
         int stepX = Math.Max(1, w / 6), stepY = Math.Max(1, h / 4);
@@ -195,10 +231,12 @@ public static class Storyboard
         if (!book.Sheets.TryGetValue(sheet, out var px))
         {
             book.Sheets[sheet] = null;
+            _wantSeekBarVideo = videoId;
             _ = Task.Run(() => LoadSheet(videoId, book, sheet, notifySeekBar: true));
             return;
         }
-        if (px == null || px.Length == 0) return; // on its way or permanently unavailable
+        if (px == null) { _wantSeekBarVideo = videoId; return; } // sheet is already downloading — notify once ready
+        if (px.Length == 0) return; // permanently unavailable
         if (!book.Size.TryGetValue(sheet, out var size)) return;
         var (sw, sh) = size;
         int sx = cell % book.Cols * book.TileW, sy = cell / book.Cols * book.TileH;
@@ -206,6 +244,19 @@ public static class Storyboard
 
         int tw = (int)Math.Round(240 * Gfx.Scale / 2) * 2;
         int th = (int)Math.Round((double)tw * book.TileH / book.TileW / 2) * 2;
+        int maxH = (int)Math.Round(200 * Gfx.Scale / 2) * 2;
+        if (th > maxH && th > 0)
+        {
+            tw = Math.Max(40, (int)Math.Round((double)maxH * book.TileW / book.TileH / 2) * 2);
+            th = maxH;
+        }
+        // Silently prefetch next storyboard sheet so scrubbing across sheet boundaries is 0ms instant
+        int nextSheet = sheet + 1;
+        if (nextSheet * per < book.Total && !book.Sheets.ContainsKey(nextSheet))
+        {
+            book.Sheets[nextSheet] = null;
+            _ = Task.Run(() => LoadSheet(videoId, book, nextSheet, notifySeekBar: false));
+        }
         int tileW = book.TileW, tileH = book.TileH;
         // Offload bicubic resample + 290 KB disk write off the Win32 UI thread so seekbar scrubbing stays 0.0ms smooth!
         _ = Task.Run(() =>
@@ -237,14 +288,41 @@ public static class Storyboard
     private static void Send(string? file, int w, int h)
         => MpvPlayer.Instance.Command("script-message-to", "fluxosc", "flux-thumb", file ?? "none", w.ToString(), h.ToString());
 
+    /// <summary>Prewarms storyboard spec &amp; first sheet in the background as soon as a video opens so timeline hover preview is instant.</summary>
+    public static void Prewarm(string? videoId)
+    {
+        if (string.IsNullOrEmpty(videoId)) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (!QuickStream.SpecKnown(videoId))
+                    await QuickStream.EnsureSpecAsync(videoId).ConfigureAwait(false);
+                var book = BookFor(videoId);
+                if (book != null && !book.Sheets.ContainsKey(0))
+                {
+                    book.Sheets[0] = null;
+                    await LoadSheet(videoId, book, 0, notifySeekBar: true).ConfigureAwait(false);
+                }
+            }
+            catch { }
+        });
+    }
+
     private static Book? BookFor(string videoId)
     {
         if (_books.TryGetValue(videoId, out var b)) return b;
         var spec = QuickStream.StoryboardSpec(videoId);
         if (spec == null)
         {
-            // nobody asked YouTube for this video's player data yet (it came from the disk cache): ask now
-            if (!QuickStream.SpecKnown(videoId)) _ = QuickStream.EnsureSpecAsync(videoId).ContinueWith(_ => App.WakeUi());
+            // nobody asked YouTube for this video's player data yet (it came from the disk cache): ask now and re-request preview once ready!
+            if (!QuickStream.SpecKnown(videoId))
+                _ = QuickStream.EnsureSpecAsync(videoId).ContinueWith(_ => App.Post(() =>
+                {
+                    if (MpvPlayer.Instance.CurrentVideoId == videoId && _lastSeconds >= 0)
+                        Request(videoId, _lastSeconds);
+                    App.WakeUi();
+                }));
             else _books[videoId] = null; // asked, there are none
             return null;
         }
@@ -357,7 +435,11 @@ public static class Storyboard
                 }
             }
             _hasSheets = true;
-            if (notifySeekBar) App.Post(() => { if (MpvPlayer.Instance.CurrentVideoId == videoId) Request(videoId, _lastSeconds); });
+            if (notifySeekBar || _wantSeekBarVideo == videoId)
+            {
+                if (_wantSeekBarVideo == videoId) _wantSeekBarVideo = null;
+                App.Post(() => { if (MpvPlayer.Instance.CurrentVideoId == videoId && _lastSeconds >= 0) Request(videoId, _lastSeconds); });
+            }
             App.WakeUi();
         }
         catch (Exception e)
