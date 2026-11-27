@@ -2134,18 +2134,26 @@ public sealed class WatchPage : IPage
                 }
                 else
                 {
-                    Gfx.Fill(new R(video.X - 1, video.Y + 4, video.W + 2, video.H + 2), Gfx.Fade(0xFF000000, Th.Light ? 0.24f : 0.48f), vRad + 2);
+                    // Soft, evenly spread drop shadow (stacked rounded fills) instead of one hard dark slab peeking out below.
+                    float shA = Th.Light ? 0.030f : 0.058f;
+                    for (int si = 6; si >= 1; si--)
+                        Gfx.Fill(new R(video.X - si, video.Y - si + 3, video.W + si * 2, video.H + si * 2), Gfx.Fade(0xFF000000, shA), vRad + si);
                 }
 
                 float beatGlow = !Pip.Active && MpvPlayer.Instance.CurrentVideoId == id ? Shell.VideoBeatGlow : 0f;
                 if (sOpt.UiNeonGlow || cs == "neon")
                 {
                     uint b2 = Th.Brand2 != 0 ? Th.Brand2 : Th.Brand;
-                    Gfx.NeonGlow(video.Inset(-1.5f), vRad + 1.5f, Gfx.Mix(Th.Brand, b2, 0.35f), 0.58f + beatGlow * 0.45f);
+                    // Around the player the neon is a soft halo only: the bright 1 px rim that suits small cards reads as a
+                    // strange second border on something this large.
+                    uint glowCol = Gfx.Mix(Th.Brand, b2, 0.35f);
+                    float glowK = 1f + beatGlow * 0.8f;
+                    Gfx.Stroke(video.Inset(-3.5f), Gfx.Fade(glowCol, 0.07f * glowK), vRad + 3.5f, 6f);
+                    Gfx.Stroke(video.Inset(-1.5f), Gfx.Fade(glowCol, 0.13f * glowK), vRad + 1.5f, 2.5f);
                 }
                 else if (beatGlow > 0.02f)
                 {
-                    Gfx.Stroke(video.Inset(-1.5f), Gfx.Fade(Th.Brand, beatGlow * 0.56f), vRad + 1.5f, 2.0f);
+                    Gfx.Stroke(video.Inset(-1.5f), Gfx.Fade(Th.Brand, beatGlow * 0.30f), vRad + 1.5f, 1.5f);
                 }
             }
             Gfx.Fill(video, 0xFF0A0A0E, vRad);
@@ -2161,7 +2169,9 @@ public sealed class WatchPage : IPage
                 else if (cs == "neon")
                     Gfx.Stroke(video.Inset(-1f), Gfx.Fade(Th.Brand2 != 0 ? Th.Brand2 : Th.Brand, 0.72f), vRad + 1f, 1.4f);
                 else
-                    Gfx.Stroke(video.Inset(-0.5f), Gfx.Fade(Gfx.Mix(Th.Ink, Th.Brand, 0.28f), Th.Light ? 0.22f : 0.16f), vRad + 0.5f, 1.0f);
+                    // One neutral dark hairline hugging the picture. The video is a separate window with a hard (aliased) rounded
+                    // edge; against a dark line its stair-steps disappear, against the old light tinted outline they stood out.
+                    Gfx.Stroke(video.Inset(-0.5f), Gfx.Fade(0xFF000000, Th.Light ? 0.34f : 0.62f), vRad + 0.5f, 1.0f);
                 Shell.WantVideo(video, id, clip, radius: vRad);
             }
             if (Pip.Active && PlaybackTracker.Instance.Current?.VideoId == id)
