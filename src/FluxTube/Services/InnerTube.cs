@@ -990,8 +990,23 @@ public sealed class InnerTube
 
     public async Task<FeedPage> SearchAsync(string query, string? filter = null, CancellationToken ct = default)
     {
-        var body = new JsonObject { ["query"] = query, ["params"] = filter ?? SearchParams(0, 0, 1, 0) };
-        return ParseFeed(await PostAsync("search", body, $"{Origin}/results?search_query={Uri.EscapeDataString(query)}", ct), playlists: true);
+        var sp = filter ?? SearchParams(0, 0, 1, 0);
+        var body = new JsonObject { ["query"] = query, ["params"] = sp };
+        var resultsUrl = $"{Origin}/results?search_query={Uri.EscapeDataString(query)}";
+        try
+        {
+            return ParseFeed(await PostAsync("search", body, resultsUrl, ct), playlists: true);
+        }
+        catch (HttpRequestException e) when (e.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests)
+        {
+            // Google sometimes answers the search API with its "Sorry..." page (403) for an address it distrusts (VPN, burst of
+            // requests). The ordinary results page carries the same data as ytInitialData, so read it from there instead.
+            Paths.Log($"search api {(int)e.StatusCode!}: falling back to the results page");
+            var html = await GetHtmlAsync(resultsUrl + "&sp=" + Uri.EscapeDataString(sp), ct);
+            var dataText = J.ExtractObject(html, "var ytInitialData = ") ?? J.ExtractObject(html, "ytInitialData\"] = ");
+            if (dataText == null) throw;
+            return ParseFeed(JsonNode.Parse(dataText)!, playlists: true);
+        }
     }
 
     public async Task<FeedPage> ContinueAsync(string endpoint, string token, CancellationToken ct = default, bool shorts = false)
