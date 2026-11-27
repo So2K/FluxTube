@@ -415,8 +415,9 @@ float4 PS_Synthwave(VSOut i) : SV_Target
 float4 PS_WaterStep(VSOut i) : SV_Target
 {
     float2 c = tex0.Sample(linClamp, i.uv).rg;
-    float l = tex0.Sample(linClamp, i.uv - float2(texel.x, 0)).r;
-    float r = tex0.Sample(linClamp, i.uv + float2(texel.x, 0)).r;
+    // Horizontal step = vertical step measured on the STAGE (texel.y / aspect), so ripples stay round at any stage shape.
+    float l = tex0.Sample(linClamp, i.uv - float2(texel.y / aspect, 0)).r;
+    float r = tex0.Sample(linClamp, i.uv + float2(texel.y / aspect, 0)).r;
     float t = tex0.Sample(linClamp, i.uv - float2(0, texel.y)).r;
     float b = tex0.Sample(linClamp, i.uv + float2(0, texel.y)).r;
 
@@ -437,8 +438,8 @@ float4 PS_WaterStep(VSOut i) : SV_Target
 
 float4 PS_WaterDisplay(VSOut i) : SV_Target
 {
-    float l = tex0.Sample(linClamp, i.uv - float2(texel.x, 0)).r;
-    float r = tex0.Sample(linClamp, i.uv + float2(texel.x, 0)).r;
+    float l = tex0.Sample(linClamp, i.uv - float2(texel.y / aspect, 0)).r;
+    float r = tex0.Sample(linClamp, i.uv + float2(texel.y / aspect, 0)).r;
     float t = tex0.Sample(linClamp, i.uv - float2(0, texel.y)).r;
     float b = tex0.Sample(linClamp, i.uv + float2(0, texel.y)).r;
     float h = tex0.Sample(linClamp, i.uv).r;
@@ -741,9 +742,13 @@ float4 PS_GpuFire(VSOut i) : SV_Target
 
     public static ID2D1Bitmap1? OutputBitmap => _d2dBmp;
 
-    public static void RequestStep(string mode, uint dom1, uint dom2, float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit)
+    /// <summary>Width / height of the stage the output is stretched over. The render texture is a fixed 16:9, so the shaders must
+    /// use the STAGE aspect (not the texture's) or circles turn into ellipses on a wide or tall stage.</summary>
+    private static float _reqAspect = 16f / 9f;
+    public static void RequestStep(string mode, uint dom1, uint dom2, float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float stageAspect = 0f)
     {
         _reqMode = mode;
+        if (stageAspect > 0.01f) _reqAspect = Math.Clamp(stageAspect, 0.4f, 6f);
         _reqDom1 = dom1; _reqDom2 = dom2;
         _reqBass = bass; _reqMid = mid; _reqHigh = high;
         _reqHit = hit; _reqPan = pan; _reqQuiet = quietDim;
@@ -920,7 +925,7 @@ float4 PS_GpuFire(VSOut i) : SV_Target
             R0 = r0, G0 = g0, B0 = b0, Param0 = bx,
             R1 = r1, G1 = g1, B1 = b1, Param1 = by,
             R2 = r2, G2 = g2, B2 = b2, Beat = beatHit ? 1f : 0f,
-            TexelX = 1f / OutW, TexelY = 1f / OutH, Aspect = (float)OutW / OutH,
+            TexelX = 1f / OutW, TexelY = 1f / OutH, Aspect = _reqAspect,
         };
 
         switch (mode)

@@ -1077,6 +1077,8 @@ public static class Shell
     // rectangles of the controls in the top bar: everything else there drags the window
     private static readonly List<R> _topHits = new(8);
     private static readonly List<R> _holes = new(8);
+    /// <summary>Corner radius (DIP) of each hole in _holes: overlays are rounded, so a square cut-out leaves black corners over the video.</summary>
+    private static readonly List<float> _holeRad = new(8);
     private static long _navAt, _toastAt;
     private static int _navTabDir; // -1 = switched to left tab, +1 = switched to right tab, 0 = vertical page nav
     private static float _activePillX = -1f, _activePillW = -1f, _activePillVelX;
@@ -1329,6 +1331,8 @@ public static class Shell
                 case "--test-pattern": if (App.Test) AppSettings.Current.BgPattern = v; break;
                 case "--test-musicbg": if (App.Test) AppSettings.Current.MusicStageBg = v; break;
                 case "--test-menu": App.After(int.Parse(v), () => AccountMenu.Toggle(Gfx.W - 46 * 3 - 8, TopH - 2)); break;
+                case "--test-theater" when App.Test: AppSettings.Current.TheaterMode = v == "1"; break;
+                case "--test-player" when App.Test: AppSettings.Current.PlayerStyle = v == "flux" ? "flux" : "youtube"; break;
                 case "--test-music" when App.Test:
                     AppSettings.Current.AudioOnlyMode = v == "1";
                     P.SetVideoEnabled(v != "1");
@@ -2298,6 +2302,23 @@ public static class Shell
                 AudioStudioPanel.Toggle();
             }
             MusicBounce.Pop(tfFx);
+
+            // Analytics sits next to EQ on a video page (moved up from the row under the player); hidden when turned off in settings.
+            if (_cur is WatchPage wpAn && AppSettings.Current.AnalyticsEnabled)
+            {
+                var anLbl = L.T("Аналитика", "Analytics");
+                var anW = UI.PillWidth(null, anLbl);
+                var anX = fxBtnX - anW - 8;
+                if (anX > _searchBox.Right + 10)
+                {
+                    var anR = new R(anX, 9, anW, 34);
+                    _topHits.Add(anR);
+                    if (UI.Pill(UI.Id("top:analytics"), anX, 9, 34, null, anLbl, out _,
+                        AnalyticsPanel.Open ? Th.Brand : Th.A(0.08f), AnalyticsPanel.Open ? Th.OnBrand : Th.Text))
+                        wpAn.OpenAnalytics();
+                    fxBtnX = anX; // the update pill (below) lays out to the left of whatever is leftmost
+                }
+            }
             accLeft = fxBtnX;
         }
 
@@ -2925,25 +2946,21 @@ public static class Shell
                 bool clipped = cl > 0 || ct > 0 || cr < vw || cb < vh;
 
                 _holes.Clear();
-                if (_tabPreviewRect.W > 0 && _tabPreviewRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                    _holes.Add(_tabPreviewRect);
-                if (_toastRect.W > 0 && _toastRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                    _holes.Add(_toastRect);
-                if (SharePanel.Open && SharePanel.Rect.W > 0 && SharePanel.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                    _holes.Add(SharePanel.Rect);
-                if (ThemeCodeEditor.Open && ThemeCodeEditor.Rect.W > 0 && ThemeCodeEditor.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                    _holes.Add(ThemeCodeEditor.Rect);
-                if (AudioStudioPanel.Open && AudioStudioPanel.PanelRect.W > 0 && AudioStudioPanel.PanelRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                    _holes.Add(AudioStudioPanel.PanelRect);
-                if (AnalyticsPanel.Open && AnalyticsPanel.PanelRect.W > 0 && AnalyticsPanel.PanelRect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                    _holes.Add(AnalyticsPanel.PanelRect);
-                if (LoginModal.Open && LoginModal.Rect.W > 0 && LoginModal.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                    _holes.Add(LoginModal.Rect);
-                if (AccountMenu.Open && AccountMenu.Rect.W > 0 && AccountMenu.Rect.Intersect(_videoRect) is { W: > 0, H: > 0 })
-                    _holes.Add(AccountMenu.Rect);
+                _holeRad.Clear();
+                void Hole(R hr, float rad)
+                {
+                    if (hr.W > 0 && hr.Intersect(_videoRect) is { W: > 0, H: > 0 }) { _holes.Add(hr); _holeRad.Add(rad); }
+                }
+                Hole(_tabPreviewRect, 0);
+                Hole(_toastRect, 0);
+                if (SharePanel.Open) Hole(SharePanel.Rect, 16);
+                if (ThemeCodeEditor.Open) Hole(ThemeCodeEditor.Rect, 0);
+                if (AudioStudioPanel.Open) Hole(AudioStudioPanel.PanelRect, Gfx.Corner(16));
+                if (AnalyticsPanel.Open) Hole(AnalyticsPanel.PanelRect, Gfx.Corner(18));
+                if (LoginModal.Open) Hole(LoginModal.Rect, 16);
+                if (AccountMenu.Open) Hole(AccountMenu.Rect, 14);
                 if (Menus.Open)
-                    foreach (var mr in Menus.ActiveRects)
-                        if (mr.W > 0 && mr.Intersect(_videoRect) is { W: > 0, H: > 0 }) _holes.Add(mr);
+                    foreach (var mr in Menus.ActiveRects) Hole(mr, Menus.Radius);
 
                 int radPx = _videoRadius > 0.5f ? Math.Max(1, (int)MathF.Round(_videoRadius * s)) : 0;
                 int hash = HashCode.Combine(cl, ct, cr, cb, vw, vh, radPx, _holes.Count);
@@ -2955,6 +2972,7 @@ public static class Shell
                     int hb = (int)MathF.Ceiling((hr.Bottom - _videoRect.Y) * s);
                     hash = HashCode.Combine(hash, hl, ht, hrr, hb);
                 }
+                foreach (var hrad in _holeRad) hash = HashCode.Combine(hash, hrad);
 
                 // Never recreate GDI window regions on pure window translation when window-local clip/hole geometry is unchanged!
                 if (hash != _rgnHash)
@@ -2976,11 +2994,14 @@ public static class Shell
                         }
                         else rgn = W.CreateRectRgn(cl, ct, cr, cb);
 
-                        foreach (var hr in _holes)
+                        for (int hi = 0; hi < _holes.Count; hi++)
                         {
-                            var cut = W.CreateRectRgn(
-                                (int)MathF.Floor((hr.X - _videoRect.X) * s), (int)MathF.Floor((hr.Y - _videoRect.Y) * s),
-                                (int)MathF.Ceiling((hr.Right - _videoRect.X) * s), (int)MathF.Ceiling((hr.Bottom - _videoRect.Y) * s));
+                            var hr = _holes[hi];
+                            int hl = (int)MathF.Floor((hr.X - _videoRect.X) * s), ht = (int)MathF.Floor((hr.Y - _videoRect.Y) * s);
+                            int hr2 = (int)MathF.Ceiling((hr.Right - _videoRect.X) * s), hb = (int)MathF.Ceiling((hr.Bottom - _videoRect.Y) * s);
+                            // The cut-out follows the overlay's own rounded shape, so the video (not the dark box under it) fills its corners.
+                            int hd = (int)MathF.Round(_holeRad[hi] * s * 2f);
+                            var cut = hd > 0 ? W.CreateRoundRectRgn(hl, ht, hr2 + 1, hb + 1, hd, hd) : W.CreateRectRgn(hl, ht, hr2, hb);
                             W.CombineRgn(rgn, rgn, cut, 4 /*RGN_DIFF*/);
                             W.DeleteObject(cut);
                         }

@@ -854,7 +854,7 @@ public static unsafe class MusicStageEffects
             _fluidBurstPower = 0f;
             GpuFluidEngine.RequestStep(dom1, dom2,
                 AudioAnalyzer.BassEnergy, AudioAnalyzer.MidEnergy, AudioAnalyzer.HighEnergy,
-                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit, burst, withSparks: mode == "fluid_sparks");
+                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit, burst, withSparks: mode == "fluid_sparks", stageAspect: stage.W / MathF.Max(1f, stage.H));
 
             var gpuBmp = GpuFluidEngine.OutputBitmap;
             if (gpuBmp != null)
@@ -872,7 +872,7 @@ public static unsafe class MusicStageEffects
             if (beatHit) _lastFluidBeat = AudioAnalyzer.BeatStamp;
             GpuEffectsPack.RequestStep(mode, dom1, dom2,
                 AudioAnalyzer.BassEnergy, AudioAnalyzer.MidEnergy, AudioAnalyzer.HighEnergy,
-                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit);
+                AudioAnalyzer.SharpWaveHit, AudioAnalyzer.StereoPan, qDim, beatHit, stageAspect: stage.W / MathF.Max(1f, stage.H));
 
             var fxBmp = GpuEffectsPack.OutputBitmap;
             if (fxBmp != null)

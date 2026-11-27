@@ -1509,7 +1509,15 @@ public sealed class MpvPlayer : IDisposable
         // Did video advance since anchor?
         bool vptsMoved = hasVpts && !double.IsNaN(_wdLastVpts) && Math.Abs(vpts - _wdLastVpts) >= 0.04;
         bool fnumMoved = hasFnum && _wdLastFnum >= 0 && fnum != _wdLastFnum;
-        if (voOk && hasVpts && (vptsMoved || fnumMoved))
+        // mpv 0.42 has NO "video-pts" property (the read always fails), so requiring it made this watchdog fire on every
+        // healthy video: software decode after ~6s, then a full stream reload every ~12s, forever. The frame counter alone
+        // is the heartbeat; with no readable frame signal at all we cannot judge, so we never "heal" blindly.
+        if (!hasVpts && !hasFnum)
+        {
+            _wdAnchorTime = tp;
+            return;
+        }
+        if (voOk && (vptsMoved || fnumMoved))
         {
             _wdAnchorTime = tp;
             _wdLastVpts = vpts;
@@ -1540,7 +1548,7 @@ public sealed class MpvPlayer : IDisposable
             _wdAnchorTime = tp;
             _wdLastVpts = hasVpts ? vpts : double.NaN;
             _wdLastFnum = hasFnum ? fnum : -1;
-            Paths.Log($"video watchdog [stage 1]: video black/frozen while audio plays at {tp:0.1}s (vo={_voConfigured}, w={vw}, vpts={(hasVpts ? vpts.ToString("0.2") : "none")}) -> instant sw-decode + keyframe recovery");
+            Paths.Log($"video watchdog [stage 1]: video black/frozen while audio plays at {tp:0.0}s (vo={_voConfigured}, w={vw}, vpts={(hasVpts ? vpts.ToString("0.2") : "none")}) -> instant sw-decode + keyframe recovery");
             // Re-arm video track, switch away from hardware decoder in case GPU wedged, and snap to nearest keyframe
             Set("vid", "auto");
             Set("hwdec", "no");
@@ -1556,9 +1564,9 @@ public sealed class MpvPlayer : IDisposable
             Volatile.Write(ref _lastTransitionAt, now);
             _wdAnchorTime = tp;
             if (Interlocked.Increment(ref _hwdecFailCount) >= 2) _forceSwDecode = true;
-            Paths.Log($"video watchdog [stage 2]: video still dead at {tp:0.1}s (vo={_voConfigured}, w={vw}, swLock={_forceSwDecode}) -> full stream reload");
+            Paths.Log($"video watchdog [stage 2]: video still dead at {tp:0.0}s (vo={_voConfigured}, w={vw}, swLock={_forceSwDecode}) -> full stream reload");
             var gen = Volatile.Read(ref _loadGen);
-            var msg = $"video frozen/missing at {tp:0.1}s";
+            var msg = $"video frozen/missing at {tp:0.0}s";
             Ui(() => { if (gen == Volatile.Read(ref _loadGen) && CurrentUrl != null) VideoStalled?.Invoke(msg); });
         }
     }

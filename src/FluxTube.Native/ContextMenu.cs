@@ -46,6 +46,8 @@ public static class Menus
 
     public static bool Open => _root != null;
     public static IReadOnlyList<R> ActiveRects => _rects;
+    /// <summary>Corner radius of every menu panel (also used for the cut-out in the video window).</summary>
+    public const float Radius = 12;
 
     public static R Bounds
     {

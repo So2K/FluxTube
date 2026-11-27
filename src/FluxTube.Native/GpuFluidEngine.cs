@@ -413,8 +413,12 @@ float4 PS_SparkDraw(SparkVSOut i) : SV_Target { return i.col; }
 
     public static ID2D1Bitmap1? OutputBitmap => _d2dBmp;
 
-    public static void RequestStep(uint dom1, uint dom2, float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float burstPower, bool withSparks = false)
+    /// <summary>Width / height of the stage the output is stretched over. The render texture is a fixed 16:9, so the shaders must
+    /// use the STAGE aspect (not the texture's) or circles turn into ellipses on a wide or tall stage.</summary>
+    private static float _reqAspect = 16f / 9f;
+    public static void RequestStep(uint dom1, uint dom2, float bass, float mid, float high, float hit, float pan, float quietDim, bool beatHit, float burstPower, bool withSparks = false, float stageAspect = 0f)
     {
+        if (stageAspect > 0.01f) _reqAspect = Math.Clamp(stageAspect, 0.4f, 6f);
         _reqDom1 = dom1; _reqDom2 = dom2;
         _reqBass = bass; _reqMid = mid; _reqHigh = high;
         _reqHit = hit; _reqPan = pan; _reqQuiet = quietDim;
@@ -559,7 +563,7 @@ float4 PS_SparkDraw(SparkVSOut i) : SV_Target { return i.col; }
     {
         var cb = new FluidCB
         {
-            Aspect = (float)DyeW / DyeH,
+            Aspect = _reqAspect,
             PointX = x, PointY = y,
             Radius = radius,
             ColorR = dx, ColorG = dy, ColorB = 0f, ColorA = 1f,

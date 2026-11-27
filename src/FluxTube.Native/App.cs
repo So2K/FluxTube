@@ -189,15 +189,23 @@ public static unsafe class App
                     if (quit) break;
                     if (_animating && !Gfx.Occluded && !W.IsIconic(Hwnd))
                     {
-                        // Adaptive GPU Pacing: full native 144/240Hz when focused or interacting; silky 60fps power-saver when unfocused in background
+                        // Adaptive pacing. Ambient animation (snow, garlands, glows) never stops, so without a cap the whole UI was
+                        // redrawn at the monitor's full 144/240 Hz forever, even with nobody touching it.
+                        //   - touching it (mouse, wheel, keys within the last 2 s, or a button held): full native refresh rate
+                        //   - focused but idle: 60 fps
+                        //   - in the background: 30 fps, or 60 fps while the audio stage (music visualiser) is playing
                         long nowMs = Environment.TickCount64;
-                        bool unfocusedBg = !Bench && !Test && !UI.Down && (nowMs - UI.LastInput > 450) && W.GetForegroundWindow() != Hwnd;
-                        if (unfocusedBg)
+                        bool interacting = Bench || UI.Down || (nowMs - UI.LastInput <= 2000);
+                        if (!interacting)
                         {
+                            bool foreground = W.GetForegroundWindow() == Hwnd;
+                            var mp = MpvPlayer.Instance;
+                            bool stageLive = AppSettings.Current.AudioOnlyMode && mp.HasMedia && !mp.Paused;
+                            int minGap = foreground || stageLive ? 15 : 32;
                             long sinceLast = nowMs - _lastPresentedAt;
-                            if (sinceLast < 15)
+                            if (sinceLast < minGap)
                             {
-                                Thread.Sleep(Math.Clamp((int)(15 - sinceLast), 1, 12));
+                                Thread.Sleep(Math.Clamp((int)(minGap - sinceLast), 1, 12));
                                 continue; // re-check PeekMessageW so any mouse/wheel event wakes immediately at 0ms latency!
                             }
                         }

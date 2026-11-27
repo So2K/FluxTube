@@ -1292,6 +1292,11 @@ public sealed class WatchPage : IPage
             return _speed;
         }
     }
+    /// <summary>Opens the analytics panel for this video (top-bar button, shown only while analytics is enabled in settings).</summary>
+    public void OpenAnalytics()
+        => AnalyticsPanel.OpenVideo(Video.VideoId, Title, _info?.Channel ?? Video.Channel, _info?.ChannelId ?? Video.ChannelId,
+            _info?.ChannelAvatar, _likes, _info?.Views, _info?.Date, _info?.Subscribers ?? "");
+
     public void ToggleTheater() { AppSettings.Current.TheaterMode = !AppSettings.Current.TheaterMode; AppSettings.Current.Save(); App.Invalidate(); }
 
     private int _infoGen;
@@ -2068,6 +2073,8 @@ public sealed class WatchPage : IPage
         Gfx.PushClip(r);
         const float padX = 24, topPad = 14;
         bool hasLiveChat = !string.IsNullOrEmpty(_info?.LiveChatToken);
+        // "Wide screen" (T, on by default): the player takes the full width and related videos sit UNDER it as a grid.
+        // Off: classic two columns, related videos (plus playlist / live chat) in a column on the right.
         bool sideCol = !AppSettings.Current.TheaterMode && r.W >= 1080f;
         bool theaterChatSide = AppSettings.Current.TheaterMode && hasLiveChat && _chatOpen && r.W >= 1000f;
         bool anyRightCol = sideCol || theaterChatSide;
@@ -2085,11 +2092,20 @@ public sealed class WatchPage : IPage
             videoH = Gfx.Snap(MathF.Max(380f, r.H * 0.86f));
             videoX = x0;
         }
+        else if (AppSettings.Current.TheaterMode)
+        {
+            // Wide screen: the player box always spans the full width and (almost) the full height of the page, whatever the
+            // video's own aspect, exactly as before v9.3. mpv letterboxes inside; the title line peeks out underneath.
+            videoW = mainW;
+            videoH = Gfx.Snap(MathF.Max(360f, r.H - topPad - 58f));
+            videoX = x0;
+        }
         else
         {
             // Fit the video container to the EXACT live video aspect ratio (16:9 default) -> ZERO black pillarbox/letterbox bars!
             float aspect = MpvPlayer.Instance.CurrentVideoId == id ? MpvPlayer.Instance.VideoAspect : (16f / 9f);
-            float maxVH = sideCol ? MathF.Max(340f, r.H * 0.78f) : MathF.Max(380f, r.H * 0.82f);
+            // Player takes the whole viewport height, leaving only a strip for the title line to peek out.
+            float maxVH = MathF.Max(340f, r.H - topPad - 58f);
             videoW = mainW;
             videoH = videoW / aspect;
             if (videoH > maxVH)
@@ -2928,26 +2944,18 @@ public sealed class WatchPage : IPage
         var rMr = new R(bx, by, 36, 36); var tfA4 = MusicBounce.Push(rMr, 19, amp: 1.0f);
         if (UI.IconButton(UI.Id("more", _infoScroll), rMr, Th.More)) MoreMenu();
         MusicBounce.Pop(tfA4);
-        if (!s.AudioOnlyMode)
         {
-            var musLbl = L.T("Только звук", "Audio only");
-            var musW = UI.PillWidth(Th.Headphones, musLbl);
+            // Always present: the same pill turns the mode on AND off (it used to vanish once the mode was on, leaving no way back).
+            var musLbl = s.AudioOnlyMode ? L.T("Показать видео", "Show video") : L.T("Только звук", "Audio only");
+            var musIcon = s.AudioOnlyMode ? Th.Play : Th.Headphones;
+            var musW = UI.PillWidth(musIcon, musLbl);
             bx -= musW + 8;
             var tfAo = MusicBounce.Push(new R(bx, by, musW, ph), 16, amp: 1.0f);
-            if (UI.Pill(UI.Id("audioonly", _infoScroll), bx, by, ph, Th.Headphones, musLbl, out _))
+            if (UI.Pill(UI.Id("audioonly", _infoScroll), bx, by, ph, musIcon, musLbl, out _, accent: s.AudioOnlyMode))
                 App.Post(Shell.ToggleAudioOnlyMode);
             MusicBounce.Pop(tfAo);
         }
-        if (s.AnalyticsEnabled)
-        {
-            var anLbl = L.T("Аналитика", "Analytics");
-            var anW = UI.PillWidth(null, anLbl);
-            bx -= anW + 8;
-            var tfAn = MusicBounce.Push(new R(bx, by, anW, ph), 13, amp: 0.95f);
-            if (UI.Pill(UI.Id("analytics", _infoScroll), bx, by, ph, null, anLbl, out _, accent: AnalyticsPanel.Open))
-                AnalyticsPanel.OpenVideo(id, Title, chName, _info?.ChannelId ?? Video.ChannelId, _info?.ChannelAvatar, _likes, _info?.Views, _info?.Date, subText);
-            MusicBounce.Pop(tfAn);
-        }
+        // Analytics lives in the top bar next to EQ now (Shell.DrawTopBar -> OpenAnalytics); its place here went to the audio-only toggle.
         var shareLbl = L.T("Поделиться", "Share");
         var shW = UI.PillWidth(Th.Share, shareLbl);
         bx -= shW + 8;
@@ -3053,14 +3061,14 @@ public sealed class WatchPage : IPage
         }
         y += descBoxH + 10;
         if (_note != null) { Gfx.Draw(_note, x0, y, 13, Th.Warn, 400, mainW, 2); y += 40; }
+        if (!sideCol && hasLiveChat && !theaterChatSide)
+        {
+            float chatH = _chatOpen ? 420f : 44f;
+            float usedH = DrawLiveChat(new R(x0, y + 8, mainW, chatH));
+            y += usedH + 14f;
+        }
         if (!sideCol)
         {
-            if (hasLiveChat && !theaterChatSide)
-            {
-                float chatH = _chatOpen ? 420f : 44f;
-                float usedH = DrawLiveChat(new R(x0, y + 8, mainW, chatH));
-                y += usedH + 14f;
-            }
             pageBeat.At(pageCenterX, y + 100);
             y = DrawRelatedInline(x0, y + 14, mainW, view);
         }

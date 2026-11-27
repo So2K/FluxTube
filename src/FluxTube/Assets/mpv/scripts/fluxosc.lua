@@ -387,10 +387,21 @@ local function render()
 
         -- 1. Floating Apple Liquid Glass Capsule Dock (or Classic YouTube Edge Bar)
         if L.is_yt or S.short_overlay then
-            local gh = (S.short_overlay and 210 or 126) * sc
-            rect(0, H - gh, W, H - gh * 0.55, "000000", 0.16)
-            rect(0, H - gh * 0.55, W, H - gh * 0.25, "000000", 0.36)
-            rect(0, H - gh * 0.25, W, H, "000000", 0.62)
+            -- Smooth bottom scrim: many thin strips with an eased alpha ramp read as one continuous gradient
+            -- (three flat bands used to show as hard grey steps, very visible on bright videos).
+            local gh = (S.short_overlay and 230 or 150) * sc
+            -- Strip edges sit on whole pixels and never overlap: anti-aliased or doubled edges show up as thin lines.
+            local n = 40
+            local top = math.floor(H - gh)
+            local y0 = top
+            for k = 1, n do
+                local y1 = (k == n) and H or math.floor(top + (H - top) * k / n)
+                if y1 > y0 then
+                    local t = k / n
+                    rect(0, y0, W, y1, "000000", 0.72 * t * t * (3 - 2 * t) * (0.35 + 0.65 * t))
+                    y0 = y1
+                end
+            end
         else
             -- Soft subtle bottom vignette + floating visionOS Liquid Glass pill
             rect(0, dock_t - 18 * sc, W, H, "000000", 0.22)
@@ -452,7 +463,7 @@ local function render()
             rect(L.px0, py - th / 2, L.px0 + fill_w, py + th / 2, fill_col, 1, tr)
         end
 
-        -- SponsorBlock segments: refined muted warm-amber (clearly distinct from white played bar & dark groove, zero neon glare!)
+        -- SponsorBlock segments: classic SponsorBlock green (the colour everyone is used to)
         if S.dur > 0 and S.segments and #S.segments > 0 then
             local seg_tol = S.dur > 0 and math.max(0.4, S.dur * 0.004) or 0.5
             for _, seg in ipairs(S.segments) do
@@ -462,7 +473,7 @@ local function render()
                 local sx1 = L.px0 + pw * clamp(seg[2] / S.dur, 0, 1)
                 if sx1 - sx0 < 5 * sc then sx1 = math.min(L.px1, sx0 + 5 * sc) end
                 rect(sx0 - 1 * sc, py - sbh / 2 - 1 * sc, sx1 + 1 * sc, py + sbh / 2 + 1 * sc, "08080C", 0.72, (sbh + 2 * sc) / 2)
-                rect(sx0, py - sbh / 2, sx1, py + sbh / 2, is_seg_hov and "78D8FF" or "48B4E8", 0.96, sbh / 2)
+                rect(sx0, py - sbh / 2, sx1, py + sbh / 2, is_seg_hov and "5CFF5C" or "00D400", 0.96, sbh / 2)
             end
         end
 
@@ -772,7 +783,7 @@ local function render()
             -- Draw ONE unified Apple Liquid Glass card (with subtle warm-gold rim whisper when hovering an ad!)
             if ad_lbl then
                 rect(cx0 + 1 * sc, cy0 + 5 * sc, cx1 - 1 * sc, cy1 + 7 * sc, "000000", 0.38, 15 * sc)
-                rect(cx0 - 1.1 * sc, cy0 - 1.1 * sc, cx1 + 1.1 * sc, cy1 + 1.1 * sc, "5EC8F5", 0.34, 14.1 * sc)
+                rect(cx0 - 1.1 * sc, cy0 - 1.1 * sc, cx1 + 1.1 * sc, cy1 + 1.1 * sc, "00D400", 0.34, 14.1 * sc)
                 rect(cx0, cy0, cx1, cy1, glass_tint(), 0.94, 13 * sc)
             else
                 ios_glass(cx0, cy0, cx1, cy1, 13 * sc, 0.94, true)
@@ -813,13 +824,13 @@ local function render()
             if ad_lbl then
                 local ax0 = mx0 + ts_pill_w + meta_gap
                 local ay0, ay1 = meta_cy - ts_pill_h / 2, meta_cy + ts_pill_h / 2
-                rect(ax0 - 0.8 * sc, ay0 - 0.8 * sc, ax0 + ad_pill_w + 0.8 * sc, ay1 + 0.8 * sc, "5EC8F5", 0.45, ts_pill_h / 2)
+                rect(ax0 - 0.8 * sc, ay0 - 0.8 * sc, ax0 + ad_pill_w + 0.8 * sc, ay1 + 0.8 * sc, "00D400", 0.45, ts_pill_h / 2)
                 rect(ax0, ay0, ax0 + ad_pill_w, ay1, "131518", 0.92, ts_pill_h / 2)
-                rect(ax0, ay0, ax0 + ad_pill_w, ay1, "5EC8F5", 0.10, ts_pill_h / 2)
-                circle(ax0 + 9.2 * sc, meta_cy, 4.6 * sc, "5EC8F5", 0.24)
-                circle(ax0 + 9.2 * sc, meta_cy, 2.7 * sc, "68D2FF", 1)
+                rect(ax0, ay0, ax0 + ad_pill_w, ay1, "00D400", 0.10, ts_pill_h / 2)
+                circle(ax0 + 9.2 * sc, meta_cy, 4.6 * sc, "00D400", 0.24)
+                circle(ax0 + 9.2 * sc, meta_cy, 2.7 * sc, "40FF40", 1)
                 A:new_event()
-                A:append(string.format("{\\an4\\pos(%.1f,%.1f)\\fs%.1f\\fn%s\\b1\\bord0\\shad0\\1c&HBCE8FF&\\1a&H%02X&}%s",
+                A:append(string.format("{\\an4\\pos(%.1f,%.1f)\\fs%.1f\\fn%s\\b1\\bord0\\shad0\\1c&HC8FFC8&\\1a&H%02X&}%s",
                     ax0 + 16.0 * sc, meta_cy, ad_fs, opts.font, alpha(0.98), esc(ad_lbl)))
             end
         else

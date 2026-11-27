@@ -263,7 +263,9 @@ public static unsafe class BgEngine
             fx.SetValue((uint)GaussianBlurProperties.Optimization, PropertyType.Enum, &opt, sizeof(uint));
             fx.SetValue((uint)GaussianBlurProperties.BorderMode, PropertyType.Enum, &bm, sizeof(uint));
 
-            var prevTarget = dc.Target;
+            // dc.Target hands back a NEW COM reference to the current target (often the swap-chain back buffer). Left undisposed
+            // it pinned the back buffer forever, and every later window resize failed with DXGI_ERROR_INVALID_CALL.
+            using var prevTarget = dc.Target;
             var prevTf = dc.Transform;
             try
             {

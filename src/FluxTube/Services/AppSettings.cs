@@ -86,9 +86,10 @@ public sealed class AppSettings
     /// <summary>When Shorts side panel is hidden: true = show channel/title as hover overlay on the video; false = show clean text block beside the video.</summary>
     public bool ShortsInfoOverlay { get; set; } = false;
     /// <summary>Theater mode on WatchPage (hides the right-side recommendations column), persisted across videos and restarts.</summary>
-    public bool TheaterMode { get; set; } = false;
+    /// <summary>Wide screen: full-width player with related videos under it (the default). Off: related videos in a right column.</summary>
+    public bool TheaterMode { get; set; } = true;
     /// <summary>Video player OSC style ("flux" = FluxTube floating glass dock matching app style, "youtube" = classic YouTube edge bar), persisted across restarts.</summary>
-    public string PlayerStyle { get; set; } = "flux";
+    public string PlayerStyle { get; set; } = "youtube";
     /// <summary>Apple iOS ProMotion-style smooth video motion (GPU temporal frame interpolation + VSync display-resample + Retina scaling).</summary>
     public bool AppleSmoothMotion { get; set; } = false;
     /// <summary>Enables the detailed Video &amp; Channel Analytics studio button with animated charts on WatchPage and ChannelPage.</summary>
@@ -192,7 +193,7 @@ public sealed class AppSettings
     /// <summary>When switching to a signature theme (Ultra Kawaii, Ultra Neon, RE Requiem, etc.), automatically apply its matching backdrop, pattern, corners, card style &amp; font.</summary>
     public bool ThemeAutoStyle { get; set; } = true;
     /// <summary>Real-time theme adaptation to live video frame (or thumbnail in audio-only mode): "all" = all themes adapt harmoniously, "adaptive" = only Adaptive theme, "thumb" = thumbnail-only.</summary>
-    public string VideoThemeAdapt { get; set; } = "all";
+    public string VideoThemeAdapt { get; set; } = "adaptive";
     /// <summary>Application UI language ("ru" or "en"). Separate from YouTube content language (Hl).</summary>
     public string UiLanguage { get; set; } = "ru";
     /// <summary>Hardware-accelerated GPU DirectionalBlur motion blur on UI scrolling, transitions, and Shorts swipes.</summary>

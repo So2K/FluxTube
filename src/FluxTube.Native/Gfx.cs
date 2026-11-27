@@ -947,20 +947,29 @@ public static unsafe class Gfx
         App.Invalidate();
     }
 
+    /// <summary>True between Begin() and End(): the swap chain must not be resized while Direct2D is drawing into it.</summary>
+    private static bool _drawing;
+    private static long _resizeFailLoggedAt;
+
     public static void Resize()
     {
+        // A WM_SIZE that lands in the middle of a frame is picked up by the next Begin(), which re-checks the client size.
+        if (_drawing || DC == null || _swap == null) return;
         Win.RECT rc;
         Win.GetClientRect(_hwnd, &rc);
         int w = Math.Max(1, rc.R - rc.L), h = Math.Max(1, rc.B - rc.T);
         var scale = TargetScale();
-        if (w == PxW && h == PxH && MathF.Abs(scale - Scale) < 0.001f) return;
-        PxW = w; PxH = h;
+        if (w == PxW && h == PxH && _target != null && MathF.Abs(scale - Scale) < 0.001f) return;
         DC.Target = null;
         _target?.Dispose();
         _target = null;
         _mbBmp?.Dispose();
         _mbBmp = null;
         DisposeGlassTargets();
+        // ResizeBuffers fails with DXGI_ERROR_INVALID_CALL while ANYTHING still references a back buffer. The GPU stage effects
+        // (fluid, effects pack) draw on the same immediate context and can leave the back buffer view bound there, so the
+        // context is unbound and flushed first. Without this the window kept its old picture size after every resize.
+        UnbindBackBuffer();
         var hr = _swap.ResizeBuffers(0, (uint)w, (uint)h, Format.Unknown, SwapChainFlags.None);
         if (hr.Failure && IsDeviceLost(hr.Code))
         {
@@ -968,9 +977,35 @@ public static unsafe class Gfx
             RecreateDevice();
             return;
         }
-        hr.CheckError();
+        if (hr.Failure)
+        {
+            // Never leave the app without a render target: keep drawing into the old buffers and try again on the next frame
+            // (PxW/PxH stay stale on purpose, so Begin() sees the mismatch and calls back in).
+            var now = Environment.TickCount64;
+            if (now - _resizeFailLoggedAt > 2000)
+            {
+                _resizeFailLoggedAt = now;
+                Services.Paths.Log($"swap chain resize to {w}x{h} failed 0x{hr.Code:X}, keeping {PxW}x{PxH} and retrying");
+            }
+            CreateTarget();
+            return;
+        }
+        PxW = w; PxH = h;
         if (MathF.Abs(scale - Scale) >= 0.001f) ClearTextCache();
         CreateTarget();
+    }
+
+    private static void UnbindBackBuffer()
+    {
+        try
+        {
+            // NOT "using": Vortice caches this wrapper inside the device, disposing it kills the context for everyone
+            // (the GPU stage effects then fail with a null reference).
+            var ctx = _dev.ImmediateContext;
+            ctx.ClearState();
+            ctx.Flush();
+        }
+        catch { }
     }
 
     private static bool NeedsSceneBuffer()
@@ -1266,6 +1301,8 @@ public static unsafe class Gfx
 
     public static void Begin(uint clear)
     {
+        // Self-healing: whatever happened to WM_SIZE (arrived mid-frame, resize failed), the picture always matches the window.
+        Resize();
         Frame++;
         _glassReady = false;
         if (NeedsSceneBuffer())
@@ -1283,6 +1320,7 @@ public static unsafe class Gfx
         GpuEffectsPack.StepBeforeBeginDraw();
         DC.Target = _activeTarget;
         DC.BeginDraw();
+        _drawing = true;
         DC.Clear(ToColor(clear));
         _clipDepth = 0;
         _shapeMs = 0;
@@ -1307,6 +1345,7 @@ public static unsafe class Gfx
             DC.DrawBitmap(_sceneBmp, new Vortice.RawRectF(0, 0, W, H), 1f, Vortice.Direct2D1.InterpolationMode.NearestNeighbor, null, null);
         }
         var hr = DC.EndDraw();
+        _drawing = false;
         FlushMs = System.Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
         if (hr.Success) hr = _swap.Present(IsLiveResizing ? 0u : 1u, PresentFlags.None);
         Occluded = hr.Code == 0x087A0001; // DXGI_STATUS_OCCLUDED

@@ -303,8 +303,8 @@ public sealed class SettingsPage : IPage
         [("segoe", "Segoe UI", "Segoe UI"), ("serif", "Georgia (Requiem)", "Georgia (Serif)"), ("tech", "Bahnschrift (Village)", "Bahnschrift (Tech)"), ("mono", "Consolas (Neon)", "Consolas (Mono)"), ("soft", "Trebuchet (Kawaii)", "Trebuchet (Soft)"), ("comic", "Comic Sans", "Comic Sans")];
     private static readonly (string Key, string Ru, string En)[] VideoThemeModes =
     [
-        ("all", "Все темы (Live)", "All themes (Live)"),
-        ("adaptive", "Только «Адаптивная»", "Adaptive theme only"),
+        ("adaptive", "Выкл (только тема «Адаптивная»)", "Off (Adaptive theme only)"),
+        ("all", "Вкл для всех тем (Live)", "On for all themes (Live)"),
         ("thumb", "Только по превью", "Thumbnail only"),
     ];
     private static readonly (string Key, string Ru, string En)[] PlayerStyles =

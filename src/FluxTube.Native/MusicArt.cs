@@ -536,7 +536,9 @@ public static class MusicArt
                 satFx.SetInputEffect(0, blurFx, true);
                 satFx.SetValue((uint)SaturationProperties.Saturation, PropertyType.Float, &sat, sizeof(float));
 
-                var prevTarget = dc.Target;
+                // dc.Target hands back a NEW COM reference to the current target (often the swap-chain back buffer). Left undisposed
+                // it pinned the back buffer forever, and every later window resize failed with DXGI_ERROR_INVALID_CALL.
+                using var prevTarget = dc.Target;
                 var prevTf = dc.Transform;
                 dc.GetDpi(out float ox, out float oy);
                 try
