@@ -1929,6 +1929,56 @@ public sealed class WatchPage : IPage
         return y + 20;
     }
 
+    private static string CommentLikeLabel(Comment c)
+    {
+        if (c.LikeState == 1)
+        {
+            if (!string.IsNullOrEmpty(c.LikesLiked)) return c.LikesLiked;
+            if (string.IsNullOrWhiteSpace(c.Likes)) return "1";
+            if (int.TryParse(c.Likes.Trim(), out int n)) return (n + 1).ToString();
+            return c.Likes;
+        }
+        return c.Likes;
+    }
+
+    private void ToggleCommentReaction(Comment c, int targetState)
+    {
+        if (!CookieStore.IsLoggedIn)
+        {
+            Shell.Toast(L.T("Войдите в аккаунт YouTube, чтобы оценивать комментарии", "Sign in to YouTube to rate comments"), Th.Warn);
+            return;
+        }
+        int prev = c.LikeState;
+        int next = prev == targetState ? 0 : targetState;
+        string? token = next switch
+        {
+            1 => c.LikeAction,
+            -1 => c.DislikeAction,
+            _ => prev == 1 ? c.UnlikeAction : c.UndislikeAction,
+        };
+        if (string.IsNullOrEmpty(token))
+        {
+            Shell.Toast(L.T("YouTube не выдал токен оценки для этого комментария", "Comment rating token unavailable"), Th.Warn);
+            return;
+        }
+        c.LikeState = next;
+        string vid = Video.VideoId;
+        _ = Task.Run(async () =>
+        {
+            bool ok = false;
+            try { ok = await InnerTube.Instance.PerformCommentActionAsync(token, vid); }
+            catch (Exception ex) { Paths.Log("comment reaction: " + ex.Message); }
+            if (!ok)
+            {
+                App.Post(() =>
+                {
+                    if (c.LikeState == next) c.LikeState = prev;
+                    Shell.Toast(L.T("Не удалось оценить комментарий", "Could not rate comment"), Th.Warn);
+                });
+            }
+        });
+    }
+
     private float DrawRow(CRow row, float x0, float y, float w, R view, float avatar)
     {
         int i = row.RowId;
@@ -1992,12 +2042,29 @@ public sealed class WatchPage : IPage
             ty += 22;
         }
         ty += 6;
-        Gfx.Icon(Th.Like, new R(tx - 2, ty, 20, 22), 13, Th.Sub);
-        var likes = Gfx.Draw(c.Likes, tx + 22, ty + 3, 12, Th.Sub);
+        string likeTxt = CommentLikeLabel(c);
+        var likeTr = Gfx.Text(likeTxt, 12, c.LikeState == 1 ? 600 : 400);
+        float likeBtnW = 24 + (likeTxt.Length > 0 ? likeTr.W + 8 : 2);
+        var likeR = new R(tx - 6, ty - 3, likeBtnW, 26);
+        int likeId = UI.Id(_infoScroll, 80000 + i);
+        bool likeOver = UI.Hover(likeR);
+        UI.Glow(likeId, likeR, 13, likeOver);
+        uint likeCol = c.LikeState == 1 ? Th.Brand : likeOver ? Th.Text : Th.Sub;
+        Gfx.Icon(Th.Like, new R(likeR.X + 4, ty, 20, 22), 13, likeCol);
+        if (likeTxt.Length > 0) Gfx.Draw(likeTr, likeR.X + 26, ty + 3, likeCol);
+        if (UI.Click(likeId, likeR)) ToggleCommentReaction(c, 1);
+
+        var disR = new R(likeR.Right + 2, ty - 3, 26, 26);
+        int disId = UI.Id(_infoScroll, 90000 + i);
+        bool disOver = UI.Hover(disR);
+        UI.Glow(disId, disR, 13, disOver);
+        Gfx.Icon(Th.Dislike, new R(disR.X + 3, ty, 20, 22), 13, c.LikeState == -1 ? Th.Brand : disOver ? Th.Text : Th.Sub);
+        if (UI.Click(disId, disR)) ToggleCommentReaction(c, -1);
+
         if (hasReplies)
         {
             var repTxt = c.Replies is { Length: > 0 } r2 && r2 != "0" ? L.T("Ответы: ", "Replies: ") + r2 : L.T("Ответы", "Replies");
-            var pr = new R(tx + 22 + likes.W + 14, ty - 4, UI.PillWidth(null, repTxt) + 22, 30);
+            var pr = new R(disR.Right + 8, ty - 4, UI.PillWidth(null, repTxt) + 22, 30);
             var pid = UI.Id(_infoScroll, 50000 + i);
             UI.Glow(pid, pr, 15, UI.Hover(pr));
             Gfx.Icon(row.Shown ? "\uE70E" : "\uE70D", new R(pr.X + 8, pr.Y, 18, 30), 10, Sel.LinkColor);

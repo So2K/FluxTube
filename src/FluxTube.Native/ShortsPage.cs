@@ -1179,8 +1179,37 @@ public sealed class ShortsPage : IPage
                 var au = Gfx.Draw(c.Author, tx, cy, 12.5f, Th.Text, 600, tw - 60);
                 Gfx.Draw(c.When, tx + au.W + 8, cy + 1, 11.5f, Th.Dim, 400, MathF.Max(20, tw - au.W - 8));
                 Gfx.Draw(tr, tx, cy + 19, Gfx.Mix(Th.Text, Th.Sub, 0.1f));
-                Gfx.Icon(Th.Like, new R(tx - 2, cy + 21 + tr.H, 16, 18), 11, Th.Dim);
-                Gfx.Draw(c.Likes, tx + 16, cy + 22 + tr.H, 11.5f, Th.Dim);
+                string sLikeTxt = c.LikeState == 1 ? (!string.IsNullOrEmpty(c.LikesLiked) ? c.LikesLiked : (int.TryParse(c.Likes.Trim(), out int sn) ? (sn + 1).ToString() : (string.IsNullOrWhiteSpace(c.Likes) ? "1" : c.Likes))) : c.Likes;
+                var sLikeTr = Gfx.Text(sLikeTxt, 11.5f, c.LikeState == 1 ? 600 : 400);
+                var sLikeR = new R(tx - 5, cy + 19 + tr.H, 22 + (sLikeTxt.Length > 0 ? sLikeTr.W + 6 : 0), 22);
+                int sLikeId = UI.Id(_commScroll, 80000 + i);
+                bool sLikeOver = UI.Hover(sLikeR);
+                UI.Glow(sLikeId, sLikeR, 11, sLikeOver);
+                uint sLikeCol = c.LikeState == 1 ? Th.Brand : sLikeOver ? Th.Text : Th.Dim;
+                Gfx.Icon(Th.Like, new R(sLikeR.X + 3, cy + 21 + tr.H, 16, 18), 11, sLikeCol);
+                if (sLikeTxt.Length > 0) Gfx.Draw(sLikeTr, sLikeR.X + 21, cy + 22 + tr.H, sLikeCol);
+                if (UI.Click(sLikeId, sLikeR))
+                {
+                    if (!CookieStore.IsLoggedIn)
+                        Shell.Toast(L.T("Войдите в аккаунт YouTube, чтобы оценивать комментарии", "Sign in to YouTube to rate comments"), Th.Warn);
+                    else
+                    {
+                        int prev = c.LikeState;
+                        int next = prev == 1 ? 0 : 1;
+                        string? tok = next == 1 ? c.LikeAction : c.UnlikeAction;
+                        if (!string.IsNullOrEmpty(tok) && _i >= 0 && _i < _items.Count)
+                        {
+                            c.LikeState = next;
+                            string svid = _items[_i].VideoId;
+                            _ = Task.Run(async () =>
+                            {
+                                bool ok = false;
+                                try { ok = await InnerTube.Instance.PerformCommentActionAsync(tok, svid); } catch { }
+                                if (!ok) App.Post(() => { if (c.LikeState == next) c.LikeState = prev; Shell.Toast(L.T("Не удалось оценить комментарий", "Could not rate comment"), Th.Warn); });
+                            });
+                        }
+                    }
+                }
                 if (UI.RightClick(new R(view.X, cy, view.W - 10, rh)))
                     Menus.Popup([
                         new(L.T("Копировать комментарий", "Copy comment"), () => Cards.CopyText(c.Text, L.T("Комментарий скопирован", "Comment copied")), icon: Th.Copy),

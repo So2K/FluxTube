@@ -88,6 +88,13 @@ public sealed class Comment
     public string Text { get; set; } = "";
     public string When { get; set; } = "";
     public string Likes { get; set; } = "";
+    public string LikesLiked { get; set; } = "";
+    /// <summary>0 = indifferent, 1 = liked, -1 = disliked.</summary>
+    public int LikeState { get; set; }
+    public string? LikeAction { get; set; }
+    public string? UnlikeAction { get; set; }
+    public string? DislikeAction { get; set; }
+    public string? UndislikeAction { get; set; }
     public string Replies { get; set; } = "";
     public bool ByOwner { get; set; }
     public bool Pinned { get; set; }

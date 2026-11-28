@@ -773,11 +773,18 @@ public sealed class InnerTube
     {
         var d = await PostAsync("next", new JsonObject { ["continuation"] = token }, Origin + "/", ct);
         var page = new CommentPage();
-        // the text lives in entity payloads keyed by commentKey; the thread list gives the order
+        // the text lives in entity payloads keyed by commentKey; toolbar state & like/dislike actions live in sibling mutations
         var entities = new Dictionary<string, JsonNode>();
+        var toolbarStates = new Dictionary<string, JsonNode>();
+        var toolbarSurfaces = new Dictionary<string, JsonNode>();
         if (d.P("frameworkUpdates", "entityBatchUpdate", "mutations") is JsonArray muts)
             foreach (var m in muts)
-                if (m.P("payload", "commentEntityPayload") is { } e && m.S("entityKey") is { } k) entities[k] = e;
+            {
+                if (m.S("entityKey") is not { } k) continue;
+                if (m.P("payload", "commentEntityPayload") is { } e) entities[k] = e;
+                else if (m.P("payload", "engagementToolbarStateEntityPayload") is { } ts) toolbarStates[k] = ts;
+                else if (m.P("payload", "engagementToolbarSurfaceEntityPayload") is { } surf) toolbarSurfaces[k] = surf;
+            }
         if (d.P("onResponseReceivedEndpoints") is not JsonArray eps) return page;
         foreach (var ep in eps)
         {
@@ -822,6 +829,36 @@ public sealed class InnerTube
                     }
                     return deleteAction == null;
                 });
+                int likeState = 0;
+                if (vm.S("toolbarStateKey") is { } tsk && toolbarStates.TryGetValue(tsk, out var tsNode))
+                {
+                    var ls = tsNode.S("likeState");
+                    if (ls == "TOOLBAR_LIKE_STATE_LIKED") likeState = 1;
+                    else if (ls == "TOOLBAR_LIKE_STATE_DISLIKED") likeState = -1;
+                }
+                static string? ExtractCommentAction(JsonNode? cmd)
+                {
+                    if (cmd == null) return null;
+                    var direct = cmd.S("innertubeCommand", "performCommentActionEndpoint", "action")
+                              ?? cmd.S("performCommentActionEndpoint", "action");
+                    if (!string.IsNullOrEmpty(direct)) return direct;
+                    string? found = null;
+                    J.Walk(cmd, (_, x) =>
+                    {
+                        if (found != null) return false;
+                        if (x.S("performCommentActionEndpoint", "action") is { Length: > 0 } a) { found = a; return false; }
+                        return true;
+                    });
+                    return found;
+                }
+                string? likeAct = null, unlikeAct = null, dislikeAct = null, undislikeAct = null;
+                if (vm.S("toolbarSurfaceKey") is { } surfKey && toolbarSurfaces.TryGetValue(surfKey, out var surfNode))
+                {
+                    likeAct = ExtractCommentAction(surfNode.P("likeCommand"));
+                    unlikeAct = ExtractCommentAction(surfNode.P("unlikeCommand"));
+                    dislikeAct = ExtractCommentAction(surfNode.P("dislikeCommand"));
+                    undislikeAct = ExtractCommentAction(surfNode.P("undislikeCommand"));
+                }
                 page.Items.Add(new Comment
                 {
                     RepliesToken = repliesToken,
@@ -834,6 +871,12 @@ public sealed class InnerTube
                     Text = ent.S("properties", "content", "content") ?? "",
                     When = ent.S("properties", "publishedTime") ?? "",
                     Likes = ent.S("toolbar", "likeCountNotliked") ?? "",
+                    LikesLiked = ent.S("toolbar", "likeCountLiked") ?? "",
+                    LikeState = likeState,
+                    LikeAction = likeAct,
+                    UnlikeAction = unlikeAct,
+                    DislikeAction = dislikeAct,
+                    UndislikeAction = undislikeAct,
                     Replies = ent.S("toolbar", "replyCount") ?? "",
                     ByOwner = ent.P("author", "isCreator")?.GetValue<bool>() ?? false,
                     Pinned = vm.P("pinnedText") != null,
@@ -883,11 +926,11 @@ public sealed class InnerTube
         return (true, null, delAction);
     }
 
-    /// <summary>Deletes one of the signed-in user's own comments via InnerTube comment/perform_comment_action.</summary>
-    public async Task<bool> DeleteCommentAsync(string deleteAction, string videoId, CancellationToken ct = default)
+    /// <summary>Executes an InnerTube comment/perform_comment_action token (like, unlike, dislike, undislike, delete).</summary>
+    public async Task<bool> PerformCommentActionAsync(string action, string videoId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(deleteAction)) return false;
-        var body = new JsonObject { ["actions"] = new JsonArray(deleteAction) };
+        if (string.IsNullOrWhiteSpace(action)) return false;
+        var body = new JsonObject { ["actions"] = new JsonArray(action) };
         var d = await PostAsync("comment/perform_comment_action", body, $"{Origin}/watch?v={videoId}", ct);
         if (d["error"] != null) return false;
         if (d.P("actionResults") is JsonArray results)
@@ -900,6 +943,10 @@ public sealed class InnerTube
         }
         return true;
     }
+
+    /// <summary>Deletes one of the signed-in user's own comments via InnerTube comment/perform_comment_action.</summary>
+    public Task<bool> DeleteCommentAsync(string deleteAction, string videoId, CancellationToken ct = default)
+        => PerformCommentActionAsync(deleteAction, videoId, ct);
 
     /// <summary>The signed-in account: name, handle, photo, own channel. Null when not signed in.</summary>
     public async Task<Account?> AccountAsync(CancellationToken ct = default)
