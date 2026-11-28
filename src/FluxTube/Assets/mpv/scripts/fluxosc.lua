@@ -671,7 +671,54 @@ local function render()
                 if not used_slots[slot] then mp.commandv("overlay-remove", slot); S.cm_ovs[slot] = nil end
             end
 
-            -- Sleek compact Apple Liquid Glass comment card on avatar hover (tight width, zero wasted space!)
+-- Proportional character width estimate for accurate inline timestamp pills in ASS
+local function measure_inline_w(str, size)
+    local w = 0
+    for ch in str:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+        if ch == " " then w = w + 0.27
+        elseif ch == "i" or ch == "l" or ch == "I" or ch == "!" or ch == ":" or ch == "." or ch == "," or ch == "'" or ch == "|" then w = w + 0.26
+        elseif ch == "t" or ch == "f" or ch == "r" or ch == "j" or ch == "1" or ch == "-" or ch == "(" or ch == ")" then w = w + 0.34
+        elseif ch == "m" or ch == "w" or ch == "M" or ch == "W" or ch == "@" then w = w + 0.72
+        elseif ch:match("^[A-Z]$") then w = w + 0.56
+        elseif #ch > 1 then w = w + 0.50
+        else w = w + 0.47 end
+    end
+    return w * size
+end
+
+-- Splits a comment line into { text = ..., is_ts = bool } segments for inline timestamp pills
+local function split_ts_segments(line)
+    local segs = {}
+    local pos = 1
+    local len = #line
+    local found_ts = false
+    while pos <= len do
+        local s1, e1 = line:find("%d+:%d%d:%d%d", pos)
+        local s2, e2 = line:find("%d+:%d%d", pos)
+        local s, e
+        if s1 and (not s2 or s1 <= s2) then s, e = s1, e1
+        elseif s2 then s, e = s2, e2 end
+        if not s then
+            if pos <= len then segs[#segs + 1] = { text = line:sub(pos), is_ts = false } end
+            break
+        end
+        local prev_c = s > 1 and line:sub(s - 1, s - 1) or ""
+        local next_c = e < len and line:sub(e + 1, e + 1) or ""
+        local valid = (prev_c == "" or not prev_c:match("[%w:]")) and (next_c == "" or not next_c:match("[%w:]"))
+        if valid then
+            if s > pos then segs[#segs + 1] = { text = line:sub(pos, s - 1), is_ts = false } end
+            segs[#segs + 1] = { text = line:sub(s, e), is_ts = true }
+            found_ts = true
+            pos = e + 1
+        else
+            segs[#segs + 1] = { text = line:sub(pos, e), is_ts = false }
+            pos = e + 1
+        end
+    end
+    return segs, found_ts
+end
+
+-- Sleek compact Apple Liquid Glass comment card on avatar hover (tight width, zero wasted space!)
             local show_idx = (not hot_seek) and (hov_cm or ((S.cm_auto_idx and t < S.cm_auto_until and S.sc_comments[S.cm_auto_idx]) and S.cm_auto_idx or nil)) or nil
             if show_idx and S.sc_comments[show_idx] and W >= 200 * sc then
                 local m = S.sc_comments[show_idx]
@@ -679,21 +726,40 @@ local function render()
                 local mx, cy = comment_pos(m, slide_y)
                 local body_fs = (big and 14.5 or 13.0) * sc
                 local author_fs = (big and 13.0 or 12.0) * sc
-                local line_h = (big and 19.5 or 17.0) * sc
+                local pill_fs = (big and 12.0 or 11.0) * sc
+                local pill_h = (big and 19.0 or 17.0) * sc
+                local line_h = (big and 21.0 or 18.5) * sc
                 local pad_x = (big and 14 or 12) * sc
                 local pad_y = (big and 10 or 8) * sc
-                local max_card_w = math.min(W - 32 * sc, (big and 370 or 310) * sc)
-                local maxc = math.max(16, math.floor((max_card_w - pad_x * 2 - 6 * sc) / (body_fs * 0.48)))
+                local max_card_w = math.min(W - 32 * sc, (big and 390 or 325) * sc)
+                local maxc = math.max(16, math.floor((max_card_w - pad_x * 2 - 14 * sc) / (body_fs * 0.48)))
                 local author = m.a or ""
                 if utf8_len(author) > 24 then author = utf8_sub(author, 23) .. "…" end
                 local ts_str = fmt_time(m.t or 0)
                 local lines = wrap_utf8(m.x or "", maxc, big and 4 or 2)
+                local line_segs = {}
+                local has_inline_ts = false
+                for li, ln in ipairs(lines) do
+                    local segs, f = split_ts_segments(ln)
+                    line_segs[li] = segs
+                    if f then has_inline_ts = true end
+                end
                 local ts_w = text_w(ts_str, 11.0 * sc) + 12 * sc
-                local hdr_w = text_w(author, author_fs) * 0.94 + 8 * sc + ts_w
+                local hdr_w = text_w(author, author_fs) * 0.94 + (has_inline_ts and 0 or (8 * sc + ts_w))
                 local maxw = hdr_w
-                for _, ln in ipairs(lines) do maxw = math.max(maxw, text_w(ln, body_fs) * 0.92) end
-                local cw = clamp(maxw + pad_x * 2 + 8 * sc, math.min(130 * sc, max_card_w), max_card_w)
-                local hdr_h = (big and 24 or 21) * sc
+                for li, segs in ipairs(line_segs) do
+                    local lw = 0
+                    for _, sg in ipairs(segs) do
+                        if sg.is_ts then
+                            lw = lw + measure_inline_w(sg.text, pill_fs) + 14 * sc
+                        else
+                            lw = lw + measure_inline_w(sg.text, body_fs)
+                        end
+                    end
+                    maxw = math.max(maxw, lw)
+                end
+                local cw = clamp(maxw + pad_x * 2 + 10 * sc, math.min(130 * sc, max_card_w), max_card_w)
+                local hdr_h = (big and 23 or 20) * sc
                 local ch = pad_y + hdr_h + #lines * line_h + pad_y
                 local cx0 = clamp(mx - cw / 2, L.px0, math.max(L.px0, L.px1 - cw))
                 local cy1 = cy - 16 * sc
@@ -708,16 +774,34 @@ local function render()
                 A:new_event()
                 A:append(string.format("{\\an7\\pos(%.1f,%.1f)\\fs%.1f\\fn%s\\b1\\bord0\\shad0\\1c&HFFFFFF&\\1a&H%02X&}%s",
                     tx0, hy, author_fs, opts.font, alpha(0.98), esc(author)))
-                local pill_x = tx0 + text_w(author, author_fs) * 0.94 + 8 * sc
-                if pill_x + ts_w < cx0 + cw - pad_x + 4 * sc then
-                    local pill_h = 18 * sc
-                    rect(pill_x, hy - 1 * sc, pill_x + ts_w, hy + pill_h - 1 * sc, b1, 0.28, pill_h / 2)
-                    A:new_event()
-                    A:append(string.format("{\\an5\\pos(%.1f,%.1f)\\fs%.1f\\fn%s\\b1\\bord0\\shad0\\1c&HFFFFFF&\\1a&H%02X&}%s",
-                        pill_x + ts_w / 2, hy + pill_h / 2 - 1 * sc, 11.0 * sc, opts.font, alpha(0.96), ts_str))
+                -- Only show separate header pill when the comment text doesn't already contain an inline timestamp
+                if not has_inline_ts then
+                    local pill_x = tx0 + text_w(author, author_fs) * 0.94 + 8 * sc
+                    if pill_x + ts_w < cx0 + cw - pad_x + 4 * sc then
+                        local hp_h = 18 * sc
+                        rect(pill_x, hy - 1 * sc, pill_x + ts_w, hy + hp_h - 1 * sc, b1, 0.28, hp_h / 2)
+                        A:new_event()
+                        A:append(string.format("{\\an5\\pos(%.1f,%.1f)\\fs%.1f\\fn%s\\b1\\bord0\\shad0\\1c&HFFFFFF&\\1a&H%02X&}%s",
+                            pill_x + ts_w / 2, hy + hp_h / 2 - 1 * sc, 11.0 * sc, opts.font, alpha(0.96), ts_str))
+                    end
                 end
-                for li, ln in ipairs(lines) do
-                    text(tx0, cy0 + pad_y + hdr_h + (li - 1) * line_h, 7, body_fs, esc(ln), 0.94)
+                for li, segs in ipairs(line_segs) do
+                    local ly = cy0 + pad_y + hdr_h + (li - 1) * line_h
+                    local cur_x = tx0
+                    for _, sg in ipairs(segs) do
+                        if sg.is_ts then
+                            local pw_ts = measure_inline_w(sg.text, pill_fs) + 12 * sc
+                            local py0 = ly + (line_h - pill_h) * 0.35 - 1 * sc
+                            rect(cur_x, py0, cur_x + pw_ts, py0 + pill_h, b1, 0.34, pill_h / 2)
+                            A:new_event()
+                            A:append(string.format("{\\an5\\pos(%.1f,%.1f)\\fs%.1f\\fn%s\\b1\\bord0\\shad0\\1c&HFFFFFF&\\1a&H%02X&}%s",
+                                cur_x + pw_ts / 2, py0 + pill_h / 2, pill_fs, opts.font, alpha(0.98), esc(sg.text)))
+                            cur_x = cur_x + pw_ts + 2 * sc
+                        elseif #sg.text > 0 then
+                            text(cur_x, ly, 7, body_fs, esc(sg.text), 0.94)
+                            cur_x = cur_x + measure_inline_w(sg.text, body_fs)
+                        end
+                    end
                 end
             end
         else

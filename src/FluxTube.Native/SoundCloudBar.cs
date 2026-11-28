@@ -942,11 +942,14 @@ public static partial class SoundCloudBar
         float showX = hoveredMarker != null ? hoveredMarkerX : activeAutoX;
         if (showMk != null)
         {
-            var headerTxt = $"{showMk.Author}  ·  {Fmt.Time(showMk.Seconds)}";
+            var tsMatch = Regex.Match(showMk.Text ?? "", @"(?<![\w:])(\d{1,2}:\d{2}(?::\d{2})?)(?![\w:])");
+            bool hasInlineTs = tsMatch.Success;
+            var headerTxt = hasInlineTs ? showMk.Author : $"{showMk.Author}  ·  {Fmt.Time(showMk.Seconds)}";
             var hRun = Gfx.Text(headerTxt, 11f, 600, 320);
             var tRun = Gfx.Text(showMk.Text, 11.5f, 400, 320, 2);
-            float bw = MathF.Min(rect.W - 8, MathF.Min(360, MathF.Max(hRun.W, tRun.W) + 46));
-            float bh = MathF.Max(38, hRun.H + tRun.H + 14);
+            float extraPillW = hasInlineTs ? 14f : 0f;
+            float bw = MathF.Min(rect.W - 8, MathF.Min(370, MathF.Max(hRun.W, tRun.W + extraPillW) + 46));
+            float bh = MathF.Max(38, hRun.H + tRun.H + 16);
             float bx = Math.Clamp(showX - bw * 0.5f, rect.X + 4, rect.Right - bw - 4);
             float minY = MathF.Max(Gfx.Clip.Y + 4, 60);
             float by = rect.Y - bh - 4 >= minY ? rect.Y - bh - 4 : rect.Y + 2;
@@ -955,7 +958,37 @@ public static partial class SoundCloudBar
             Gfx.FillFrosted(bubble, Th.Menu, Gfx.Corner(9), opacity: 0.96f, border: true);
             Pages.Cards.Avatar(bubble.X + 8, bubble.Y + (bubble.H - 24) * 0.5f, 24, showMk.Avatar, showMk.Author.TrimStart('@'));
             Gfx.Draw(hRun, bubble.X + 38, bubble.Y + 6, Th.Brand);
-            Gfx.Draw(tRun, bubble.X + 38, bubble.Y + 7 + hRun.H, Th.Text);
+            float bodyY = bubble.Y + 8 + hRun.H;
+            if (hasInlineTs && tRun.Lines <= 1)
+            {
+                // Render inline timestamp pill right inside the comment line instead of duplicating it in the header
+                string full = showMk.Text ?? "";
+                string pre = full[..tsMatch.Index];
+                string ts = tsMatch.Value;
+                string post = full[(tsMatch.Index + tsMatch.Length)..];
+                float cx = bubble.X + 38;
+                float maxBodyR = bubble.Right - 8;
+                if (pre.Length > 0)
+                {
+                    var preRun = Gfx.Text(pre, 11.5f, 400, MathF.Max(10, maxBodyR - cx), 1);
+                    Gfx.Draw(preRun, cx, bodyY, Th.Text);
+                    cx += preRun.W + 2;
+                }
+                var tsRun = Gfx.Text(ts, 10.5f, 700);
+                var pillR = new R(cx, bodyY - 1f, tsRun.W + 10f, tsRun.H + 3f);
+                Gfx.Fill(pillR, Gfx.Fade(Th.Brand, 0.30f), pillR.H * 0.5f);
+                Gfx.Draw(tsRun, pillR.X + 5f, pillR.Y + 1.5f, 0xFFFFFFFF);
+                cx = pillR.Right + 3;
+                if (post.Length > 0 && cx < maxBodyR - 12)
+                {
+                    var postRun = Gfx.Text(post.TrimStart(), 11.5f, 400, MathF.Max(10, maxBodyR - cx), 1);
+                    Gfx.Draw(postRun, cx, bodyY, Th.Text);
+                }
+            }
+            else
+            {
+                Gfx.Draw(tRun, bubble.X + 38, bodyY, Th.Text);
+            }
         }
         else if (overWave && duration > 0)
         {
