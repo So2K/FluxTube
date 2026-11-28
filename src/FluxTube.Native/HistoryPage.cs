@@ -241,7 +241,8 @@ public sealed class HistoryPage : IPage
             if (overChannel)
             {
                 Gfx.Fill(new R(cr.X, cr.Bottom - 1.5f, cr.W, 1), Th.Sub);
-                if (UI.Click(UI.Id(id, 9), cr)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Channel));
+                if (UI.MiddleClick(cr)) Shell.OpenInNewTab("channel", v.ChannelId!, v.Channel);
+                else if (UI.Click(UI.Id(id, 9), cr)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Channel));
             }
         }
         if (over) _hover.Over(v);

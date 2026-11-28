@@ -154,7 +154,8 @@ public static class Cards
             Gfx.Draw(nr, x + (cardW - nr.W) / 2, y + thumbH + 8, Th.Text);
             var mr = Gfx.Text(v.Meta, 12.5f, 400, cardW, 1);
             Gfx.Draw(mr, x + (cardW - mr.W) / 2, y + thumbH + 12 + nr.H, Th.Sub);
-            if (UI.Click(id, card, playSfx: false)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Title));
+            if (UI.MiddleClick(card)) Shell.OpenInNewTab("channel", v.ChannelId!, v.Title);
+            else if (UI.Click(id, card, playSfx: false)) App.Post(() => Shell.OpenChannel(v.ChannelId!, v.Title));
             return;
         }
         if (v.PlaylistId != null)
@@ -3007,8 +3008,14 @@ public sealed class WatchPage : IPage
         Gfx.DrawDancingText(chName, nameRect.X, nameRect.Y, 15, UI.Hover(nameRect) && chId != null ? Th.Brand : Th.Text, 600, chMaxW, 1, amp: 0.85f, accentMixColor: Th.Brand);
         Cards.CopyMenu(nameRect, chName, L.T("Копировать название канала", "Copy channel name"));
         if (subText.Length > 0) Gfx.Draw(subText, x0 + 54, y + 24, 12, Th.Sub, 400, chMaxW);
-        if (chId != null && (UI.Click(UI.Id("ch", _infoScroll), nameRect, playSfx: false) || UI.Click(UI.Id("chav", _infoScroll), new R(x0, y + 1, 42, 42), playSfx: false)))
-            App.Post(() => Shell.OpenChannel(chId, chName));
+        var chBlockR = new R(x0, y + 1, 54 + MathF.Max(nameRun.W, MathF.Min(chMaxW, subFullW)), 42);
+        if (chId != null)
+        {
+            if (UI.MiddleClick(chBlockR))
+                Shell.OpenInNewTab("channel", chId, chName);
+            else if (UI.Click(UI.Id("ch", _infoScroll), nameRect, playSfx: false) || UI.Click(UI.Id("chav", _infoScroll), chAvR, playSfx: false))
+                App.Post(() => Shell.OpenChannel(chId, chName));
+        }
         if (chId != null && subBtnW > 0)
         {
             float subX = Gfx.Snap(x0 + 54 + MathF.Max(nameRun.W, MathF.Min(chMaxW, subFullW)) + 14);

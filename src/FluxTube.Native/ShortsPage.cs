@@ -797,10 +797,11 @@ public sealed class ShortsPage : IPage
             Gfx.Draw(ir, railAv.X + (avSize - ir.W) / 2, railAv.Y + (avSize - ir.H) / 2, Th.Sub);
         }
         Gfx.Stroke(railAv, UI.Hover(railAv) && v.ChannelId != null ? Th.Brand : Th.A(0.22f), 10, 1.3f);
-        if (v.ChannelId != null && UI.Click(UI.Id("shorts:rav"), railAv, playSfx: false))
+        if (v.ChannelId != null)
         {
             var cid = v.ChannelId; var cn = v.Channel;
-            App.Post(() => Shell.OpenChannel(cid, cn));
+            if (UI.MiddleClick(railAv)) Shell.OpenInNewTab("channel", cid, cn);
+            else if (UI.Click(UI.Id("shorts:rav"), railAv, playSfx: false)) App.Post(() => Shell.OpenChannel(cid, cn));
         }
 
         // Top-right quick Up/Down step arrows above the rail when panel is collapsed
@@ -828,10 +829,11 @@ public sealed class ShortsPage : IPage
                     var cnr = Gfx.Text(cname, 15, 600, tw);
                     var cnrRect = new R(tx, ty, cnr.W, cnr.H);
                     Gfx.Draw(cnr, cnrRect.X, cnrRect.Y, UI.Hover(cnrRect) && v.ChannelId != null ? Th.Brand : Th.Text);
-                    if (v.ChannelId != null && UI.Click(UI.Id("shorts:cch"), cnrRect, playSfx: false))
+                    if (v.ChannelId != null)
                     {
                         var cid = v.ChannelId; var cn = cname;
-                        App.Post(() => Shell.OpenChannel(cid, cn));
+                        if (UI.MiddleClick(cnrRect)) Shell.OpenInNewTab("channel", cid, cn);
+                        else if (UI.Click(UI.Id("shorts:cch"), cnrRect, playSfx: false)) App.Post(() => Shell.OpenChannel(cid, cn));
                     }
                     if (v.Title.Length > 0)
                     {
@@ -888,10 +890,13 @@ public sealed class ShortsPage : IPage
         var nameR = new R(x + 50, y + 3, nr.W, nr.H);
         Gfx.Draw(nr, nameR.X, nameR.Y, UI.Hover(nameR) && v.ChannelId != null ? Th.Brand : Th.Text);
         Gfx.Draw(v.ChannelId != null ? L.T("Перейти на канал", "Open channel") : "YouTube Shorts", x + 50, y + 22, 11.5f, Th.Dim, 400, MathF.Max(40, w - 50 - badgeR.W - 40));
-        if (v.ChannelId != null && (UI.Click(UI.Id("shorts:ch"), new R(x + 50, y + 2, nr.W + 20, 36), playSfx: false) || UI.Click(UI.Id("shorts:av"), avR, playSfx: false)))
+        var hdrChR = new R(x, y, 50 + nr.W + 20, 40);
+        if (v.ChannelId != null)
         {
             var cid = v.ChannelId; var cn = name;
-            App.Post(() => Shell.OpenChannel(cid, cn));
+            if (UI.MiddleClick(hdrChR)) Shell.OpenInNewTab("channel", cid, cn);
+            else if (UI.Click(UI.Id("shorts:ch"), new R(x + 50, y + 2, nr.W + 20, 36), playSfx: false) || UI.Click(UI.Id("shorts:av"), avR, playSfx: false))
+                App.Post(() => Shell.OpenChannel(cid, cn));
         }
         y += 50;
 

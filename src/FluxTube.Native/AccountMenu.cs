@@ -373,7 +373,8 @@ public static class AccountMenu
                 var over = UI.Hover(lr);
                 Gfx.Draw(link, lr.X, lr.Y, Gfx.Fade(over ? Gfx.Mix(Th.Brand, Th.Text, 0.3f) : Th.Brand, a));
                 if (over) Gfx.Fill(new R(lr.X, lr.Bottom - 1, lr.W, 1), Th.Brand);
-                if (UI.Click(UI.Id("am:chan"), lr)) { var id = acc.ChannelId; var n = acc.Name; Close(); App.Post(() => Shell.OpenChannel(id, n)); }
+                if (UI.MiddleClick(lr)) { var id = acc.ChannelId; var n = acc.Name; Close(); Shell.OpenInNewTab("channel", id, n); }
+                else if (UI.Click(UI.Id("am:chan"), lr)) { var id = acc.ChannelId; var n = acc.Name; Close(); App.Post(() => Shell.OpenChannel(id, n)); }
             }
             y += 80;
         }
